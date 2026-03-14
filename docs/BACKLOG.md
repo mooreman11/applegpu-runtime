@@ -20,6 +20,7 @@ Tracks what needs to be built, ordered by priority. Derived from the original sp
 - [x] **LazyRuntime** — unified storage for materialized tensors and pending graph
 - [x] **Tensor cleanup** — `gpu.destroy()` with dependency validation
 - [x] **Explicit eval** — `gpu.eval()` for manual materialization
+- [x] **GpuTensor class** — PyO3 class with operators (+,-,*,/,@), methods, auto-cleanup via Drop
 
 ## In Progress
 
@@ -34,8 +35,7 @@ _(nothing currently)_
 ### Phase 3b: Additional Operations
 - [ ] **Attention** — fused attention kernel (Q, K, V → output)
 
-### Phase 5: Memory Management Improvements
-- [ ] **Automatic cleanup** — PyO3 class wrapper with Drop semantics instead of global HashMap
+### Phase 5b: Resource Limits
 - [ ] **Resource limits** — max tensor size, max GPU memory, per-container rate limits
 
 ### Phase 6: Multi-Container Scheduler

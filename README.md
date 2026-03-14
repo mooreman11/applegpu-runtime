@@ -38,26 +38,33 @@ gpu.init_backend()
 a = gpu.tensor([1.0, 2.0, 3.0, 4.0], shape=[2, 2])
 b = gpu.tensor([5.0, 6.0, 7.0, 8.0], shape=[2, 2])
 
-# Ops are lazy — they build a computation graph, no GPU work yet
-c = gpu.add(a, b)
-d = gpu.matmul(c, b)
-e = gpu.relu(d)
+# Operators are lazy — they build a computation graph
+c = a + b              # no GPU work yet
+d = a @ b              # still just graph nodes
+e = (c * a).relu()     # chain freely
 
 # Computation happens on materialization
-gpu.to_list(e)     # evaluates the entire chain on the GPU
-gpu.shape(e)       # [2, 2] — works even before eval
+e.to_list()            # evaluates the entire chain on the GPU
+e.shape                # [2, 2]
+repr(e)                # GpuTensor(id=..., shape=[2, 2], materialized)
 
-# Explicit evaluation and cleanup
-gpu.eval(c)        # materialize a specific tensor
-gpu.destroy(a)     # free GPU memory
-```
+# All Python operators work
+c = a + b              # element-wise add
+c = a - b              # element-wise sub
+c = a * b              # element-wise mul
+c = a / b              # element-wise div
+c = a @ b              # matrix multiply
+c = -a                 # negation
 
-### All Operations
+# Methods for unary ops
+c = a.relu()
+c = a.exp()
+c = a.log()
+c = a.sqrt()
 
-```python
-# Binary: add, sub, mul, div, matmul
-# Unary: neg, relu, exp, log, sqrt
-# Lifecycle: tensor, eval, to_list, shape, destroy
+# Lifecycle
+c.eval()               # explicit materialization
+gpu.destroy(c)         # explicit cleanup (or let GC handle it)
 ```
 
 ## Development
@@ -74,11 +81,10 @@ make test-python   # uv run pytest -v
 
 Active development. Current capabilities:
 
+- **GpuTensor class** with Python operators (`+`, `-`, `*`, `/`, `@`, unary `-`) and auto-cleanup
 - **Lazy execution** — ops build a DAG, computation deferred until materialization
 - Topological sort with cycle detection for graph evaluation
-- `gpu.eval()` for explicit materialization, `gpu.to_list()` auto-evaluates
-- `gpu.destroy()` for memory cleanup with dependency validation
 - 10 GPU operations: add, sub, mul, div, neg, relu, exp, log, sqrt, matmul
 - KernelRegistry with Arc-based pipeline caching (lock-free GPU dispatch)
 - Metal buffer management with zero-copy shared memory (`storageModeShared`)
-- 79 tests passing across all layers (39 Rust + 11 Swift + 29 Python)
+- 93 tests passing across all layers (39 Rust + 11 Swift + 43 Python)
