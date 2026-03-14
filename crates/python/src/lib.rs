@@ -3,27 +3,43 @@ use pyo3::exceptions::PyValueError;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use applegpu_core::compute::ComputePipeline;
 use applegpu_core::tensor::Tensor;
 
 /// Global tensor storage. Tensors are stored by ID and accessed by opaque handle.
 static TENSORS: once_cell::sync::Lazy<Mutex<HashMap<u64, Tensor>>> =
     once_cell::sync::Lazy::new(|| Mutex::new(HashMap::new()));
 
-/// Global add pipeline (lazy-initialized).
-static ADD_PIPELINE: once_cell::sync::Lazy<Mutex<Option<ComputePipeline>>> =
-    once_cell::sync::Lazy::new(|| Mutex::new(None));
+/// Helper: run a binary op on two tensor IDs.
+fn binary_op_py(a_id: u64, b_id: u64, op: fn(&applegpu_core::device::Device, &Tensor, &Tensor) -> applegpu_core::error::Result<Tensor>) -> PyResult<u64> {
+    let runtime = applegpu_core::backend::get_runtime()
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-fn get_or_create_add_pipeline() -> PyResult<()> {
-    let mut pipeline = ADD_PIPELINE.lock().unwrap();
-    if pipeline.is_none() {
-        let runtime = applegpu_core::backend::get_runtime()
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let p = ComputePipeline::add(&runtime.device)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        *pipeline = Some(p);
-    }
-    Ok(())
+    let out = {
+        let tensors = TENSORS.lock().unwrap();
+        let a = tensors.get(&a_id).ok_or_else(|| PyValueError::new_err(format!("Tensor {} not found", a_id)))?;
+        let b = tensors.get(&b_id).ok_or_else(|| PyValueError::new_err(format!("Tensor {} not found", b_id)))?;
+        op(&runtime.device, a, b).map_err(|e| PyValueError::new_err(e.to_string()))?
+    };
+
+    let id = out.meta.id;
+    TENSORS.lock().unwrap().insert(id, out);
+    Ok(id)
+}
+
+/// Helper: run a unary op on a tensor ID.
+fn unary_op_py(input_id: u64, op: fn(&applegpu_core::device::Device, &Tensor) -> applegpu_core::error::Result<Tensor>) -> PyResult<u64> {
+    let runtime = applegpu_core::backend::get_runtime()
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    let out = {
+        let tensors = TENSORS.lock().unwrap();
+        let input = tensors.get(&input_id).ok_or_else(|| PyValueError::new_err(format!("Tensor {} not found", input_id)))?;
+        op(&runtime.device, input).map_err(|e| PyValueError::new_err(e.to_string()))?
+    };
+
+    let id = out.meta.id;
+    TENSORS.lock().unwrap().insert(id, out);
+    Ok(id)
 }
 
 /// Returns the library version.
@@ -77,7 +93,6 @@ fn dtype_size(name: &str) -> PyResult<usize> {
 }
 
 /// Create a tensor from a list of f32 values and a shape.
-/// Returns an opaque tensor handle (u64 ID).
 #[pyfunction]
 fn tensor(data: Vec<f32>, shape: Vec<usize>) -> PyResult<u64> {
     let runtime = applegpu_core::backend::get_runtime()
@@ -109,56 +124,37 @@ fn shape(tensor_id: u64) -> PyResult<Vec<usize>> {
     Ok(t.meta.shape.dims().to_vec())
 }
 
-/// Element-wise add: c = a + b. Returns tensor handle for result.
+// Binary ops
 #[pyfunction]
-fn add(a_id: u64, b_id: u64) -> PyResult<u64> {
-    get_or_create_add_pipeline()?;
+fn add(a_id: u64, b_id: u64) -> PyResult<u64> { binary_op_py(a_id, b_id, applegpu_core::ops::add) }
 
-    let runtime = applegpu_core::backend::get_runtime()
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+#[pyfunction]
+fn sub(a_id: u64, b_id: u64) -> PyResult<u64> { binary_op_py(a_id, b_id, applegpu_core::ops::sub) }
 
-    // Step 1: Lock TENSORS briefly to validate inputs and extract shape.
-    let (out_shape, numel) = {
-        let tensors = TENSORS.lock().unwrap();
-        let a = tensors
-            .get(&a_id)
-            .ok_or_else(|| PyValueError::new_err(format!("Tensor {} not found", a_id)))?;
-        let b = tensors
-            .get(&b_id)
-            .ok_or_else(|| PyValueError::new_err(format!("Tensor {} not found", b_id)))?;
+#[pyfunction]
+fn mul(a_id: u64, b_id: u64) -> PyResult<u64> { binary_op_py(a_id, b_id, applegpu_core::ops::mul) }
 
-        if a.meta.shape != b.meta.shape {
-            return Err(PyValueError::new_err(format!(
-                "Shape mismatch: {:?} vs {:?}",
-                a.meta.shape.dims(),
-                b.meta.shape.dims()
-            )));
-        }
-        (a.meta.shape.dims().to_vec(), a.numel())
-    }; // TENSORS lock dropped here
+#[pyfunction]
+fn div(a_id: u64, b_id: u64) -> PyResult<u64> { binary_op_py(a_id, b_id, applegpu_core::ops::div) }
 
-    let out = Tensor::empty_f32(&runtime.device, out_shape)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+#[pyfunction]
+fn matmul(a_id: u64, b_id: u64) -> PyResult<u64> { binary_op_py(a_id, b_id, applegpu_core::ops::matmul) }
 
-    // Step 2: Lock TENSORS to get buffer refs, then ADD_PIPELINE to dispatch.
-    // Consistent lock ordering: TENSORS first, then ADD_PIPELINE.
-    {
-        let tensors = TENSORS.lock().unwrap();
-        let a = tensors.get(&a_id).unwrap();
-        let b = tensors.get(&b_id).unwrap();
+// Unary ops
+#[pyfunction]
+fn neg(input_id: u64) -> PyResult<u64> { unary_op_py(input_id, applegpu_core::ops::neg) }
 
-        let pipeline = ADD_PIPELINE.lock().unwrap();
-        let pipeline = pipeline.as_ref().unwrap();
-        pipeline
-            .dispatch_elementwise(&a.buffer, &b.buffer, &out.buffer, numel)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    } // Both locks dropped here
+#[pyfunction]
+fn relu(input_id: u64) -> PyResult<u64> { unary_op_py(input_id, applegpu_core::ops::relu) }
 
-    // Step 3: Insert result.
-    let id = out.meta.id;
-    TENSORS.lock().unwrap().insert(id, out);
-    Ok(id)
-}
+#[pyfunction]
+fn exp(input_id: u64) -> PyResult<u64> { unary_op_py(input_id, applegpu_core::ops::exp) }
+
+#[pyfunction]
+fn log(input_id: u64) -> PyResult<u64> { unary_op_py(input_id, applegpu_core::ops::log) }
+
+#[pyfunction]
+fn sqrt(input_id: u64) -> PyResult<u64> { unary_op_py(input_id, applegpu_core::ops::sqrt) }
 
 /// The Python module definition.
 #[pymodule]
@@ -171,5 +167,14 @@ fn applegpu_runtime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(to_list, m)?)?;
     m.add_function(wrap_pyfunction!(shape, m)?)?;
     m.add_function(wrap_pyfunction!(add, m)?)?;
+    m.add_function(wrap_pyfunction!(sub, m)?)?;
+    m.add_function(wrap_pyfunction!(mul, m)?)?;
+    m.add_function(wrap_pyfunction!(div, m)?)?;
+    m.add_function(wrap_pyfunction!(neg, m)?)?;
+    m.add_function(wrap_pyfunction!(relu, m)?)?;
+    m.add_function(wrap_pyfunction!(exp, m)?)?;
+    m.add_function(wrap_pyfunction!(log, m)?)?;
+    m.add_function(wrap_pyfunction!(sqrt, m)?)?;
+    m.add_function(wrap_pyfunction!(matmul, m)?)?;
     Ok(())
 }

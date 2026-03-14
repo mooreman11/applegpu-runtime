@@ -9,6 +9,15 @@ from applegpu_runtime.applegpu_runtime import (
     to_list,
     shape,
     add,
+    sub,
+    mul,
+    div,
+    neg,
+    relu,
+    exp,
+    log,
+    sqrt,
+    matmul,
 )
 
 __version__ = version()
@@ -21,4 +30,13 @@ __all__ = [
     "to_list",
     "shape",
     "add",
+    "sub",
+    "mul",
+    "div",
+    "neg",
+    "relu",
+    "exp",
+    "log",
+    "sqrt",
+    "matmul",
 ]
