@@ -19,7 +19,7 @@ Swift Compat Layer ←  Metal, AVF (Apple Virtualization Framework)
 - **MLX-native** (default) — direct Metal GPU execution, maximum performance
 - **AVF VM** — VM-isolated execution with snapshots, DDP, and multi-node simulation
 
-## Quick Start
+## Install
 
 ```bash
 # Prerequisites: Rust, Swift (Xcode), uv
@@ -27,7 +27,12 @@ make setup
 
 # Run all tests
 make test
+
+# Install as editable Python package
+uv run maturin develop
 ```
+
+## Quick Start
 
 ```python
 import applegpu_runtime as gpu
@@ -79,7 +84,7 @@ make test-python   # uv run pytest -v
 
 ## Status
 
-Active development. Current capabilities:
+v0.1.0. Current capabilities:
 
 - **Two backends** — MLX-native (direct Metal) and VM (IPC to GPU service process)
 - **VM backend** — graph serialization over Unix sockets to a standalone `gpu-service` binary
@@ -94,6 +99,33 @@ Active development. Current capabilities:
 - **Lazy execution** — ops build a DAG, computation deferred until materialization
 - 14 GPU operations: add, sub, mul, div, neg, relu, exp, log, sqrt, matmul, softmax, transpose, scalar_mul, attention
 - 204 tests passing across all layers (119 Rust + 13 Swift + 85 Python)
+
+### NumPy & PyTorch Interop
+
+```python
+import numpy as np
+import torch
+import applegpu_runtime as gpu
+
+gpu.init_backend()
+
+# NumPy → GPU → NumPy
+arr = np.random.randn(128, 64).astype(np.float32)
+t = gpu.from_numpy(arr)
+result = t.to_numpy()  # shape preserved
+
+# PyTorch → GPU → PyTorch
+x = torch.randn(128, 64)
+t = gpu.from_torch(x)
+result = t.to_torch()  # returns torch.Tensor
+
+# Mix: PyTorch data, GPU compute, NumPy output
+q = gpu.from_torch(torch.randn(32, 64))
+k = gpu.from_torch(torch.randn(32, 64))
+v = gpu.from_torch(torch.randn(32, 64))
+out = gpu.attention(q, k, v)
+result = out.to_numpy()  # [32, 64] attention output
+```
 
 ### Multi-Container Scheduler
 

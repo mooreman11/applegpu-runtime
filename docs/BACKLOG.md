@@ -42,13 +42,15 @@ _(nothing currently)_
 
 ## Up Next
 
-### Phase 8: Framework Adapters (continued)
-- [ ] **Transformers adapter** — drop-in acceleration for HuggingFace models
-
-### Ship
+### Ship v0.1.0
 - [ ] **Release prep** — final test pass, documentation polish, packaging
 
 ## Post-Ship Backlog
+
+### Transformer Support (requires new ops first)
+- [ ] **New ops: layernorm, embedding, gather, GELU, conv1d** — prerequisite kernels for transformer models
+- [ ] **Transformers adapter** — HuggingFace weight loading + custom inference, depends on new ops
+- [ ] **Full model inference** — end-to-end transformer forward pass on applegpu_runtime
 
 ### Framework Improvements
 - [ ] **Zero-copy from_numpy** — Metal `makeBuffer(bytesNoCopy:)` Swift FFI, page alignment, GC pinning, three-layer work
