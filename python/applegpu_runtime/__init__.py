@@ -37,6 +37,9 @@ from applegpu_runtime.applegpu_runtime import (
     container_usage,
     global_usage,
     queue_depth,
+    pool_stats,
+    pool_drain,
+    set_pool_watermark,
 )
 
 __version__ = version()
@@ -77,4 +80,7 @@ __all__ = [
     "container_usage",
     "global_usage",
     "queue_depth",
+    "pool_stats",
+    "pool_drain",
+    "set_pool_watermark",
 ]

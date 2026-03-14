@@ -458,6 +458,32 @@ fn queue_depth() -> PyResult<usize> {
     Ok(rt.scheduler.queue_depth())
 }
 
+#[pyfunction]
+fn pool_stats() -> PyResult<HashMap<String, usize>> {
+    let rt = RUNTIME_LAZY.lock().unwrap();
+    let stats = rt.pool.stats();
+    let mut map = HashMap::new();
+    map.insert("hits".to_string(), stats.hits as usize);
+    map.insert("misses".to_string(), stats.misses as usize);
+    map.insert("pooled_bytes".to_string(), stats.pooled_bytes);
+    map.insert("bucket_count".to_string(), stats.bucket_count);
+    Ok(map)
+}
+
+#[pyfunction]
+fn pool_drain() -> PyResult<()> {
+    let mut rt = RUNTIME_LAZY.lock().unwrap();
+    rt.pool.drain();
+    Ok(())
+}
+
+#[pyfunction]
+fn set_pool_watermark(mb: usize) -> PyResult<()> {
+    let mut rt = RUNTIME_LAZY.lock().unwrap();
+    rt.pool.set_max_pooled_bytes(mb * 1024 * 1024);
+    Ok(())
+}
+
 #[pymodule]
 fn applegpu_runtime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<GpuTensor>()?;
@@ -496,5 +522,8 @@ fn applegpu_runtime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(container_usage, m)?)?;
     m.add_function(wrap_pyfunction!(global_usage, m)?)?;
     m.add_function(wrap_pyfunction!(queue_depth, m)?)?;
+    m.add_function(wrap_pyfunction!(pool_stats, m)?)?;
+    m.add_function(wrap_pyfunction!(pool_drain, m)?)?;
+    m.add_function(wrap_pyfunction!(set_pool_watermark, m)?)?;
     Ok(())
 }
