@@ -85,9 +85,10 @@ Active development. Current capabilities:
 - **VM backend** — graph serialization over Unix sockets to a standalone `gpu-service` binary
 - **Kernel fusion** — auto-detects element-wise chains, generates fused MSL kernels at runtime
 - **GpuTensor class** with Python operators (`+`, `-`, `*`, `/`, `@`, unary `-`) and auto-cleanup
+- **Scaled dot-product attention** — `gpu.attention(Q, K, V)` with proper 1/sqrt(d_k) scaling
 - **Lazy execution** — ops build a DAG, computation deferred until materialization
-- 10 GPU operations: add, sub, mul, div, neg, relu, exp, log, sqrt, matmul
-- 112 tests passing across all layers (55 Rust + 11 Swift + 46 Python)
+- 14 GPU operations: add, sub, mul, div, neg, relu, exp, log, sqrt, matmul, softmax, transpose, scalar_mul, attention
+- 123 tests passing across all layers (58 Rust + 13 Swift + 52 Python)
 
 ### VM Backend Usage
 

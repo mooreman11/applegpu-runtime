@@ -26,6 +26,10 @@ Tracks what needs to be built, ordered by priority. Derived from the original sp
 - [x] **IPC layer** — Unix socket client for remote GPU evaluation
 - [x] **GPU service binary** — standalone Metal execution service (`gpu-service`)
 - [x] **VM backend routing** — `APPLEGPU_BACKEND=vm` routes eval through IPC
+- [x] **Softmax** — numerically stable softmax along last dimension (reduction kernel)
+- [x] **Transpose** — 2D matrix transpose kernel
+- [x] **ScalarMul** — element-wise scalar multiplication (carries scale in graph node)
+- [x] **Attention** — scaled dot-product attention: `softmax(Q @ K^T / sqrt(d_k)) @ V`
 
 ## In Progress
 
@@ -33,12 +37,17 @@ _(nothing currently)_
 
 ## Up Next
 
+### Phase 5b: Resource Limits
+- [ ] **Resource limits** — max tensor size, max GPU memory, per-container rate limits
+
+### Phase 6: Multi-Container Scheduler
+- [ ] **Priority queues** — per-container/VM scheduling
+- [ ] **Dynamic batching** — batch ops across containers for better GPU utilization
+- [ ] **Fairness enforcement** — memory limits and fair execution
+
 ### Phase 7b: AVF VM Integration
 - [ ] **AVF VM creation** — Apple Virtualization Framework VM lifecycle management
 - [ ] **VM isolation** — snapshots, DDP, multi-node simulation
-
-### Phase 3b: Additional Operations
-- [ ] **Attention** — fused attention kernel (Q, K, V → output)
 
 ### Graph Optimizations
 - [ ] **Persistent memory pools** — reduce GPU allocation overhead via buffer reuse
