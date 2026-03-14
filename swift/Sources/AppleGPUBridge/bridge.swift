@@ -4,16 +4,21 @@ import Metal
 /// Internal class wrapping MTLDevice.
 final class GPUDevice {
     let device: MTLDevice
-    private var nameCString: [CChar]
+    private let nameCString: UnsafeMutablePointer<CChar>
 
     init?() {
         guard let device = MTLCreateSystemDefaultDevice() else { return nil }
         self.device = device
-        self.nameCString = Array(device.name.utf8CString)
+        let name = device.name
+        self.nameCString = strdup(name)!
+    }
+
+    deinit {
+        free(nameCString)
     }
 
     var namePtr: UnsafePointer<CChar> {
-        nameCString.withUnsafeBufferPointer { $0.baseAddress! }
+        UnsafePointer(nameCString)
     }
 }
 
