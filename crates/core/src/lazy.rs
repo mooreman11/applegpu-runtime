@@ -5,6 +5,7 @@ use crate::device::Device;
 use crate::error::{GpuError, Result};
 use crate::graph::{Graph, OpNode};
 use crate::limits::ResourceLimits;
+use crate::pool::BufferPool;
 use crate::scheduler::{ContainerId, Scheduler};
 use crate::tensor::Tensor;
 
@@ -20,6 +21,8 @@ pub struct LazyRuntime {
     graph: Graph,
     /// Multi-container scheduler (single resource authority).
     pub scheduler: Scheduler,
+    /// Buffer pool for reusing GPU allocations.
+    pub pool: BufferPool,
 }
 
 impl LazyRuntime {
@@ -28,6 +31,7 @@ impl LazyRuntime {
             tensors: HashMap::new(),
             graph: Graph::new(),
             scheduler: Scheduler::new(ResourceLimits::from_env()),
+            pool: BufferPool::new(256 * 1024 * 1024),
         }
     }
 
@@ -135,16 +139,21 @@ impl LazyRuntime {
     }
 
     /// Execute a single graph node, producing a materialized Tensor.
-    fn execute_node(&self, device: &Device, node: &OpNode) -> Result<Tensor> {
+    /// Acquires output buffer from pool FIRST (mutable borrow on pool),
+    /// then reads input tensors (shared borrow on tensors) to satisfy the borrow checker.
+    fn execute_node(&mut self, device: &Device, node: &OpNode) -> Result<Tensor> {
+        let out_size = node.out_shape.numel() * node.out_dtype.size_bytes();
+
         // Handle fused kernels first
         if let crate::graph::OpKind::FusedElementwise { ref kernel_source, ref function_name } = node.op {
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), out_buf);
             let input_tensors: Vec<&Tensor> = node.inputs.iter()
                 .map(|&id| self.get_tensor(id))
                 .collect::<Result<Vec<_>>>()?;
             let input_buffers: Vec<&crate::buffer::Buffer> = input_tensors.iter()
                 .map(|t| &t.buffer)
                 .collect();
-            let out = Tensor::empty_f32(device, node.out_shape.dims().to_vec())?;
             let numel = input_tensors[0].numel();
             REGISTRY.dispatch_fused(
                 device,
@@ -158,33 +167,37 @@ impl LazyRuntime {
         }
 
         if node.op.is_softmax() {
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), out_buf);
             let input = self.get_tensor(node.inputs[0])?;
             let dims = input.meta.shape.dims();
             let (rows, cols) = (dims[0], dims[1]);
-            let out = Tensor::empty_f32(device, node.out_shape.dims().to_vec())?;
             REGISTRY.dispatch_softmax(device, &input.buffer, &out.buffer, rows, cols)?;
             return Ok(out);
         }
 
         if node.op.is_transpose() {
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), out_buf);
             let input = self.get_tensor(node.inputs[0])?;
             let dims = input.meta.shape.dims();
             let (rows, cols) = (dims[0], dims[1]);
-            let out = Tensor::empty_f32(device, node.out_shape.dims().to_vec())?;
             REGISTRY.dispatch_transpose(device, &input.buffer, &out.buffer, rows, cols)?;
             return Ok(out);
         }
 
         if let crate::graph::OpKind::ScalarMul(scale) = node.op {
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), out_buf);
             let input = self.get_tensor(node.inputs[0])?;
-            let out = Tensor::empty_f32(device, node.out_shape.dims().to_vec())?;
             REGISTRY.dispatch_scalar_mul(device, &input.buffer, &out.buffer, scale, input.numel())?;
             return Ok(out);
         }
 
         if node.op.is_unary() {
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), out_buf);
             let input = self.get_tensor(node.inputs[0])?;
-            let out = Tensor::empty_f32(device, node.out_shape.dims().to_vec())?;
             REGISTRY.dispatch_unary(
                 device,
                 node.op.kernel_name(),
@@ -194,20 +207,22 @@ impl LazyRuntime {
             )?;
             Ok(out)
         } else if node.op.is_matmul() {
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), out_buf);
             let a = self.get_tensor(node.inputs[0])?;
             let b = self.get_tensor(node.inputs[1])?;
             let a_dims = a.meta.shape.dims();
             let b_dims = b.meta.shape.dims();
             let (m, k) = (a_dims[0], a_dims[1]);
             let n = b_dims[1];
-            let out = Tensor::empty_f32(device, node.out_shape.dims().to_vec())?;
             REGISTRY.dispatch_matmul(device, &a.buffer, &b.buffer, &out.buffer, m, n, k)?;
             Ok(out)
         } else {
             // Binary element-wise
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), out_buf);
             let a = self.get_tensor(node.inputs[0])?;
             let b = self.get_tensor(node.inputs[1])?;
-            let out = Tensor::empty_f32(device, node.out_shape.dims().to_vec())?;
             REGISTRY.dispatch_binary(
                 device,
                 node.op.kernel_name(),
@@ -320,6 +335,7 @@ impl LazyRuntime {
         }
         if let Some(tensor) = self.tensors.remove(&id) {
             self.scheduler.free_tensor(id, tensor.meta.size_bytes());
+            self.pool.release(tensor.into_buffer());
         }
         self.graph.remove_node(id);
         Ok(())
@@ -335,11 +351,14 @@ impl LazyRuntime {
 
     pub fn set_limits(&mut self, limits: ResourceLimits) {
         self.scheduler.update_global_limits(limits);
+        self.pool.drain();
     }
 
     /// Remove a tensor without scheduler tracking (for deregister cleanup).
     pub fn remove_tensor_raw(&mut self, id: u64) {
-        self.tensors.remove(&id);
+        if let Some(tensor) = self.tensors.remove(&id) {
+            self.pool.release(tensor.into_buffer());
+        }
         self.graph.remove_node(id);
     }
 
