@@ -1,0 +1,12 @@
+/target/
+/swift/.build/
+/python/target/
+*.egg-info/
+__pycache__/
+*.pyc
+.DS_Store
+*.o
+*.a
+*.dylib
+*.so
+.venv/

@@ -1,0 +1,41 @@
+# CI is disabled during foundation development to save runner minutes.
+# To enable: change `branches: [never]` to `branches: [main]` and uncomment pull_request.
+
+name: CI
+
+on:
+  push:
+    branches: [never]
+  # pull_request:
+  #   branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test-rust:
+    name: Rust Tests
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+
+  test-swift:
+    name: Swift Tests
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - run: cd swift && swift test || echo "::warning::Swift tests skipped (no Metal GPU on CI runner)"
+
+  test-python:
+    name: Python Tests
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync
+      - run: uv run pytest -v

@@ -1,0 +1,20 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "applegpu_runtime"
+version = "0.1.0"
+requires-python = ">=3.10"
+description = "GPU runtime for Apple Silicon with MLX and AVF backends"
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
+
+[tool.maturin]
+manifest-path = "crates/python/Cargo.toml"
+python-source = "python"
+features = ["pyo3/extension-module"]
+
+[tool.pytest.ini_options]
+testpaths = ["python/tests"]

@@ -1,0 +1,11 @@
+[package]
+name = "applegpu-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+
+[build-dependencies]
+
+[lib]
+name = "applegpu_core"
