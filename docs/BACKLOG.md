@@ -47,9 +47,23 @@ Tracks what needs to be built, ordered by priority. Derived from the original sp
 - [x] **Dtype inference** — ops infer output dtype from inputs, mixed-dtype errors
 - [x] **Dtype-aware fusion** — fused kernels emit `half` types for f16 chains
 
-### 2. Multiple Metal command queues
-_Biggest architectural unlock. Independent graph branches execute in parallel on the same GPU. Foundation for async eval and fine-grained locking._
-- [ ] **Concurrent command queue dispatch** — identify independent subgraphs, dispatch to separate Metal command queues
+### 2. Concurrency (phased)
+_Eliminate GPU idle time between ops, then enable true parallel execution._
+
+**Phase 2a: Command buffer batching** _(in progress)_
+- [ ] **Shared device-level command queue** — single MTLCommandQueue per device, not per pipeline
+- [ ] **Non-blocking dispatch** — remove waitUntilCompleted() from individual ops, wait once at end of eval
+- [ ] **Spec:** `docs/superpowers/specs/2026-03-14-command-buffer-batching-design.md`
+
+**Phase 2b: Single command buffer** _(future)_
+- [ ] **Encode all ops into one MTLCommandBuffer** — reduce CB creation overhead
+- [ ] **begin_batch/end_batch FFI** — new Swift/Rust API for batch encoding
+
+**Phase 2c: Concurrent queues** _(future)_
+- [ ] **Dependency analysis** — identify independent subgraphs in the topo-sorted order
+- [ ] **Concurrent command queue dispatch** — dispatch independent subgraphs to separate Metal queues
+
+**Phase 2d: Async eval + fine-grained locking** _(future)_
 - [ ] **Async eval** — `gpu.eval_async(tensor)` returns a future/handle, non-blocking Python
 - [ ] **Fine-grained locking** — split `Mutex<LazyRuntime>` into per-component locks (graph, tensor store, scheduler, pool)
 
