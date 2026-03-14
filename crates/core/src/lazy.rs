@@ -71,10 +71,13 @@ impl LazyRuntime {
             return Ok(()); // already done
         }
 
-        let order = self.graph.topo_sort(id)?;
+        let mut order = self.graph.topo_sort(id)?;
         if order.is_empty() {
             return Err(GpuError::GraphError(format!("Tensor {} not found", id)));
         }
+
+        // Run fusion optimization pass
+        order = crate::fusion::optimize(&mut self.graph, &order);
 
         for node_id in order {
             if self.is_materialized(node_id) {
@@ -94,6 +97,27 @@ impl LazyRuntime {
 
     /// Execute a single graph node, producing a materialized Tensor.
     fn execute_node(&self, device: &Device, node: &OpNode) -> Result<Tensor> {
+        // Handle fused kernels first
+        if let crate::graph::OpKind::FusedElementwise { ref kernel_source, ref function_name } = node.op {
+            let input_tensors: Vec<&Tensor> = node.inputs.iter()
+                .map(|&id| self.get_tensor(id))
+                .collect::<Result<Vec<_>>>()?;
+            let input_buffers: Vec<&crate::buffer::Buffer> = input_tensors.iter()
+                .map(|t| &t.buffer)
+                .collect();
+            let out = Tensor::empty_f32(device, node.out_shape.dims().to_vec())?;
+            let numel = input_tensors[0].numel();
+            REGISTRY.dispatch_fused(
+                device,
+                kernel_source,
+                function_name,
+                &input_buffers,
+                &out.buffer,
+                numel,
+            )?;
+            return Ok(out);
+        }
+
         if node.op.is_unary() {
             let input = self.get_tensor(node.inputs[0])?;
             let out = Tensor::empty_f32(device, node.out_shape.dims().to_vec())?;
@@ -257,7 +281,8 @@ mod tests {
 
         // relu(neg([1,-2,3,-4])) = relu([-1,2,-3,4]) = [0,2,0,4]
         assert_eq!(rt.read_f32(relu_id).unwrap(), &[0.0, 2.0, 0.0, 4.0]);
-        assert!(rt.is_materialized(neg_id));
+        // Note: neg_id may or may not be materialized — fusion may combine neg+relu
+        // into a single kernel, skipping the intermediate. The result is correct either way.
     }
 
     #[test]
