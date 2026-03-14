@@ -9,4 +9,5 @@ __pycache__/
 *.a
 *.dylib
 *.so
+*.dSYM/
 .venv/
