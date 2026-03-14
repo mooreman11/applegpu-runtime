@@ -6,6 +6,7 @@ use crate::buffer::Buffer;
 use crate::device::Device;
 use crate::error::{GpuError, Result};
 use crate::ffi;
+use crate::tensor::DType;
 
 /// MSL source for binary element-wise ops (add, sub, mul, div).
 const BINARY_KERNEL_SOURCE: &str = r#"
@@ -107,6 +108,113 @@ kernel void scalar_mul_f32(
     uint id [[thread_position_in_grid]]
 ) {
     if (id < count) { output[id] = input[id] * scale; }
+}
+"#;
+
+// ── Float16 kernel sources ──────────────────────────────────────────────────
+
+/// MSL source for f16 binary element-wise ops (add, sub, mul, div).
+const BINARY_KERNEL_SOURCE_F16: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void elementwise_add_f16(device const half* a [[buffer(0)]], device const half* b [[buffer(1)]], device half* out [[buffer(2)]], constant uint& count [[buffer(3)]], uint id [[thread_position_in_grid]]) { if (id < count) { out[id] = a[id] + b[id]; } }
+kernel void elementwise_sub_f16(device const half* a [[buffer(0)]], device const half* b [[buffer(1)]], device half* out [[buffer(2)]], constant uint& count [[buffer(3)]], uint id [[thread_position_in_grid]]) { if (id < count) { out[id] = a[id] - b[id]; } }
+kernel void elementwise_mul_f16(device const half* a [[buffer(0)]], device const half* b [[buffer(1)]], device half* out [[buffer(2)]], constant uint& count [[buffer(3)]], uint id [[thread_position_in_grid]]) { if (id < count) { out[id] = a[id] * b[id]; } }
+kernel void elementwise_div_f16(device const half* a [[buffer(0)]], device const half* b [[buffer(1)]], device half* out [[buffer(2)]], constant uint& count [[buffer(3)]], uint id [[thread_position_in_grid]]) { if (id < count) { out[id] = a[id] / b[id]; } }
+"#;
+
+/// MSL source for f16 unary element-wise ops (neg, relu, exp, log, sqrt).
+const UNARY_KERNEL_SOURCE_F16: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void elementwise_neg_f16(device const half* input [[buffer(0)]], device half* out [[buffer(1)]], constant uint& count [[buffer(2)]], uint id [[thread_position_in_grid]]) { if (id < count) { out[id] = -input[id]; } }
+kernel void elementwise_relu_f16(device const half* input [[buffer(0)]], device half* out [[buffer(1)]], constant uint& count [[buffer(2)]], uint id [[thread_position_in_grid]]) { if (id < count) { out[id] = max(input[id], (half)0); } }
+kernel void elementwise_exp_f16(device const half* input [[buffer(0)]], device half* out [[buffer(1)]], constant uint& count [[buffer(2)]], uint id [[thread_position_in_grid]]) { if (id < count) { out[id] = exp(input[id]); } }
+kernel void elementwise_log_f16(device const half* input [[buffer(0)]], device half* out [[buffer(1)]], constant uint& count [[buffer(2)]], uint id [[thread_position_in_grid]]) { if (id < count) { out[id] = log(input[id]); } }
+kernel void elementwise_sqrt_f16(device const half* input [[buffer(0)]], device half* out [[buffer(1)]], constant uint& count [[buffer(2)]], uint id [[thread_position_in_grid]]) { if (id < count) { out[id] = sqrt(input[id]); } }
+"#;
+
+/// MSL source for f16 matmul with f32-intermediate accumulation.
+const MATMUL_KERNEL_SOURCE_F16: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void matmul_f16(
+    device const half* A [[buffer(0)]],
+    device const half* B [[buffer(1)]],
+    device half* C [[buffer(2)]],
+    constant uint& M [[buffer(3)]],
+    constant uint& N [[buffer(4)]],
+    constant uint& K [[buffer(5)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint row = gid.y;
+    uint col = gid.x;
+    if (row >= M || col >= N) return;
+    float sum = 0.0f;
+    for (uint i = 0; i < K; i++) {
+        sum += float(A[row * K + i]) * float(B[i * N + col]);
+    }
+    C[row * N + col] = half(sum);
+}
+"#;
+
+/// MSL source for f16 softmax with f32-intermediate computation.
+const SOFTMAX_KERNEL_SOURCE_F16: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void softmax_f16(
+    device const half* input [[buffer(0)]],
+    device half* output [[buffer(1)]],
+    constant uint& rows [[buffer(2)]],
+    constant uint& cols [[buffer(3)]],
+    uint row [[thread_position_in_grid]]
+) {
+    if (row >= rows) return;
+    uint offset = row * cols;
+    float max_val = float(input[offset]);
+    for (uint j = 1; j < cols; j++) { max_val = max(max_val, float(input[offset + j])); }
+    float sum = 0.0f;
+    for (uint j = 0; j < cols; j++) { float e = exp(float(input[offset + j]) - max_val); output[offset + j] = half(e); sum += e; }
+    for (uint j = 0; j < cols; j++) { output[offset + j] = half(float(output[offset + j]) / sum); }
+}
+"#;
+
+/// MSL source for f16 transpose.
+const TRANSPOSE_KERNEL_SOURCE_F16: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void transpose_f16(
+    device const half* input [[buffer(0)]],
+    device half* output [[buffer(1)]],
+    constant uint& rows [[buffer(2)]],
+    constant uint& cols [[buffer(3)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint row = gid.y;
+    uint col = gid.x;
+    if (row >= rows || col >= cols) return;
+    output[col * rows + row] = input[row * cols + col];
+}
+"#;
+
+/// MSL source for f16 scalar multiply (scalar stays float, read/write half).
+const SCALAR_MUL_KERNEL_SOURCE_F16: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void scalar_mul_f16(
+    device const half* input [[buffer(0)]],
+    device half* output [[buffer(1)]],
+    constant float& scale [[buffer(2)]],
+    constant uint& count [[buffer(3)]],
+    uint id [[thread_position_in_grid]]
+) {
+    if (id < count) { output[id] = half(float(input[id]) * scale); }
 }
 "#;
 
@@ -301,6 +409,48 @@ impl KernelRegistry {
         Ok(pipeline)
     }
 
+    /// Resolve the kernel source and function name for a given base name and dtype.
+    fn resolve_kernel(base_name: &str, dtype: DType) -> (&'static str, String) {
+        match dtype {
+            DType::Float16 => {
+                let f16_name = format!("{}_f16", base_name);
+                let source = match base_name {
+                    n if n.starts_with("elementwise_add") || n.starts_with("elementwise_sub")
+                        || n.starts_with("elementwise_mul") || n.starts_with("elementwise_div") =>
+                        BINARY_KERNEL_SOURCE_F16,
+                    n if n.starts_with("elementwise_") => UNARY_KERNEL_SOURCE_F16,
+                    "matmul_f32" => MATMUL_KERNEL_SOURCE_F16,
+                    "softmax_f32" => SOFTMAX_KERNEL_SOURCE_F16,
+                    "transpose_f32" => TRANSPOSE_KERNEL_SOURCE_F16,
+                    "scalar_mul_f32" => SCALAR_MUL_KERNEL_SOURCE_F16,
+                    _ => BINARY_KERNEL_SOURCE_F16, // fallback
+                };
+                // For named kernels like matmul_f32 -> matmul_f16
+                let func_name = if base_name.ends_with("_f32") {
+                    format!("{}_f16", &base_name[..base_name.len() - 4])
+                } else {
+                    f16_name
+                };
+                (source, func_name)
+            }
+            _ => {
+                // Float32 (default)
+                let source = match base_name {
+                    n if n.starts_with("elementwise_add") || n.starts_with("elementwise_sub")
+                        || n.starts_with("elementwise_mul") || n.starts_with("elementwise_div") =>
+                        BINARY_KERNEL_SOURCE,
+                    n if n.starts_with("elementwise_") => UNARY_KERNEL_SOURCE,
+                    "matmul_f32" => MATMUL_KERNEL_SOURCE,
+                    "softmax_f32" => SOFTMAX_KERNEL_SOURCE,
+                    "transpose_f32" => TRANSPOSE_KERNEL_SOURCE,
+                    "scalar_mul_f32" => SCALAR_MUL_KERNEL_SOURCE,
+                    _ => BINARY_KERNEL_SOURCE,
+                };
+                (source, base_name.to_string())
+            }
+        }
+    }
+
     /// Dispatch a binary op through the registry.
     pub fn dispatch_binary(
         &self,
@@ -312,6 +462,22 @@ impl KernelRegistry {
         element_count: usize,
     ) -> Result<()> {
         let pipeline = self.get_or_create(device, BINARY_KERNEL_SOURCE, function_name)?;
+        pipeline.dispatch_elementwise(buf_a, buf_b, buf_out, element_count)
+    }
+
+    /// Dispatch a binary op with dtype-aware kernel selection.
+    pub fn dispatch_binary_typed(
+        &self,
+        device: &Device,
+        function_name: &str,
+        dtype: DType,
+        buf_a: &Buffer,
+        buf_b: &Buffer,
+        buf_out: &Buffer,
+        element_count: usize,
+    ) -> Result<()> {
+        let (source, func) = Self::resolve_kernel(function_name, dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
         pipeline.dispatch_elementwise(buf_a, buf_b, buf_out, element_count)
     }
 
@@ -328,6 +494,21 @@ impl KernelRegistry {
         pipeline.dispatch_unary(buf_input, buf_out, element_count)
     }
 
+    /// Dispatch a unary op with dtype-aware kernel selection.
+    pub fn dispatch_unary_typed(
+        &self,
+        device: &Device,
+        function_name: &str,
+        dtype: DType,
+        buf_input: &Buffer,
+        buf_out: &Buffer,
+        element_count: usize,
+    ) -> Result<()> {
+        let (source, func) = Self::resolve_kernel(function_name, dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_unary(buf_input, buf_out, element_count)
+    }
+
     /// Dispatch matmul through the registry.
     pub fn dispatch_matmul(
         &self,
@@ -340,6 +521,23 @@ impl KernelRegistry {
         k: usize,
     ) -> Result<()> {
         let pipeline = self.get_or_create(device, MATMUL_KERNEL_SOURCE, "matmul_f32")?;
+        pipeline.dispatch_matmul(buf_a, buf_b, buf_c, m, n, k)
+    }
+
+    /// Dispatch matmul with dtype-aware kernel selection.
+    pub fn dispatch_matmul_typed(
+        &self,
+        device: &Device,
+        dtype: DType,
+        buf_a: &Buffer,
+        buf_b: &Buffer,
+        buf_c: &Buffer,
+        m: usize,
+        n: usize,
+        k: usize,
+    ) -> Result<()> {
+        let (source, func) = Self::resolve_kernel("matmul_f32", dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
         pipeline.dispatch_matmul(buf_a, buf_b, buf_c, m, n, k)
     }
 
@@ -365,6 +563,15 @@ impl KernelRegistry {
         pipeline.dispatch_softmax(buf_input, buf_output, rows, cols)
     }
 
+    pub fn dispatch_softmax_typed(
+        &self, device: &Device, dtype: DType, buf_input: &Buffer, buf_output: &Buffer,
+        rows: usize, cols: usize,
+    ) -> Result<()> {
+        let (source, func) = Self::resolve_kernel("softmax_f32", dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_softmax(buf_input, buf_output, rows, cols)
+    }
+
     pub fn dispatch_transpose(
         &self, device: &Device, buf_input: &Buffer, buf_output: &Buffer,
         rows: usize, cols: usize,
@@ -373,11 +580,29 @@ impl KernelRegistry {
         pipeline.dispatch_transpose(buf_input, buf_output, rows, cols)
     }
 
+    pub fn dispatch_transpose_typed(
+        &self, device: &Device, dtype: DType, buf_input: &Buffer, buf_output: &Buffer,
+        rows: usize, cols: usize,
+    ) -> Result<()> {
+        let (source, func) = Self::resolve_kernel("transpose_f32", dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_transpose(buf_input, buf_output, rows, cols)
+    }
+
     pub fn dispatch_scalar_mul(
         &self, device: &Device, buf_input: &Buffer, buf_output: &Buffer,
         scale: f32, element_count: usize,
     ) -> Result<()> {
         let pipeline = self.get_or_create(device, SCALAR_MUL_KERNEL_SOURCE, "scalar_mul_f32")?;
+        pipeline.dispatch_scalar_mul(buf_input, buf_output, scale, element_count)
+    }
+
+    pub fn dispatch_scalar_mul_typed(
+        &self, device: &Device, dtype: DType, buf_input: &Buffer, buf_output: &Buffer,
+        scale: f32, element_count: usize,
+    ) -> Result<()> {
+        let (source, func) = Self::resolve_kernel("scalar_mul_f32", dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
         pipeline.dispatch_scalar_mul(buf_input, buf_output, scale, element_count)
     }
 }
@@ -467,5 +692,117 @@ mod tests {
         let c = Buffer::new(&device, 4 * 4).unwrap();
         registry.dispatch_matmul(&device, &a, &b, &c, 2, 2, 3).unwrap();
         assert_eq!(unsafe { c.as_slice::<f32>() }, &[58.0, 64.0, 139.0, 154.0]);
+    }
+
+    // ── F16 dispatch tests ──────────────────────────────────────────────────
+
+    fn f16_bytes(values: &[f32]) -> Vec<u8> {
+        use half::f16;
+        let bits: Vec<u16> = values.iter().map(|&x| f16::from_f32(x).to_bits()).collect();
+        unsafe { std::slice::from_raw_parts(bits.as_ptr() as *const u8, bits.len() * 2) }.to_vec()
+    }
+
+    fn read_f16(buf: &Buffer, count: usize) -> Vec<f32> {
+        use half::f16;
+        let slice = unsafe { std::slice::from_raw_parts(buf.contents() as *const u16, count) };
+        slice.iter().map(|&b| f16::from_bits(b).to_f32()).collect()
+    }
+
+    #[test]
+    fn dispatch_binary_f16_add() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let registry = KernelRegistry::new();
+        let a = Buffer::from_bytes(&device, &f16_bytes(&[1.0, 2.0])).unwrap();
+        let b = Buffer::from_bytes(&device, &f16_bytes(&[3.0, 4.0])).unwrap();
+        let out = Buffer::new(&device, 4).unwrap();
+        registry.dispatch_binary_typed(&device, "elementwise_add", DType::Float16, &a, &b, &out, 2).unwrap();
+        let result = read_f16(&out, 2);
+        assert_eq!(result[0], 4.0);
+        assert_eq!(result[1], 6.0);
+    }
+
+    #[test]
+    fn dispatch_binary_f16_mul() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let registry = KernelRegistry::new();
+        let a = Buffer::from_bytes(&device, &f16_bytes(&[2.0, 3.0])).unwrap();
+        let b = Buffer::from_bytes(&device, &f16_bytes(&[4.0, 5.0])).unwrap();
+        let out = Buffer::new(&device, 4).unwrap();
+        registry.dispatch_binary_typed(&device, "elementwise_mul", DType::Float16, &a, &b, &out, 2).unwrap();
+        let result = read_f16(&out, 2);
+        assert_eq!(result[0], 8.0);
+        assert_eq!(result[1], 15.0);
+    }
+
+    #[test]
+    fn dispatch_unary_f16_relu() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let registry = KernelRegistry::new();
+        let input = Buffer::from_bytes(&device, &f16_bytes(&[-1.0, 0.0, 3.0, -4.0])).unwrap();
+        let out = Buffer::new(&device, 8).unwrap();
+        registry.dispatch_unary_typed(&device, "elementwise_relu", DType::Float16, &input, &out, 4).unwrap();
+        let result = read_f16(&out, 4);
+        assert_eq!(result, &[0.0, 0.0, 3.0, 0.0]);
+    }
+
+    #[test]
+    fn dispatch_unary_f16_neg() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let registry = KernelRegistry::new();
+        let input = Buffer::from_bytes(&device, &f16_bytes(&[1.0, -2.0, 3.0])).unwrap();
+        let out = Buffer::new(&device, 6).unwrap();
+        registry.dispatch_unary_typed(&device, "elementwise_neg", DType::Float16, &input, &out, 3).unwrap();
+        let result = read_f16(&out, 3);
+        assert_eq!(result, &[-1.0, 2.0, -3.0]);
+    }
+
+    #[test]
+    fn dispatch_matmul_f16() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let registry = KernelRegistry::new();
+        let a = Buffer::from_bytes(&device, &f16_bytes(&[1.0, 2.0, 3.0, 4.0])).unwrap();
+        let b = Buffer::from_bytes(&device, &f16_bytes(&[5.0, 6.0, 7.0, 8.0])).unwrap();
+        let c = Buffer::new(&device, 8).unwrap();
+        registry.dispatch_matmul_typed(&device, DType::Float16, &a, &b, &c, 2, 2, 2).unwrap();
+        let result = read_f16(&c, 4);
+        assert!((result[0] - 19.0).abs() < 0.5);
+        assert!((result[1] - 22.0).abs() < 0.5);
+        assert!((result[2] - 43.0).abs() < 0.5);
+        assert!((result[3] - 50.0).abs() < 0.5);
+    }
+
+    #[test]
+    fn dispatch_softmax_f16() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let registry = KernelRegistry::new();
+        let input = Buffer::from_bytes(&device, &f16_bytes(&[1.0, 2.0, 3.0])).unwrap();
+        let out = Buffer::new(&device, 6).unwrap();
+        registry.dispatch_softmax_typed(&device, DType::Float16, &input, &out, 1, 3).unwrap();
+        let result = read_f16(&out, 3);
+        assert!((result[0] - 0.0900).abs() < 0.01);
+        assert!((result[1] - 0.2447).abs() < 0.01);
+        assert!((result[2] - 0.6652).abs() < 0.01);
+    }
+
+    #[test]
+    fn dispatch_transpose_f16() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let registry = KernelRegistry::new();
+        let input = Buffer::from_bytes(&device, &f16_bytes(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0])).unwrap();
+        let out = Buffer::new(&device, 12).unwrap();
+        registry.dispatch_transpose_typed(&device, DType::Float16, &input, &out, 2, 3).unwrap();
+        let result = read_f16(&out, 6);
+        assert_eq!(result, &[1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
+    }
+
+    #[test]
+    fn dispatch_scalar_mul_f16() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let registry = KernelRegistry::new();
+        let input = Buffer::from_bytes(&device, &f16_bytes(&[1.0, 2.0, 3.0, 4.0])).unwrap();
+        let out = Buffer::new(&device, 8).unwrap();
+        registry.dispatch_scalar_mul_typed(&device, DType::Float16, &input, &out, 2.0, 4).unwrap();
+        let result = read_f16(&out, 4);
+        assert_eq!(result, &[2.0, 4.0, 6.0, 8.0]);
     }
 }

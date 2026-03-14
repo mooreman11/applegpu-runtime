@@ -7,10 +7,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static FUSED_ID_COUNTER: AtomicU64 = AtomicU64::new(200_000);
 
 /// MSL expression for a unary op applied to an expression string.
-fn unary_msl(op: &OpKind, expr: &str) -> String {
+fn unary_msl(op: &OpKind, expr: &str, dtype: DType) -> String {
     match op {
         OpKind::Neg => format!("(-{})", expr),
-        OpKind::Relu => format!("max({}, 0.0f)", expr),
+        OpKind::Relu => {
+            let zero = if dtype == DType::Float16 { "(half)0" } else { "0.0f" };
+            format!("max({}, {})", expr, zero)
+        }
         OpKind::Exp => format!("exp({})", expr),
         OpKind::Log => format!("log({})", expr),
         OpKind::Sqrt => format!("sqrt({})", expr),
@@ -132,6 +135,8 @@ fn find_fusible_chains(graph: &Graph, exec_order: &[u64]) -> Vec<FusionChain> {
 fn generate_fused_msl(graph: &Graph, chain: &FusionChain) -> (String, String, Vec<u64>) {
     let func_name = format!("fused_{}", FUSED_ID_COUNTER.fetch_add(1, Ordering::Relaxed));
     let leaf_inputs = &chain.leaf_inputs;
+    let dtype = chain.out_dtype;
+    let metal_type = if dtype == DType::Float16 { "half" } else { "float" };
 
     // Map each leaf input to a buffer name
     let mut expr_map: std::collections::HashMap<u64, String> = std::collections::HashMap::new();
@@ -145,7 +150,7 @@ fn generate_fused_msl(graph: &Graph, chain: &FusionChain) -> (String, String, Ve
         let node = graph.get_node(node_id).unwrap();
         let expr = if node.op.is_unary() {
             let input_expr = expr_map.get(&node.inputs[0]).unwrap().clone();
-            unary_msl(&node.op, &input_expr)
+            unary_msl(&node.op, &input_expr, dtype)
         } else {
             let lhs = expr_map.get(&node.inputs[0]).unwrap().clone();
             let rhs = expr_map.get(&node.inputs[1]).unwrap().clone();
@@ -160,10 +165,10 @@ fn generate_fused_msl(graph: &Graph, chain: &FusionChain) -> (String, String, Ve
     // Generate buffer parameters
     let mut params = Vec::new();
     for (i, _) in leaf_inputs.iter().enumerate() {
-        params.push(format!("    device const float* in{} [[buffer({})]]", i, i));
+        params.push(format!("    device const {}* in{} [[buffer({})]]", metal_type, i, i));
     }
     let out_idx = leaf_inputs.len();
-    params.push(format!("    device float* out [[buffer({})]]", out_idx));
+    params.push(format!("    device {}* out [[buffer({})]]", metal_type, out_idx));
     params.push(format!("    constant uint& count [[buffer({})]]", out_idx + 1));
     params.push("    uint id [[thread_position_in_grid]]".to_string());
 
@@ -336,6 +341,28 @@ mod tests {
 
         let new_order = optimize(&mut g, &[3, 4, 5]);
         assert_eq!(new_order.len(), 3);
+    }
+
+    #[test]
+    fn generate_msl_add_relu_f16() {
+        let mut g = Graph::new();
+        g.add_node(OpNode {
+            id: 3, op: OpKind::Add, inputs: vec![1, 2],
+            out_shape: Shape::new(vec![4]), out_dtype: DType::Float16,
+            container_id: ContainerId::DEFAULT,
+        });
+        g.add_node(OpNode {
+            id: 4, op: OpKind::Relu, inputs: vec![3],
+            out_shape: Shape::new(vec![4]), out_dtype: DType::Float16,
+            container_id: ContainerId::DEFAULT,
+        });
+
+        let chains = find_fusible_chains(&g, &[3, 4]);
+        let (source, _name, inputs) = generate_fused_msl(&g, &chains[0]);
+
+        assert!(source.contains("half"), "f16 fused kernel should use half type");
+        assert!(source.contains("max((in0[id] + in1[id]), (half)0)"));
+        assert_eq!(inputs, vec![1, 2]);
     }
 
     #[test]

@@ -166,13 +166,15 @@ impl LazyRuntime {
             return Ok(out);
         }
 
+        let dtype = node.out_dtype;
+
         if node.op.is_softmax() {
             let out_buf = self.pool.acquire(device, out_size)?;
             let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
             let input = self.get_tensor(node.inputs[0])?;
             let dims = input.meta.shape.dims();
             let (rows, cols) = (dims[0], dims[1]);
-            REGISTRY.dispatch_softmax(device, &input.buffer, &out.buffer, rows, cols)?;
+            REGISTRY.dispatch_softmax_typed(device, dtype, &input.buffer, &out.buffer, rows, cols)?;
             return Ok(out);
         }
 
@@ -182,7 +184,7 @@ impl LazyRuntime {
             let input = self.get_tensor(node.inputs[0])?;
             let dims = input.meta.shape.dims();
             let (rows, cols) = (dims[0], dims[1]);
-            REGISTRY.dispatch_transpose(device, &input.buffer, &out.buffer, rows, cols)?;
+            REGISTRY.dispatch_transpose_typed(device, dtype, &input.buffer, &out.buffer, rows, cols)?;
             return Ok(out);
         }
 
@@ -190,7 +192,7 @@ impl LazyRuntime {
             let out_buf = self.pool.acquire(device, out_size)?;
             let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
             let input = self.get_tensor(node.inputs[0])?;
-            REGISTRY.dispatch_scalar_mul(device, &input.buffer, &out.buffer, scale, input.numel())?;
+            REGISTRY.dispatch_scalar_mul_typed(device, dtype, &input.buffer, &out.buffer, scale, input.numel())?;
             return Ok(out);
         }
 
@@ -198,9 +200,10 @@ impl LazyRuntime {
             let out_buf = self.pool.acquire(device, out_size)?;
             let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
             let input = self.get_tensor(node.inputs[0])?;
-            REGISTRY.dispatch_unary(
+            REGISTRY.dispatch_unary_typed(
                 device,
                 node.op.kernel_name(),
+                dtype,
                 &input.buffer,
                 &out.buffer,
                 input.numel(),
@@ -215,7 +218,7 @@ impl LazyRuntime {
             let b_dims = b.meta.shape.dims();
             let (m, k) = (a_dims[0], a_dims[1]);
             let n = b_dims[1];
-            REGISTRY.dispatch_matmul(device, &a.buffer, &b.buffer, &out.buffer, m, n, k)?;
+            REGISTRY.dispatch_matmul_typed(device, dtype, &a.buffer, &b.buffer, &out.buffer, m, n, k)?;
             Ok(out)
         } else {
             // Binary element-wise
@@ -223,9 +226,10 @@ impl LazyRuntime {
             let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
             let a = self.get_tensor(node.inputs[0])?;
             let b = self.get_tensor(node.inputs[1])?;
-            REGISTRY.dispatch_binary(
+            REGISTRY.dispatch_binary_typed(
                 device,
                 node.op.kernel_name(),
+                dtype,
                 &a.buffer,
                 &b.buffer,
                 &out.buffer,
