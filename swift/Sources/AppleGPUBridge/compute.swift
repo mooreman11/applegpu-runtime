@@ -111,6 +111,40 @@ final class GPUCompute {
 
         return commandBuffer.status == .completed
     }
+
+    func dispatchFused(inputs: [MTLBuffer], output: MTLBuffer, count: Int) -> Bool {
+        if count == 0 { return true }
+
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            return false
+        }
+
+        encoder.setComputePipelineState(pipelineState)
+
+        // Set input buffers at indices 0..n-1
+        for (i, buf) in inputs.enumerated() {
+            encoder.setBuffer(buf, offset: 0, index: i)
+        }
+        // Output at index n
+        encoder.setBuffer(output, offset: 0, index: inputs.count)
+        // Count at index n+1
+        var elementCount = UInt32(count)
+        encoder.setBytes(&elementCount, length: MemoryLayout<UInt32>.size, index: inputs.count + 1)
+
+        let threadGroupSize = min(pipelineState.maxTotalThreadsPerThreadgroup, count)
+        let threadGroups = (count + threadGroupSize - 1) / threadGroupSize
+
+        encoder.dispatchThreadgroups(
+            MTLSize(width: threadGroups, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: threadGroupSize, height: 1, depth: 1)
+        )
+        encoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        return commandBuffer.status == .completed
+    }
 }
 
 // MARK: - C ABI exports
@@ -218,6 +252,36 @@ public func gpuBridgeComputeMatmul(
         M: Int(M),
         N: Int(N),
         K: Int(K)
+    )
+    return success ? 0 : -1
+}
+
+@_cdecl("gpu_bridge_compute_fused")
+public func gpuBridgeComputeFused(
+    _ computePtr: UnsafeMutableRawPointer?,
+    _ inputBuffers: UnsafePointer<UnsafeRawPointer?>?,
+    _ bufferCount: UInt32,
+    _ outputPtr: UnsafeMutableRawPointer?,
+    _ elementCount: UInt64
+) -> Int32 {
+    guard let computePtr = computePtr,
+          let inputBuffers = inputBuffers,
+          let outputPtr = outputPtr else { return -1 }
+
+    let compute = Unmanaged<GPUCompute>.fromOpaque(computePtr).takeUnretainedValue()
+    let bufOut = Unmanaged<GPUBuffer>.fromOpaque(outputPtr).takeUnretainedValue()
+
+    var mtlBuffers: [MTLBuffer] = []
+    for i in 0..<Int(bufferCount) {
+        guard let bufPtr = inputBuffers[i] else { return -1 }
+        let buf = Unmanaged<GPUBuffer>.fromOpaque(bufPtr).takeUnretainedValue()
+        mtlBuffers.append(buf.buffer)
+    }
+
+    let success = compute.dispatchFused(
+        inputs: mtlBuffers,
+        output: bufOut.buffer,
+        count: Int(elementCount)
     )
     return success ? 0 : -1
 }

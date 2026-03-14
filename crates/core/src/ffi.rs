@@ -108,6 +108,14 @@ extern "C" {
         n: u32,
         k: u32,
     ) -> i32;
+
+    pub fn gpu_bridge_compute_fused(
+        compute: *mut GPUComputeHandle,
+        input_buffers: *const *const GPUBufferHandle,
+        buffer_count: u32,
+        output: *mut GPUBufferHandle,
+        element_count: u64,
+    ) -> i32;
 }
 
 #[cfg(test)]

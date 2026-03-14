@@ -61,4 +61,13 @@ int32_t gpu_bridge_compute_matmul(
     uint32_t K
 );
 
+// Execute a fused kernel with variable number of input buffers.
+int32_t gpu_bridge_compute_fused(
+    GPUComputeHandle* compute,
+    const GPUBufferHandle* const* input_buffers,
+    uint32_t buffer_count,
+    GPUBufferHandle* output,
+    uint64_t element_count
+);
+
 #endif

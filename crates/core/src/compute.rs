@@ -149,6 +149,30 @@ impl ComputePipeline {
         };
         if result == 0 { Ok(()) } else { Err(GpuError::ComputeFailed("Matmul dispatch failed".to_string())) }
     }
+
+    /// Dispatch a fused element-wise kernel with variable input buffer count.
+    pub fn dispatch_fused(
+        &self,
+        input_buffers: &[&Buffer],
+        buf_out: &Buffer,
+        element_count: usize,
+    ) -> Result<()> {
+        let ptrs: Vec<*const ffi::GPUBufferHandle> = input_buffers
+            .iter()
+            .map(|b| b.raw_handle() as *const _)
+            .collect();
+
+        let result = unsafe {
+            ffi::gpu_bridge_compute_fused(
+                self.handle,
+                ptrs.as_ptr(),
+                ptrs.len() as u32,
+                buf_out.raw_handle(),
+                element_count as u64,
+            )
+        };
+        if result == 0 { Ok(()) } else { Err(GpuError::ComputeFailed("Fused kernel dispatch failed".to_string())) }
+    }
 }
 
 impl Drop for ComputePipeline {
@@ -227,6 +251,20 @@ impl KernelRegistry {
     ) -> Result<()> {
         let pipeline = self.get_or_create(device, MATMUL_KERNEL_SOURCE, "matmul_f32")?;
         pipeline.dispatch_matmul(buf_a, buf_b, buf_c, m, n, k)
+    }
+
+    /// Dispatch a fused kernel with variable input buffers.
+    pub fn dispatch_fused(
+        &self,
+        device: &Device,
+        kernel_source: &str,
+        function_name: &str,
+        input_buffers: &[&Buffer],
+        buf_out: &Buffer,
+        element_count: usize,
+    ) -> Result<()> {
+        let pipeline = self.get_or_create(device, kernel_source, function_name)?;
+        pipeline.dispatch_fused(input_buffers, buf_out, element_count)
     }
 }
 
