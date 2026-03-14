@@ -13,6 +13,8 @@ pub enum GpuError {
     ComputeFailed(String),
     /// Graph evaluation error
     GraphError(String),
+    /// Resource limit exceeded
+    ResourceLimitExceeded(String),
 }
 
 impl std::fmt::Display for GpuError {
@@ -24,6 +26,7 @@ impl std::fmt::Display for GpuError {
             GpuError::BufferAllocationFailed(size) => write!(f, "Failed to allocate GPU buffer of {} bytes", size),
             GpuError::ComputeFailed(msg) => write!(f, "Compute failed: {}", msg),
             GpuError::GraphError(msg) => write!(f, "Graph error: {}", msg),
+            GpuError::ResourceLimitExceeded(msg) => write!(f, "Resource limit exceeded: {}", msg),
         }
     }
 }
