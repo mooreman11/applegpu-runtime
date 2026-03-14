@@ -117,6 +117,101 @@ pub fn matmul(rt: &mut LazyRuntime, a_id: u64, b_id: u64) -> Result<u64> {
     Ok(out_id)
 }
 
+/// Softmax along last dimension. Input must be 2D [rows, cols].
+pub fn softmax(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
+    let shape = rt.shape(input_id)?;
+    if shape.len() != 2 {
+        return Err(GpuError::InvalidTensor(format!(
+            "softmax requires 2D tensor, got {:?}", shape
+        )));
+    }
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op: OpKind::Softmax,
+        inputs: vec![input_id],
+        out_shape: Shape::new(shape),
+        out_dtype: DType::Float32,
+    });
+    Ok(out_id)
+}
+
+/// Transpose a 2D tensor: [rows, cols] → [cols, rows].
+pub fn transpose(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
+    let shape = rt.shape(input_id)?;
+    if shape.len() != 2 {
+        return Err(GpuError::InvalidTensor(format!(
+            "transpose requires 2D tensor, got {:?}", shape
+        )));
+    }
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op: OpKind::Transpose,
+        inputs: vec![input_id],
+        out_shape: Shape::new(vec![shape[1], shape[0]]),
+        out_dtype: DType::Float32,
+    });
+    Ok(out_id)
+}
+
+/// Multiply every element by a scalar.
+pub fn scalar_mul(rt: &mut LazyRuntime, input_id: u64, scale: f32) -> Result<u64> {
+    let shape = rt.shape(input_id)?;
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op: OpKind::ScalarMul(scale),
+        inputs: vec![input_id],
+        out_shape: Shape::new(shape),
+        out_dtype: DType::Float32,
+    });
+    Ok(out_id)
+}
+
+/// Scaled dot-product attention: softmax(Q @ K^T / sqrt(d_k)) @ V
+/// Q: [q_len, d_k], K: [kv_len, d_k], V: [kv_len, d_v]
+/// Output: [q_len, d_v]
+pub fn attention(rt: &mut LazyRuntime, q_id: u64, k_id: u64, v_id: u64) -> Result<u64> {
+    let q_shape = rt.shape(q_id)?;
+    let k_shape = rt.shape(k_id)?;
+    let v_shape = rt.shape(v_id)?;
+
+    if q_shape.len() != 2 || k_shape.len() != 2 || v_shape.len() != 2 {
+        return Err(GpuError::InvalidTensor(
+            "attention requires 2D tensors for Q, K, V".to_string()
+        ));
+    }
+
+    let d_k = q_shape[1];
+    if k_shape[1] != d_k {
+        return Err(GpuError::InvalidTensor(format!(
+            "Q and K must have same d_k: Q[{},{}] K[{},{}]",
+            q_shape[0], q_shape[1], k_shape[0], k_shape[1]
+        )));
+    }
+    if k_shape[0] != v_shape[0] {
+        return Err(GpuError::InvalidTensor(format!(
+            "K and V must have same seq_len: K[{},{}] V[{},{}]",
+            k_shape[0], k_shape[1], v_shape[0], v_shape[1]
+        )));
+    }
+
+    // K^T: [kv_len, d_k] → [d_k, kv_len]
+    let kt_id = transpose(rt, k_id)?;
+    // scores = Q @ K^T: [q_len, d_k] @ [d_k, kv_len] → [q_len, kv_len]
+    let scores_id = matmul(rt, q_id, kt_id)?;
+    // Scale by 1/sqrt(d_k)
+    let scale = 1.0 / (d_k as f32).sqrt();
+    let scaled_scores_id = scalar_mul(rt, scores_id, scale)?;
+    // softmax along last dimension
+    let attn_weights_id = softmax(rt, scaled_scores_id)?;
+    // output = attn_weights @ V: [q_len, kv_len] @ [kv_len, d_v] → [q_len, d_v]
+    let output_id = matmul(rt, attn_weights_id, v_id)?;
+
+    Ok(output_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,5 +292,69 @@ mod tests {
 
         let result = add(&mut rt, a_id, b_id);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn lazy_ops_softmax() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        let a = Tensor::from_f32(&device, vec![2, 3], &[1.0, 2.0, 3.0, 1.0, 1.0, 1.0]).unwrap();
+        let a_id = a.meta.id;
+        rt.insert_tensor(a);
+
+        let s_id = softmax(&mut rt, a_id).unwrap();
+        rt.eval(&device, s_id).unwrap();
+        let result = rt.read_f32(s_id).unwrap();
+
+        assert!((result[0] - 0.0900).abs() < 0.001);
+        assert!((result[1] - 0.2447).abs() < 0.001);
+        assert!((result[2] - 0.6652).abs() < 0.001);
+        assert!((result[3] - 0.3333).abs() < 0.001);
+    }
+
+    #[test]
+    fn lazy_ops_transpose() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        let a = Tensor::from_f32(&device, vec![2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
+        let a_id = a.meta.id;
+        rt.insert_tensor(a);
+
+        let t_id = transpose(&mut rt, a_id).unwrap();
+        assert_eq!(rt.shape(t_id).unwrap(), vec![3, 2]);
+
+        rt.eval(&device, t_id).unwrap();
+        let result = rt.read_f32(t_id).unwrap();
+        assert_eq!(result, &[1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
+    }
+
+    #[test]
+    fn lazy_ops_attention() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        let q = Tensor::from_f32(&device, vec![2, 2], &[1.0, 0.0, 0.0, 1.0]).unwrap();
+        let k = Tensor::from_f32(&device, vec![2, 2], &[1.0, 0.0, 0.0, 1.0]).unwrap();
+        let v = Tensor::from_f32(&device, vec![2, 2], &[1.0, 2.0, 3.0, 4.0]).unwrap();
+        let q_id = q.meta.id;
+        let k_id = k.meta.id;
+        let v_id = v.meta.id;
+        rt.insert_tensor(q);
+        rt.insert_tensor(k);
+        rt.insert_tensor(v);
+
+        let out_id = attention(&mut rt, q_id, k_id, v_id).unwrap();
+        assert_eq!(rt.shape(out_id).unwrap(), vec![2, 2]);
+
+        rt.eval(&device, out_id).unwrap();
+        let result = rt.read_f32(out_id).unwrap();
+        assert_eq!(result.len(), 4);
+        // With Q=K=I, scores = I/sqrt(2), softmax gives weighted mix of V rows
+        for &v in &result {
+            assert!(v.is_finite());
+            assert!(v >= 0.0 && v <= 10.0);
+        }
     }
 }
