@@ -15,6 +15,16 @@ pub enum GpuError {
     GraphError(String),
     /// Resource limit exceeded
     ResourceLimitExceeded(String),
+    /// Container not found in scheduler
+    ContainerNotFound(String),
+    /// Container is paused
+    ContainerPaused(String),
+    /// Container resource quota exceeded
+    ContainerQuotaExceeded(String),
+    /// Job not found in scheduler
+    JobNotFound(String),
+    /// Job submission rejected (queue full)
+    AdmissionRejected(String),
 }
 
 impl std::fmt::Display for GpuError {
@@ -27,6 +37,11 @@ impl std::fmt::Display for GpuError {
             GpuError::ComputeFailed(msg) => write!(f, "Compute failed: {}", msg),
             GpuError::GraphError(msg) => write!(f, "Graph error: {}", msg),
             GpuError::ResourceLimitExceeded(msg) => write!(f, "Resource limit exceeded: {}", msg),
+            GpuError::ContainerNotFound(msg) => write!(f, "Container not found: {}", msg),
+            GpuError::ContainerPaused(msg) => write!(f, "Container paused: {}", msg),
+            GpuError::ContainerQuotaExceeded(msg) => write!(f, "Container quota exceeded: {}", msg),
+            GpuError::JobNotFound(msg) => write!(f, "Job not found: {}", msg),
+            GpuError::AdmissionRejected(msg) => write!(f, "Admission rejected: {}", msg),
         }
     }
 }
@@ -49,5 +64,23 @@ mod tests {
     fn error_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<GpuError>();
+    }
+
+    #[test]
+    fn scheduler_error_display() {
+        let e = GpuError::ContainerNotFound("container 5".to_string());
+        assert!(e.to_string().contains("container 5"));
+
+        let e = GpuError::ContainerPaused("container 3".to_string());
+        assert!(e.to_string().contains("paused"));
+
+        let e = GpuError::ContainerQuotaExceeded("container 1: memory".to_string());
+        assert!(e.to_string().contains("quota"));
+
+        let e = GpuError::JobNotFound("job 42".to_string());
+        assert!(e.to_string().contains("42"));
+
+        let e = GpuError::AdmissionRejected("container 2: queue full".to_string());
+        assert!(e.to_string().contains("queue full"));
     }
 }
