@@ -10,7 +10,7 @@ build-swift:
 	cd swift && swift build -c release
 
 build-rust: build-swift
-	cargo build --workspace
+	cargo build -p applegpu-core
 
 build-python: build-rust
 	uv run maturin develop
@@ -18,7 +18,7 @@ build-python: build-rust
 build: build-swift build-rust build-python
 
 test-rust: build-swift
-	cargo test --workspace
+	cargo test -p applegpu-core
 
 test-swift:
 	cd swift && swift test
