@@ -5,6 +5,7 @@ pub mod device;
 pub mod error;
 pub mod ffi;
 pub mod graph;
+pub mod lazy;
 pub mod ops;
 pub mod scheduler;
 pub mod tensor;
