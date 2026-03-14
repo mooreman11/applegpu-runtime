@@ -2,34 +2,32 @@
 
 all: build test
 
-# Install tools and deps, build native extension
 setup:
 	uv tool install maturin
 	uv sync
 
-build-rust:
+build-swift:
+	cd swift && swift build -c release
+
+build-rust: build-swift
 	cargo build --workspace
 
-build-swift:
-	cd swift && swift build
+build-python: build-rust
+	uv run maturin develop
 
-build-python:
-	uv sync
+build: build-swift build-rust build-python
 
-build: build-rust build-swift build-python
-
-test-rust:
+test-rust: build-swift
 	cargo test --workspace
 
 test-swift:
 	cd swift && swift test
 
-test-python:
+test-python: build-python
 	uv run pytest -v
 
 test: test-rust test-swift test-python
 
-# Quick compile check (no cross-layer linking)
 check:
 	cargo check --workspace
 	cd swift && swift build
