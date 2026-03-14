@@ -34,7 +34,7 @@ impl LazyRuntime {
     /// Store a materialized tensor (e.g., from user data).
     /// Checks resource limits before inserting. Uses default container.
     pub fn insert_tensor(&mut self, tensor: Tensor) -> Result<()> {
-        let size = tensor.buffer.len();
+        let size = tensor.meta.size_bytes();
         let id = tensor.meta.id;
         self.scheduler.allocate_tensor(ContainerId::DEFAULT, id, size)?;
         self.tensors.insert(id, tensor);
@@ -43,7 +43,7 @@ impl LazyRuntime {
 
     /// Insert a tensor attributed to a specific container.
     pub fn insert_tensor_for(&mut self, tensor: Tensor, container_id: ContainerId) -> Result<()> {
-        let size = tensor.buffer.len();
+        let size = tensor.meta.size_bytes();
         let id = tensor.meta.id;
         self.scheduler.allocate_tensor(container_id, id, size)?;
         self.tensors.insert(id, tensor);
@@ -115,7 +115,7 @@ impl LazyRuntime {
             })?;
 
             let result = self.execute_node(device, &node)?;
-            let size = result.buffer.len();
+            let size = node.out_shape.numel() * node.out_dtype.size_bytes();
             self.scheduler.allocate_tensor(container_id, node_id, size)?;
             self.tensors.insert(node_id, result);
         }
@@ -288,7 +288,7 @@ impl LazyRuntime {
         match response {
             crate::serial::EvalResponse::Ok { tensor_id, shape, data } => {
                 let buffer = crate::buffer::Buffer::from_bytes(device, &data)?;
-                let size = buffer.len();
+                let size = shape.iter().product::<usize>() * 4;
                 let tensor = Tensor::from_raw(tensor_id, shape, buffer);
                 let container_id = self.resolve_container(id);
                 self.scheduler.allocate_tensor(container_id, tensor_id, size)?;
@@ -319,7 +319,7 @@ impl LazyRuntime {
             }
         }
         if let Some(tensor) = self.tensors.remove(&id) {
-            self.scheduler.free_tensor(id, tensor.buffer.len());
+            self.scheduler.free_tensor(id, tensor.meta.size_bytes());
         }
         self.graph.remove_node(id);
         Ok(())
@@ -377,6 +377,17 @@ mod tests {
 
     fn get_device() -> Option<Device> {
         Device::new().ok()
+    }
+
+    #[test]
+    fn insert_tensor_tracks_logical_size() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        let t = Tensor::from_f32(&device, vec![4], &[1.0, 2.0, 3.0, 4.0]).unwrap();
+        let logical = t.meta.size_bytes();
+        rt.insert_tensor(t).unwrap();
+        let (bytes, _) = rt.scheduler.container_usage(ContainerId::DEFAULT).unwrap();
+        assert_eq!(bytes, logical);
     }
 
     #[test]

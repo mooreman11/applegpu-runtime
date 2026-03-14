@@ -155,8 +155,16 @@ impl Tensor {
     }
 
     /// Read tensor data as f32 slice (zero-copy).
+    /// Uses the logical tensor size (from shape), not the physical buffer size.
     pub fn as_f32_slice(&self) -> &[f32] {
-        unsafe { self.buffer.as_slice::<f32>() }
+        let count = self.meta.shape.numel();
+        unsafe { std::slice::from_raw_parts(self.buffer.contents() as *const f32, count) }
+    }
+
+    /// Move the buffer out of this tensor without deallocating.
+    pub fn into_buffer(self) -> Buffer {
+        let Tensor { buffer, meta: _ } = self;
+        buffer
     }
 
     /// Number of elements.
@@ -215,6 +223,31 @@ mod tests {
         assert_eq!(t.meta.dtype, DType::Float32);
         assert_eq!(t.numel(), 6);
         assert_eq!(t.as_f32_slice(), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn as_f32_slice_uses_logical_size() {
+        let device = match crate::device::Device::new() { Ok(d) => d, Err(_) => return };
+        let buf = Buffer::new(&device, 128).unwrap();
+        let ptr = buf.contents() as *mut f32;
+        unsafe { *ptr.add(0) = 1.0; *ptr.add(1) = 2.0; *ptr.add(2) = 3.0; *ptr.add(3) = 4.0; }
+        let t = Tensor::from_raw(999, vec![4], buf);
+        let slice = t.as_f32_slice();
+        assert_eq!(slice.len(), 4);
+        assert_eq!(slice, &[1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn into_buffer_moves_without_dealloc() {
+        let device = match crate::device::Device::new() {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let t = Tensor::from_f32(&device, vec![4], &[1.0, 2.0, 3.0, 4.0]).unwrap();
+        let buf = t.into_buffer();
+        assert_eq!(buf.len(), 16);
+        let data = unsafe { buf.as_slice::<f32>() };
+        assert_eq!(data, &[1.0, 2.0, 3.0, 4.0]);
     }
 
     #[test]

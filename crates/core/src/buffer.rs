@@ -66,6 +66,8 @@ impl Buffer {
     }
 
     /// Read buffer contents as a slice of T (zero-copy view).
+    /// WARNING: Returns the FULL physical buffer. With pooled buffers, this may
+    /// be larger than logical tensor data. Use Tensor::as_f32_slice() instead.
     /// # Safety
     /// Caller must ensure the buffer contains valid data of type T
     /// and that the buffer length is a multiple of size_of::<T>().
