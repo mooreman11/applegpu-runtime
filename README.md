@@ -7,7 +7,7 @@ A unified Metal GPU runtime library for Apple Silicon. One API, two backends.
 ```
 Python API (PyO3)  ←  import applegpu_runtime as gpu
         ↓
-   Rust Core       ←  ops, tensor management, kernel registry
+   Rust Core       ←  lazy graph, ops, tensor management, kernel registry
         ↓
 Swift Compat Layer ←  Metal, AVF (Apple Virtualization Framework)
         ↓
@@ -38,21 +38,26 @@ gpu.init_backend()
 a = gpu.tensor([1.0, 2.0, 3.0, 4.0], shape=[2, 2])
 b = gpu.tensor([5.0, 6.0, 7.0, 8.0], shape=[2, 2])
 
-# Arithmetic — all ops dispatch Metal compute kernels on the GPU
-gpu.to_list(gpu.add(a, b))     # [6.0, 8.0, 10.0, 12.0]
-gpu.to_list(gpu.sub(a, b))     # [-4.0, -4.0, -4.0, -4.0]
-gpu.to_list(gpu.mul(a, b))     # [5.0, 12.0, 21.0, 32.0]
-gpu.to_list(gpu.div(a, b))     # [0.2, 0.333..., 0.428..., 0.5]
+# Ops are lazy — they build a computation graph, no GPU work yet
+c = gpu.add(a, b)
+d = gpu.matmul(c, b)
+e = gpu.relu(d)
 
-# Unary ops
-gpu.to_list(gpu.neg(a))        # [-1.0, -2.0, -3.0, -4.0]
-gpu.to_list(gpu.relu(a))       # [1.0, 2.0, 3.0, 4.0]
-gpu.to_list(gpu.exp(a))        # [2.718..., 7.389..., ...]
-gpu.to_list(gpu.log(a))        # [0.0, 0.693..., ...]
-gpu.to_list(gpu.sqrt(a))       # [1.0, 1.414..., ...]
+# Computation happens on materialization
+gpu.to_list(e)     # evaluates the entire chain on the GPU
+gpu.shape(e)       # [2, 2] — works even before eval
 
-# Matrix multiply
-gpu.to_list(gpu.matmul(a, b))  # [19.0, 22.0, 43.0, 50.0]
+# Explicit evaluation and cleanup
+gpu.eval(c)        # materialize a specific tensor
+gpu.destroy(a)     # free GPU memory
+```
+
+### All Operations
+
+```python
+# Binary: add, sub, mul, div, matmul
+# Unary: neg, relu, exp, log, sqrt
+# Lifecycle: tensor, eval, to_list, shape, destroy
 ```
 
 ## Development
@@ -69,9 +74,11 @@ make test-python   # uv run pytest -v
 
 Active development. Current capabilities:
 
-- Three-layer FFI fully wired (Python → Rust → Swift → Metal GPU)
-- Metal buffer management with zero-copy shared memory (`storageModeShared`)
-- KernelRegistry with Arc-based pipeline caching (lock-free GPU dispatch)
+- **Lazy execution** — ops build a DAG, computation deferred until materialization
+- Topological sort with cycle detection for graph evaluation
+- `gpu.eval()` for explicit materialization, `gpu.to_list()` auto-evaluates
+- `gpu.destroy()` for memory cleanup with dependency validation
 - 10 GPU operations: add, sub, mul, div, neg, relu, exp, log, sqrt, matmul
-- Matrix multiply with 2D Metal compute dispatch and shape validation
-- 66 tests passing across all layers (32 Rust + 11 Swift + 23 Python)
+- KernelRegistry with Arc-based pipeline caching (lock-free GPU dispatch)
+- Metal buffer management with zero-copy shared memory (`storageModeShared`)
+- 79 tests passing across all layers (39 Rust + 11 Swift + 29 Python)

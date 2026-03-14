@@ -15,6 +15,11 @@ Tracks what needs to be built, ordered by priority. Derived from the original sp
 - [x] **Element-wise ops** — sub, mul, div, neg, relu, exp, log, sqrt via KernelRegistry
 - [x] **Matrix multiply (matmul)** — 2D Metal kernel with shape validation
 - [x] **Ops module** — High-level tensor ops API with global kernel caching
+- [x] **Computation graph** — OpNode DAG with topological sort and cycle detection
+- [x] **Lazy execution** — ops build graph nodes, deferred until `eval()` or `to_list()`
+- [x] **LazyRuntime** — unified storage for materialized tensors and pending graph
+- [x] **Tensor cleanup** — `gpu.destroy()` with dependency validation
+- [x] **Explicit eval** — `gpu.eval()` for manual materialization
 
 ## In Progress
 
@@ -22,17 +27,14 @@ _(nothing currently)_
 
 ## Up Next
 
-### Phase 3b: Additional Operations
-- [ ] **Attention** — fused attention kernel (Q, K, V → output)
-
-### Phase 4: Lazy Execution & Graph Capture
-- [ ] **Op graph** — capture operations as a DAG instead of executing immediately
-- [ ] **Lazy tensors** — defer computation until `.to_list()` or explicit materialization
+### Phase 4b: Graph Optimizations
 - [ ] **Kernel fusion** — combine compatible ops into single Metal kernels (e.g. matmul+add+relu)
 - [ ] **Persistent memory pools** — reduce GPU allocation overhead via buffer reuse
 
-### Phase 5: Memory Management & Cleanup
-- [ ] **Tensor cleanup** — `gpu.destroy(tensor_id)` to free GPU memory
+### Phase 3b: Additional Operations
+- [ ] **Attention** — fused attention kernel (Q, K, V → output)
+
+### Phase 5: Memory Management Improvements
 - [ ] **Automatic cleanup** — PyO3 class wrapper with Drop semantics instead of global HashMap
 - [ ] **Resource limits** — max tensor size, max GPU memory, per-container rate limits
 
