@@ -34,6 +34,7 @@ Tracks what needs to be built, ordered by priority. Derived from the original sp
 - [x] **Multi-container scheduler** — priority-based fair queuing, per-container quotas, starvation prevention, pause/resume, job lifecycle
 - [x] **Memory pools** — power-of-two bucketed BufferPool with watermark eviction
 - [x] **NumPy adapter** — `gpu.from_numpy(arr)` and `tensor.to_numpy()`, copy-based, f32 only
+- [x] **PyTorch adapter** — `gpu.from_torch(tensor)` and `tensor.to_torch()`, routes through NumPy bridge
 
 ## In Progress
 
@@ -42,14 +43,28 @@ _(nothing currently)_
 ## Up Next
 
 ### Phase 8: Framework Adapters (continued)
-- [ ] **PyTorch adapter** — `gpu.from_torch(tensor)`, `tensor.to_torch()`, copy-based
 - [ ] **Transformers adapter** — drop-in acceleration for HuggingFace models
 
-### Multi-dtype Support
-- [ ] **Multi-dtype adapters** — extend from_numpy/to_numpy to support float16, float64, int8, int32 (adapter layer only, ~1-2 hours)
-- [ ] **Multi-dtype compute kernels** — MSL kernel variants for float16/float64/int types (larger lift, touches all kernels + dispatch)
+### Ship
+- [ ] **Release prep** — final test pass, documentation polish, packaging
 
-### Post-Ship
+## Post-Ship Backlog
+
+### Framework Improvements
+- [ ] **Zero-copy from_numpy** — Metal `makeBuffer(bytesNoCopy:)` Swift FFI, page alignment, GC pinning, three-layer work
+- [ ] **PyTorch custom device backend** — register `applegpu` via PyTorch PrivateUse1 device API
+- [ ] **PyTorch autograd integration** — `torch.autograd.Function` wrappers (requires backward ops)
+- [ ] **Direct from_torch via data_ptr()** — bypass NumPy bridge when Metal bytesNoCopy is available
+
+### Multi-dtype Support
+- [ ] **Multi-dtype adapters** — extend from_numpy/to_numpy to support float16, float64, int8, int32 (adapter layer only)
+- [ ] **Multi-dtype compute kernels** — MSL kernel variants for float16/float64/int types (touches all kernels + dispatch)
+
+### Infrastructure
 - [ ] **Phase 7b: AVF VM integration** — VZVirtualMachine lifecycle, virtio-vsock transport (Metal GPU can't pass through to guest VMs)
-- [ ] **Zero-copy from_numpy** — Metal bytesNoCopy FFI, page alignment, GC pinning
-- [ ] **Dynamic container lifecycle** — work stealing, multi-node, distributed graph
+- [ ] **Phase C: Dynamic container lifecycle** — work stealing, auto-scaling based on queue pressure
+- [ ] **Multi-node / distributed graph** — network transport layer, graph partitioning across machines
+
+### Memory Pool Improvements
+- [ ] **Size-aware watermark eviction** — evict largest pooled buffers first (current v1 drops incoming buffer)
+- [ ] **Jemalloc-style size classes** — finer-grained bucketing to reduce fragmentation from 50% to ~33%
