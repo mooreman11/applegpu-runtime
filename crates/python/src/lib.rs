@@ -277,6 +277,21 @@ impl GpuTensor {
         Ok(GpuTensor { id, destroyed: Cell::new(false) })
     }
 
+    fn gelu(&self) -> PyResult<GpuTensor> {
+        let mut rt = RUNTIME_LAZY.lock().unwrap();
+        let id = applegpu_core::ops::gelu(&mut rt, self.id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(GpuTensor { id, destroyed: Cell::new(false) })
+    }
+
+    #[pyo3(signature = (gamma, beta, eps=1e-5))]
+    fn layer_norm(&self, gamma: &GpuTensor, beta: &GpuTensor, eps: f32) -> PyResult<GpuTensor> {
+        let mut rt = RUNTIME_LAZY.lock().unwrap();
+        let id = applegpu_core::ops::layer_norm(&mut rt, self.id, gamma.id, beta.id, eps)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(GpuTensor { id, destroyed: Cell::new(false) })
+    }
+
     fn transpose(&self) -> PyResult<GpuTensor> {
         let mut rt = RUNTIME_LAZY.lock().unwrap();
         let id = applegpu_core::ops::transpose(&mut rt, self.id)
@@ -572,6 +587,23 @@ fn softmax(t: &GpuTensor) -> PyResult<GpuTensor> { t.softmax() }
 fn transpose(t: &GpuTensor) -> PyResult<GpuTensor> { t.transpose() }
 
 #[pyfunction]
+fn gelu(t: &GpuTensor) -> PyResult<GpuTensor> { t.gelu() }
+
+#[pyfunction]
+#[pyo3(signature = (input, gamma, beta, eps=1e-5))]
+fn layer_norm(input: &GpuTensor, gamma: &GpuTensor, beta: &GpuTensor, eps: f32) -> PyResult<GpuTensor> {
+    input.layer_norm(gamma, beta, eps)
+}
+
+#[pyfunction]
+fn embedding(weights: &GpuTensor, indices: &GpuTensor) -> PyResult<GpuTensor> {
+    let mut rt = RUNTIME_LAZY.lock().unwrap();
+    let id = applegpu_core::ops::embedding(&mut rt, weights.id, indices.id)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(GpuTensor { id, destroyed: Cell::new(false) })
+}
+
+#[pyfunction]
 fn attention(q: &GpuTensor, k: &GpuTensor, v: &GpuTensor) -> PyResult<GpuTensor> {
     let mut rt = RUNTIME_LAZY.lock().unwrap();
     let id = applegpu_core::ops::attention(&mut rt, q.id, k.id, v.id)
@@ -736,6 +768,9 @@ fn applegpu_runtime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(sqrt, m)?)?;
     m.add_function(wrap_pyfunction!(softmax, m)?)?;
     m.add_function(wrap_pyfunction!(transpose, m)?)?;
+    m.add_function(wrap_pyfunction!(gelu, m)?)?;
+    m.add_function(wrap_pyfunction!(layer_norm, m)?)?;
+    m.add_function(wrap_pyfunction!(embedding, m)?)?;
     m.add_function(wrap_pyfunction!(attention, m)?)?;
     m.add_function(wrap_pyfunction!(matmul, m)?)?;
     m.add_function(wrap_pyfunction!(register_container, m)?)?;
