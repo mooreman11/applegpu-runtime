@@ -24,6 +24,45 @@ impl DType {
             DType::Float64 | DType::Int64 => 8,
         }
     }
+
+    /// Whether this dtype has GPU compute kernels.
+    pub fn is_compute_supported(&self) -> bool {
+        matches!(self, DType::Float32 | DType::Float16)
+    }
+
+    /// Map from string name to DType.
+    pub fn from_name(name: &str) -> Option<DType> {
+        match name {
+            "float16" | "f16" => Some(DType::Float16),
+            "float32" | "f32" => Some(DType::Float32),
+            "float64" | "f64" => Some(DType::Float64),
+            "int8" | "i8" => Some(DType::Int8),
+            "int16" | "i16" => Some(DType::Int16),
+            "int32" | "i32" => Some(DType::Int32),
+            "int64" | "i64" => Some(DType::Int64),
+            "uint8" | "u8" => Some(DType::UInt8),
+            "uint32" | "u32" => Some(DType::UInt32),
+            "bool" | "bool_" => Some(DType::Bool),
+            _ => None,
+        }
+    }
+
+    /// Map to string name.
+    pub fn name(&self) -> &'static str {
+        match self {
+            DType::Float16 => "float16",
+            DType::Float32 => "float32",
+            DType::Float64 => "float64",
+            DType::Int8 => "int8",
+            DType::Int16 => "int16",
+            DType::Int32 => "int32",
+            DType::Int64 => "int64",
+            DType::UInt8 => "uint8",
+            DType::UInt32 => "uint32",
+            DType::Bool => "bool",
+            DType::BFloat16 => "bfloat16",
+        }
+    }
 }
 
 /// Shape of a tensor (dimensions).
@@ -106,94 +145,64 @@ impl Tensor {
         }
     }
 
-    /// Create a tensor from f32 data.
-    pub fn from_f32(device: &Device, shape: Vec<usize>, data: &[f32]) -> Result<Self> {
-        let expected = shape.iter().product::<usize>();
+    /// Create a tensor from raw bytes + dtype. Validates byte count.
+    pub fn from_data(device: &Device, shape: Vec<usize>, dtype: DType, data: &[u8]) -> Result<Self> {
+        let expected = shape.iter().product::<usize>() * dtype.size_bytes();
         if data.len() != expected {
             return Err(crate::error::GpuError::InvalidTensor(format!(
-                "Shape {:?} expects {} elements but got {}",
-                shape, expected, data.len()
+                "Shape {:?} with {:?} expects {} bytes but got {}",
+                shape, dtype, expected, data.len()
             )));
         }
-
-        let bytes = unsafe {
-            std::slice::from_raw_parts(
-                data.as_ptr() as *const u8,
-                data.len() * std::mem::size_of::<f32>(),
-            )
-        };
-        let buffer = Buffer::from_bytes(device, bytes)?;
+        let buffer = Buffer::from_bytes(device, data)?;
         let id = TENSOR_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
-
         Ok(Tensor {
-            meta: TensorMeta {
-                id,
-                shape: Shape::new(shape),
-                dtype: DType::Float32,
-                location: TensorLocation::Shared,
-            },
+            meta: TensorMeta { id, shape: Shape::new(shape), dtype, location: TensorLocation::Shared },
             buffer,
         })
     }
 
-    /// Create an uninitialized tensor (for output buffers).
-    pub fn empty_f32(device: &Device, shape: Vec<usize>) -> Result<Self> {
-        let numel: usize = shape.iter().product();
-        let size_bytes = numel * std::mem::size_of::<f32>();
+    /// Allocate an uninitialized tensor of any dtype.
+    pub fn empty(device: &Device, shape: Vec<usize>, dtype: DType) -> Result<Self> {
+        let size_bytes = shape.iter().product::<usize>() * dtype.size_bytes();
         let buffer = Buffer::new(device, size_bytes)?;
         let id = TENSOR_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
-
         Ok(Tensor {
-            meta: TensorMeta {
-                id,
-                shape: Shape::new(shape),
-                dtype: DType::Float32,
-                location: TensorLocation::Shared,
-            },
+            meta: TensorMeta { id, shape: Shape::new(shape), dtype, location: TensorLocation::Shared },
             buffer,
         })
+    }
+
+    /// Read tensor data as raw bytes. Uses logical size (not physical buffer size).
+    pub fn as_bytes(&self) -> &[u8] {
+        let byte_count = self.meta.size_bytes();
+        unsafe { std::slice::from_raw_parts(self.buffer.contents(), byte_count) }
+    }
+
+    /// Create a tensor from f32 data.
+    pub fn from_f32(device: &Device, shape: Vec<usize>, data: &[f32]) -> Result<Self> {
+        let bytes = unsafe {
+            std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * std::mem::size_of::<f32>())
+        };
+        Self::from_data(device, shape, DType::Float32, bytes)
+    }
+
+    /// Create an uninitialized f32 tensor (for output buffers).
+    pub fn empty_f32(device: &Device, shape: Vec<usize>) -> Result<Self> {
+        Self::empty(device, shape, DType::Float32)
     }
 
     /// Create an uninitialized f16 tensor (for output buffers).
     pub fn empty_f16(device: &Device, shape: Vec<usize>) -> Result<Self> {
-        let numel: usize = shape.iter().product();
-        let size_bytes = numel * 2;
-        let buffer = Buffer::new(device, size_bytes)?;
-        let id = TENSOR_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
-        Ok(Tensor {
-            meta: TensorMeta {
-                id,
-                shape: Shape::new(shape),
-                dtype: DType::Float16,
-                location: TensorLocation::Shared,
-            },
-            buffer,
-        })
+        Self::empty(device, shape, DType::Float16)
     }
 
     /// Create a tensor from f16 data (passed as raw u16 bit patterns).
     pub fn from_f16(device: &Device, shape: Vec<usize>, data: &[u16]) -> Result<Self> {
-        let expected = shape.iter().product::<usize>();
-        if data.len() != expected {
-            return Err(crate::error::GpuError::InvalidTensor(format!(
-                "Shape {:?} expects {} elements but got {}",
-                shape, expected, data.len()
-            )));
-        }
         let bytes = unsafe {
             std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 2)
         };
-        let buffer = Buffer::from_bytes(device, bytes)?;
-        let id = TENSOR_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
-        Ok(Tensor {
-            meta: TensorMeta {
-                id,
-                shape: Shape::new(shape),
-                dtype: DType::Float16,
-                location: TensorLocation::Shared,
-            },
-            buffer,
-        })
+        Self::from_data(device, shape, DType::Float16, bytes)
     }
 
     /// Read tensor data as f16 slice (zero-copy, returns raw u16 bit patterns).
@@ -377,6 +386,59 @@ mod tests {
         };
         let t = Tensor::empty_f16(&device, vec![4]).unwrap();
         let _ = t.as_f32_slice();
+    }
+
+    #[test]
+    fn test_from_data_int32() {
+        let device = match crate::device::Device::new() { Ok(d) => d, Err(_) => return };
+        let data: Vec<i32> = vec![1, 2, 3, 4];
+        let bytes = unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, 16) };
+        let t = Tensor::from_data(&device, vec![4], DType::Int32, bytes).unwrap();
+        assert_eq!(t.meta.dtype, DType::Int32);
+        assert_eq!(t.meta.size_bytes(), 16);
+    }
+
+    #[test]
+    fn test_from_data_validates_byte_count() {
+        let device = match crate::device::Device::new() { Ok(d) => d, Err(_) => return };
+        let result = Tensor::from_data(&device, vec![4], DType::Float32, &[0u8; 8]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_empty_int64() {
+        let device = match crate::device::Device::new() { Ok(d) => d, Err(_) => return };
+        let t = Tensor::empty(&device, vec![10], DType::Int64).unwrap();
+        assert_eq!(t.meta.dtype, DType::Int64);
+        assert_eq!(t.meta.size_bytes(), 80);
+    }
+
+    #[test]
+    fn test_as_bytes_roundtrip() {
+        let device = match crate::device::Device::new() { Ok(d) => d, Err(_) => return };
+        let data: Vec<i32> = vec![42, -7, 100, 0];
+        let bytes = unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, 16) };
+        let t = Tensor::from_data(&device, vec![4], DType::Int32, bytes).unwrap();
+        assert_eq!(t.as_bytes(), bytes);
+    }
+
+    #[test]
+    fn test_dtype_from_name_all() {
+        assert_eq!(DType::from_name("float32"), Some(DType::Float32));
+        assert_eq!(DType::from_name("int32"), Some(DType::Int32));
+        assert_eq!(DType::from_name("bool"), Some(DType::Bool));
+        assert_eq!(DType::from_name("bool_"), Some(DType::Bool));
+        assert_eq!(DType::from_name("unknown"), None);
+    }
+
+    #[test]
+    fn test_dtype_name_roundtrip() {
+        for dtype in &[DType::Float16, DType::Float32, DType::Float64,
+                       DType::Int8, DType::Int16, DType::Int32, DType::Int64,
+                       DType::UInt8, DType::UInt32, DType::Bool] {
+            let name = dtype.name();
+            assert_eq!(DType::from_name(name), Some(*dtype));
+        }
     }
 
     #[test]

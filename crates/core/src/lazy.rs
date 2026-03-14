@@ -368,6 +368,12 @@ impl LazyRuntime {
         Err(GpuError::GraphError(format!("Tensor {} not found", id)))
     }
 
+    /// Read tensor data as raw bytes. Requires the tensor to be materialized.
+    pub fn read_bytes(&self, id: u64) -> Result<Vec<u8>> {
+        let t = self.get_tensor(id)?;
+        Ok(t.as_bytes().to_vec())
+    }
+
     /// Read tensor data as f16 slice (raw u16 bit patterns). Requires the tensor to be materialized.
     pub fn read_f16(&self, id: u64) -> Result<Vec<u16>> {
         let t = self.get_tensor(id)?;

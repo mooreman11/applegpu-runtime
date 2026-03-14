@@ -2,9 +2,18 @@ use crate::error::{GpuError, Result};
 use crate::graph::{OpKind, OpNode};
 use crate::lazy::LazyRuntime;
 use crate::scheduler::ContainerId;
-use crate::tensor::Shape;
+use crate::tensor::{DType, Shape};
 
 use std::sync::atomic::{AtomicU64, Ordering};
+
+fn validate_compute_dtype(dtype: DType) -> Result<()> {
+    if !dtype.is_compute_supported() {
+        return Err(GpuError::InvalidTensor(format!(
+            "No compute kernel for {:?}. Supported: Float32, Float16.", dtype
+        )));
+    }
+    Ok(())
+}
 
 static OP_ID_COUNTER: AtomicU64 = AtomicU64::new(100_000);
 
@@ -14,6 +23,11 @@ fn next_id() -> u64 {
 
 /// Record a binary element-wise op in the graph.
 fn lazy_binary_op(rt: &mut LazyRuntime, a_id: u64, b_id: u64, op: OpKind) -> Result<u64> {
+    let a_dtype = rt.dtype(a_id)?;
+    validate_compute_dtype(a_dtype)?;
+    let b_dtype = rt.dtype(b_id)?;
+    validate_compute_dtype(b_dtype)?;
+
     let a_shape = rt.shape(a_id)?;
     let b_shape = rt.shape(b_id)?;
 
@@ -24,8 +38,6 @@ fn lazy_binary_op(rt: &mut LazyRuntime, a_id: u64, b_id: u64, op: OpKind) -> Res
         )));
     }
 
-    let a_dtype = rt.dtype(a_id)?;
-    let b_dtype = rt.dtype(b_id)?;
     if a_dtype != b_dtype {
         return Err(GpuError::InvalidTensor(format!(
             "Dtype mismatch: {:?} vs {:?}",
@@ -47,8 +59,9 @@ fn lazy_binary_op(rt: &mut LazyRuntime, a_id: u64, b_id: u64, op: OpKind) -> Res
 
 /// Record a unary element-wise op in the graph.
 fn lazy_unary_op(rt: &mut LazyRuntime, input_id: u64, op: OpKind) -> Result<u64> {
-    let shape = rt.shape(input_id)?;
     let out_dtype = rt.dtype(input_id)?;
+    validate_compute_dtype(out_dtype)?;
+    let shape = rt.shape(input_id)?;
     let out_id = next_id();
     rt.record_op(OpNode {
         id: out_id,
@@ -99,6 +112,11 @@ pub fn sqrt(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
 
 /// Record a matmul op. Validates 2D shapes and inner dimension match.
 pub fn matmul(rt: &mut LazyRuntime, a_id: u64, b_id: u64) -> Result<u64> {
+    let a_dtype = rt.dtype(a_id)?;
+    validate_compute_dtype(a_dtype)?;
+    let b_dtype = rt.dtype(b_id)?;
+    validate_compute_dtype(b_dtype)?;
+
     let a_shape = rt.shape(a_id)?;
     let b_shape = rt.shape(b_id)?;
 
@@ -109,8 +127,6 @@ pub fn matmul(rt: &mut LazyRuntime, a_id: u64, b_id: u64) -> Result<u64> {
         )));
     }
 
-    let a_dtype = rt.dtype(a_id)?;
-    let b_dtype = rt.dtype(b_id)?;
     if a_dtype != b_dtype {
         return Err(GpuError::InvalidTensor(format!(
             "Dtype mismatch: {:?} vs {:?}",
@@ -142,20 +158,21 @@ pub fn matmul(rt: &mut LazyRuntime, a_id: u64, b_id: u64) -> Result<u64> {
 
 /// Softmax along last dimension. Input must be 2D [rows, cols].
 pub fn softmax(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
+    let dtype = rt.dtype(input_id)?;
+    validate_compute_dtype(dtype)?;
     let shape = rt.shape(input_id)?;
     if shape.len() != 2 {
         return Err(GpuError::InvalidTensor(format!(
             "softmax requires 2D tensor, got {:?}", shape
         )));
     }
-    let out_dtype = rt.dtype(input_id)?;
     let out_id = next_id();
     rt.record_op(OpNode {
         id: out_id,
         op: OpKind::Softmax,
         inputs: vec![input_id],
         out_shape: Shape::new(shape),
-        out_dtype,
+        out_dtype: dtype,
         container_id: ContainerId::DEFAULT,
     });
     Ok(out_id)
@@ -163,20 +180,21 @@ pub fn softmax(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
 
 /// Transpose a 2D tensor: [rows, cols] → [cols, rows].
 pub fn transpose(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
+    let dtype = rt.dtype(input_id)?;
+    validate_compute_dtype(dtype)?;
     let shape = rt.shape(input_id)?;
     if shape.len() != 2 {
         return Err(GpuError::InvalidTensor(format!(
             "transpose requires 2D tensor, got {:?}", shape
         )));
     }
-    let out_dtype = rt.dtype(input_id)?;
     let out_id = next_id();
     rt.record_op(OpNode {
         id: out_id,
         op: OpKind::Transpose,
         inputs: vec![input_id],
         out_shape: Shape::new(vec![shape[1], shape[0]]),
-        out_dtype,
+        out_dtype: dtype,
         container_id: ContainerId::DEFAULT,
     });
     Ok(out_id)
@@ -184,15 +202,16 @@ pub fn transpose(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
 
 /// Multiply every element by a scalar.
 pub fn scalar_mul(rt: &mut LazyRuntime, input_id: u64, scale: f32) -> Result<u64> {
+    let dtype = rt.dtype(input_id)?;
+    validate_compute_dtype(dtype)?;
     let shape = rt.shape(input_id)?;
-    let out_dtype = rt.dtype(input_id)?;
     let out_id = next_id();
     rt.record_op(OpNode {
         id: out_id,
         op: OpKind::ScalarMul(scale),
         inputs: vec![input_id],
         out_shape: Shape::new(shape),
-        out_dtype,
+        out_dtype: dtype,
         container_id: ContainerId::DEFAULT,
     });
     Ok(out_id)
@@ -508,5 +527,20 @@ mod tests {
             assert!(v.is_finite());
             assert!(v >= 0.0 && v <= 10.0);
         }
+    }
+
+    #[test]
+    fn test_compute_rejects_int32() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        let data = [0i32; 4];
+        let bytes = unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, 16) };
+        let a = Tensor::from_data(&device, vec![4], crate::tensor::DType::Int32, bytes).unwrap();
+        let b = Tensor::from_data(&device, vec![4], crate::tensor::DType::Int32, bytes).unwrap();
+        let a_id = a.meta.id;
+        let b_id = b.meta.id;
+        rt.insert_tensor(a).unwrap();
+        rt.insert_tensor(b).unwrap();
+        assert!(crate::ops::add(&mut rt, a_id, b_id).is_err());
     }
 }
