@@ -67,6 +67,12 @@ _(nothing currently)_
 - [ ] **Phase C: Dynamic container lifecycle** — work stealing, auto-scaling based on queue pressure
 - [ ] **Multi-node / distributed graph** — network transport layer, graph partitioning across machines
 
+### Concurrency
+- [ ] **Multiple Metal command queues** — dispatch independent graph branches in parallel on the same GPU. Apple Silicon supports concurrent queues natively. Biggest throughput win for workloads with independent subgraphs.
+- [ ] **Async eval** — `gpu.eval_async(tensor)` returns a future/handle, doesn't block Python. Submit multiple evals and wait on results. Integrates with the scheduler's job queue.
+- [ ] **Fine-grained locking** — split single `Mutex<LazyRuntime>` into per-component locks (graph, tensor store, scheduler, pool). Allows concurrent reads while one eval runs. Requires careful lock ordering to avoid deadlocks.
+- [ ] **Multi-GPU support** _(very low priority)_ — device pool, per-device buffer pools, cross-device transfers. Only relevant for Mac Pro with multiple chips or eGPUs. Apple Silicon has one GPU per chip.
+
 ### Memory Pool Improvements
 - [ ] **Size-aware watermark eviction** — evict largest pooled buffers first (current v1 drops incoming buffer)
 - [ ] **Jemalloc-style size classes** — finer-grained bucketing to reduce fragmentation from 50% to ~33%
