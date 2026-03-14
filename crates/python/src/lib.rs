@@ -264,8 +264,35 @@ fn tensor(data: Vec<f32>, shape: Vec<usize>) -> PyResult<GpuTensor> {
     let t = Tensor::from_f32(&runtime.device, shape, &data)
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let id = t.meta.id;
-    RUNTIME_LAZY.lock().unwrap().insert_tensor(t);
+    RUNTIME_LAZY.lock().unwrap().insert_tensor(t)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(GpuTensor { id, destroyed: Cell::new(false) })
+}
+
+/// Set resource limits. Pass 0 for any field to make it unlimited.
+#[pyfunction]
+fn set_limits(max_tensor_size_mb: usize, max_memory_mb: usize, max_tensors: usize) -> PyResult<()> {
+    let mut rt = RUNTIME_LAZY.lock().unwrap();
+    rt.set_limits(applegpu_core::limits::ResourceLimits {
+        max_tensor_size_bytes: if max_tensor_size_mb > 0 { max_tensor_size_mb * 1024 * 1024 } else { 0 },
+        max_total_memory_bytes: if max_memory_mb > 0 { max_memory_mb * 1024 * 1024 } else { 0 },
+        max_tensor_count: max_tensors,
+    });
+    Ok(())
+}
+
+/// Get current GPU memory usage in bytes.
+#[pyfunction]
+fn memory_usage() -> PyResult<usize> {
+    let rt = RUNTIME_LAZY.lock().unwrap();
+    Ok(rt.memory_usage())
+}
+
+/// Get current number of live tensors.
+#[pyfunction]
+fn tensor_count() -> PyResult<usize> {
+    let rt = RUNTIME_LAZY.lock().unwrap();
+    Ok(rt.live_tensor_count())
 }
 
 // Backward-compatible module-level functions that accept GpuTensor
@@ -339,6 +366,9 @@ fn applegpu_runtime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(to_list, m)?)?;
     m.add_function(wrap_pyfunction!(shape, m)?)?;
     m.add_function(wrap_pyfunction!(destroy, m)?)?;
+    m.add_function(wrap_pyfunction!(set_limits, m)?)?;
+    m.add_function(wrap_pyfunction!(memory_usage, m)?)?;
+    m.add_function(wrap_pyfunction!(tensor_count, m)?)?;
     m.add_function(wrap_pyfunction!(add, m)?)?;
     m.add_function(wrap_pyfunction!(sub, m)?)?;
     m.add_function(wrap_pyfunction!(mul, m)?)?;
