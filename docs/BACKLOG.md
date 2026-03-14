@@ -40,11 +40,12 @@ Tracks what needs to be built, ordered by priority. Derived from the original sp
 
 ## Up Next (priority order)
 
-### 1. Multi-dtype compute kernels (float16 priority)
-_Apple Silicon has native f16 ALUs at 2x f32 throughput. This doubles performance for every existing op with no algorithmic changes. Every future op gets f16 for free._
-- [ ] **Multi-dtype dispatch layer** — DType-aware kernel selection in KernelRegistry
-- [ ] **Float16 MSL kernels** — f16 variants of all 14 ops
-- [ ] **Multi-dtype adapters** — extend from_numpy/to_numpy/from_torch/to_torch for float16
+### ~~1. Multi-dtype compute kernels (float16 priority)~~ DONE
+- [x] **Multi-dtype dispatch layer** — DType-aware kernel selection in KernelRegistry
+- [x] **Float16 MSL kernels** — f16 variants of all 14 ops (preprocessor templates + custom f32-intermediate matmul/softmax/scalar_mul)
+- [x] **Multi-dtype adapters** — from_numpy/to_numpy/from_torch/to_torch support float16
+- [x] **Dtype inference** — ops infer output dtype from inputs, mixed-dtype errors
+- [x] **Dtype-aware fusion** — fused kernels emit `half` types for f16 chains
 
 ### 2. Multiple Metal command queues
 _Biggest architectural unlock. Independent graph branches execute in parallel on the same GPU. Foundation for async eval and fine-grained locking._
