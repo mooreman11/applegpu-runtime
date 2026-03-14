@@ -204,6 +204,48 @@ extern "C" {
         element_count: u64,
     ) -> *mut std::ffi::c_void;
 
+    pub fn gpu_bridge_compute_layer_norm(
+        compute: *mut GPUComputeHandle,
+        buf_input: *const GPUBufferHandle,
+        buf_gamma: *const GPUBufferHandle,
+        buf_beta: *const GPUBufferHandle,
+        buf_output: *mut GPUBufferHandle,
+        rows: u32,
+        cols: u32,
+        eps: f32,
+    ) -> i32;
+
+    pub fn gpu_bridge_compute_embedding(
+        compute: *mut GPUComputeHandle,
+        buf_weights: *const GPUBufferHandle,
+        buf_indices: *const GPUBufferHandle,
+        buf_output: *mut GPUBufferHandle,
+        seq_len: u32,
+        embed_dim: u32,
+    ) -> i32;
+
+    pub fn gpu_bridge_compute_layer_norm_nb(
+        compute: *mut GPUComputeHandle,
+        queue: *mut std::ffi::c_void,
+        buf_input: *const GPUBufferHandle,
+        buf_gamma: *const GPUBufferHandle,
+        buf_beta: *const GPUBufferHandle,
+        buf_output: *mut GPUBufferHandle,
+        rows: u32,
+        cols: u32,
+        eps: f32,
+    ) -> *mut std::ffi::c_void;
+
+    pub fn gpu_bridge_compute_embedding_nb(
+        compute: *mut GPUComputeHandle,
+        queue: *mut std::ffi::c_void,
+        buf_weights: *const GPUBufferHandle,
+        buf_indices: *const GPUBufferHandle,
+        buf_output: *mut GPUBufferHandle,
+        seq_len: u32,
+        embed_dim: u32,
+    ) -> *mut std::ffi::c_void;
+
     pub fn gpu_bridge_compute_fused_nb(
         compute: *mut GPUComputeHandle,
         queue: *mut std::ffi::c_void,

@@ -69,6 +69,9 @@ fn op_to_discriminant(op: &OpKind) -> u32 {
         OpKind::Softmax => 11,
         OpKind::Transpose => 12,
         OpKind::ScalarMul(_) => 13,
+        OpKind::Gelu => 14,
+        OpKind::LayerNorm { .. } => 15,
+        OpKind::Embedding => 16,
     }
 }
 
@@ -106,6 +109,13 @@ fn discriminant_to_op(d: u32, r: &mut impl Read) -> io::Result<OpKind> {
             r.read_exact(&mut scale_bytes)?;
             Ok(OpKind::ScalarMul(f32::from_le_bytes(scale_bytes)))
         }
+        14 => Ok(OpKind::Gelu),
+        15 => {
+            let mut eps_bytes = [0u8; 4];
+            r.read_exact(&mut eps_bytes)?;
+            Ok(OpKind::LayerNorm { eps: f32::from_le_bytes(eps_bytes) })
+        }
+        16 => Ok(OpKind::Embedding),
         _ => Err(io::Error::new(io::ErrorKind::InvalidData, format!("Unknown op type: {}", d))),
     }
 }
@@ -152,6 +162,9 @@ impl EvalRequest {
             }
             if let OpKind::ScalarMul(scale) = node.op {
                 buf.write_all(&scale.to_le_bytes()).unwrap();
+            }
+            if let OpKind::LayerNorm { eps } = node.op {
+                buf.write_all(&eps.to_le_bytes()).unwrap();
             }
         }
 

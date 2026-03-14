@@ -232,6 +232,62 @@ final class GPUCompute {
         commandBuffer.waitUntilCompleted()
         return commandBuffer.status == .completed
     }
+    func dispatchLayerNorm(bufIn: MTLBuffer, bufGamma: MTLBuffer, bufBeta: MTLBuffer, bufOut: MTLBuffer, rows: Int, cols: Int, eps: Float) -> Bool {
+        if rows == 0 || cols == 0 { return true }
+
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder() else { return false }
+
+        encoder.setComputePipelineState(pipelineState)
+        encoder.setBuffer(bufIn, offset: 0, index: 0)
+        encoder.setBuffer(bufGamma, offset: 0, index: 1)
+        encoder.setBuffer(bufBeta, offset: 0, index: 2)
+        encoder.setBuffer(bufOut, offset: 0, index: 3)
+
+        var r = UInt32(rows), c = UInt32(cols), e = eps
+        encoder.setBytes(&r, length: MemoryLayout<UInt32>.size, index: 4)
+        encoder.setBytes(&c, length: MemoryLayout<UInt32>.size, index: 5)
+        encoder.setBytes(&e, length: MemoryLayout<Float>.size, index: 6)
+
+        let threadGroupSize = min(pipelineState.maxTotalThreadsPerThreadgroup, rows)
+        let threadGroups = (rows + threadGroupSize - 1) / threadGroupSize
+
+        encoder.dispatchThreadgroups(
+            MTLSize(width: threadGroups, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: threadGroupSize, height: 1, depth: 1)
+        )
+        encoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        return commandBuffer.status == .completed
+    }
+
+    func dispatchEmbedding(bufWeights: MTLBuffer, bufIndices: MTLBuffer, bufOut: MTLBuffer, seqLen: Int, embedDim: Int) -> Bool {
+        if seqLen == 0 || embedDim == 0 { return true }
+
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder() else { return false }
+
+        encoder.setComputePipelineState(pipelineState)
+        encoder.setBuffer(bufWeights, offset: 0, index: 0)
+        encoder.setBuffer(bufIndices, offset: 0, index: 1)
+        encoder.setBuffer(bufOut, offset: 0, index: 2)
+
+        var s = UInt32(seqLen), d = UInt32(embedDim)
+        encoder.setBytes(&s, length: MemoryLayout<UInt32>.size, index: 3)
+        encoder.setBytes(&d, length: MemoryLayout<UInt32>.size, index: 4)
+
+        let w = pipelineState.threadExecutionWidth
+        let h = pipelineState.maxTotalThreadsPerThreadgroup / w
+        let threadsPerGroup = MTLSize(width: w, height: h, depth: 1)
+        let gridSize = MTLSize(width: embedDim, height: seqLen, depth: 1)
+
+        encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadsPerGroup)
+        encoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        return commandBuffer.status == .completed
+    }
 }
 
 // MARK: - C ABI exports
@@ -439,6 +495,62 @@ public func gpuBridgeComputeScalarMul(
         bufIn: bufIn.buffer, bufOut: bufOut.buffer,
         scale: scale, count: Int(elementCount)
     ) ? 0 : -1
+}
+
+@_cdecl("gpu_bridge_compute_layer_norm")
+public func gpuBridgeComputeLayerNorm(
+    _ computePtr: UnsafeMutableRawPointer?,
+    _ bufInPtr: UnsafeRawPointer?,
+    _ bufGammaPtr: UnsafeRawPointer?,
+    _ bufBetaPtr: UnsafeRawPointer?,
+    _ bufOutPtr: UnsafeMutableRawPointer?,
+    _ rows: UInt32,
+    _ cols: UInt32,
+    _ eps: Float
+) -> Int32 {
+    guard let computePtr = computePtr,
+          let bufInPtr = bufInPtr,
+          let bufGammaPtr = bufGammaPtr,
+          let bufBetaPtr = bufBetaPtr,
+          let bufOutPtr = bufOutPtr else { return -1 }
+
+    let compute = Unmanaged<GPUCompute>.fromOpaque(computePtr).takeUnretainedValue()
+    let bufIn = Unmanaged<GPUBuffer>.fromOpaque(bufInPtr).takeUnretainedValue()
+    let bufGamma = Unmanaged<GPUBuffer>.fromOpaque(bufGammaPtr).takeUnretainedValue()
+    let bufBeta = Unmanaged<GPUBuffer>.fromOpaque(bufBetaPtr).takeUnretainedValue()
+    let bufOut = Unmanaged<GPUBuffer>.fromOpaque(bufOutPtr).takeUnretainedValue()
+
+    let success = compute.dispatchLayerNorm(
+        bufIn: bufIn.buffer, bufGamma: bufGamma.buffer, bufBeta: bufBeta.buffer,
+        bufOut: bufOut.buffer, rows: Int(rows), cols: Int(cols), eps: eps
+    )
+    return success ? 0 : -1
+}
+
+@_cdecl("gpu_bridge_compute_embedding")
+public func gpuBridgeComputeEmbedding(
+    _ computePtr: UnsafeMutableRawPointer?,
+    _ bufWeightsPtr: UnsafeRawPointer?,
+    _ bufIndicesPtr: UnsafeRawPointer?,
+    _ bufOutPtr: UnsafeMutableRawPointer?,
+    _ seqLen: UInt32,
+    _ embedDim: UInt32
+) -> Int32 {
+    guard let computePtr = computePtr,
+          let bufWeightsPtr = bufWeightsPtr,
+          let bufIndicesPtr = bufIndicesPtr,
+          let bufOutPtr = bufOutPtr else { return -1 }
+
+    let compute = Unmanaged<GPUCompute>.fromOpaque(computePtr).takeUnretainedValue()
+    let bufWeights = Unmanaged<GPUBuffer>.fromOpaque(bufWeightsPtr).takeUnretainedValue()
+    let bufIndices = Unmanaged<GPUBuffer>.fromOpaque(bufIndicesPtr).takeUnretainedValue()
+    let bufOut = Unmanaged<GPUBuffer>.fromOpaque(bufOutPtr).takeUnretainedValue()
+
+    let success = compute.dispatchEmbedding(
+        bufWeights: bufWeights.buffer, bufIndices: bufIndices.buffer,
+        bufOut: bufOut.buffer, seqLen: Int(seqLen), embedDim: Int(embedDim)
+    )
+    return success ? 0 : -1
 }
 
 // MARK: - Non-blocking (batched) C ABI exports
@@ -787,6 +899,110 @@ public func gpuBridgeComputeFusedNB(
         MTLSize(width: threadGroups, height: 1, depth: 1),
         threadsPerThreadgroup: MTLSize(width: threadGroupSize, height: 1, depth: 1)
     )
+    encoder.endEncoding()
+    commandBuffer.commit()
+
+    return Unmanaged.passRetained(commandBuffer as AnyObject).toOpaque()
+}
+
+@_cdecl("gpu_bridge_compute_layer_norm_nb")
+public func gpuBridgeComputeLayerNormNB(
+    _ computePtr: UnsafeMutableRawPointer?,
+    _ queuePtr: UnsafeMutableRawPointer?,
+    _ bufInPtr: UnsafeRawPointer?,
+    _ bufGammaPtr: UnsafeRawPointer?,
+    _ bufBetaPtr: UnsafeRawPointer?,
+    _ bufOutPtr: UnsafeMutableRawPointer?,
+    _ rows: UInt32,
+    _ cols: UInt32,
+    _ eps: Float
+) -> UnsafeMutableRawPointer? {
+    guard let computePtr = computePtr,
+          let queuePtr = queuePtr,
+          let bufInPtr = bufInPtr,
+          let bufGammaPtr = bufGammaPtr,
+          let bufBetaPtr = bufBetaPtr,
+          let bufOutPtr = bufOutPtr else { return nil }
+
+    let compute = Unmanaged<GPUCompute>.fromOpaque(computePtr).takeUnretainedValue()
+    let queue = Unmanaged<MTLCommandQueue>.fromOpaque(queuePtr).takeUnretainedValue()
+    let bufIn = Unmanaged<GPUBuffer>.fromOpaque(bufInPtr).takeUnretainedValue()
+    let bufGamma = Unmanaged<GPUBuffer>.fromOpaque(bufGammaPtr).takeUnretainedValue()
+    let bufBeta = Unmanaged<GPUBuffer>.fromOpaque(bufBetaPtr).takeUnretainedValue()
+    let bufOut = Unmanaged<GPUBuffer>.fromOpaque(bufOutPtr).takeUnretainedValue()
+
+    if rows == 0 || cols == 0 { return nil }
+
+    guard let commandBuffer = queue.makeCommandBuffer(),
+          let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
+
+    encoder.setComputePipelineState(compute.pipelineState)
+    encoder.setBuffer(bufIn.buffer, offset: 0, index: 0)
+    encoder.setBuffer(bufGamma.buffer, offset: 0, index: 1)
+    encoder.setBuffer(bufBeta.buffer, offset: 0, index: 2)
+    encoder.setBuffer(bufOut.buffer, offset: 0, index: 3)
+
+    var r = rows, c = cols, e = eps
+    encoder.setBytes(&r, length: MemoryLayout<UInt32>.size, index: 4)
+    encoder.setBytes(&c, length: MemoryLayout<UInt32>.size, index: 5)
+    encoder.setBytes(&e, length: MemoryLayout<Float>.size, index: 6)
+
+    let rowCount = Int(rows)
+    let threadGroupSize = min(compute.pipelineState.maxTotalThreadsPerThreadgroup, rowCount)
+    let threadGroups = (rowCount + threadGroupSize - 1) / threadGroupSize
+
+    encoder.dispatchThreadgroups(
+        MTLSize(width: threadGroups, height: 1, depth: 1),
+        threadsPerThreadgroup: MTLSize(width: threadGroupSize, height: 1, depth: 1)
+    )
+    encoder.endEncoding()
+    commandBuffer.commit()
+
+    return Unmanaged.passRetained(commandBuffer as AnyObject).toOpaque()
+}
+
+@_cdecl("gpu_bridge_compute_embedding_nb")
+public func gpuBridgeComputeEmbeddingNB(
+    _ computePtr: UnsafeMutableRawPointer?,
+    _ queuePtr: UnsafeMutableRawPointer?,
+    _ bufWeightsPtr: UnsafeRawPointer?,
+    _ bufIndicesPtr: UnsafeRawPointer?,
+    _ bufOutPtr: UnsafeMutableRawPointer?,
+    _ seqLen: UInt32,
+    _ embedDim: UInt32
+) -> UnsafeMutableRawPointer? {
+    guard let computePtr = computePtr,
+          let queuePtr = queuePtr,
+          let bufWeightsPtr = bufWeightsPtr,
+          let bufIndicesPtr = bufIndicesPtr,
+          let bufOutPtr = bufOutPtr else { return nil }
+
+    let compute = Unmanaged<GPUCompute>.fromOpaque(computePtr).takeUnretainedValue()
+    let queue = Unmanaged<MTLCommandQueue>.fromOpaque(queuePtr).takeUnretainedValue()
+    let bufWeights = Unmanaged<GPUBuffer>.fromOpaque(bufWeightsPtr).takeUnretainedValue()
+    let bufIndices = Unmanaged<GPUBuffer>.fromOpaque(bufIndicesPtr).takeUnretainedValue()
+    let bufOut = Unmanaged<GPUBuffer>.fromOpaque(bufOutPtr).takeUnretainedValue()
+
+    if seqLen == 0 || embedDim == 0 { return nil }
+
+    guard let commandBuffer = queue.makeCommandBuffer(),
+          let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
+
+    encoder.setComputePipelineState(compute.pipelineState)
+    encoder.setBuffer(bufWeights.buffer, offset: 0, index: 0)
+    encoder.setBuffer(bufIndices.buffer, offset: 0, index: 1)
+    encoder.setBuffer(bufOut.buffer, offset: 0, index: 2)
+
+    var s = seqLen, d = embedDim
+    encoder.setBytes(&s, length: MemoryLayout<UInt32>.size, index: 3)
+    encoder.setBytes(&d, length: MemoryLayout<UInt32>.size, index: 4)
+
+    let w = compute.pipelineState.threadExecutionWidth
+    let h = compute.pipelineState.maxTotalThreadsPerThreadgroup / w
+    let threadsPerGroup = MTLSize(width: w, height: h, depth: 1)
+    let gridSize = MTLSize(width: Int(embedDim), height: Int(seqLen), depth: 1)
+
+    encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadsPerGroup)
     encoder.endEncoding()
     commandBuffer.commit()
 

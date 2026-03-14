@@ -73,3 +73,32 @@ fn unfused_matmul_not_affected() {
     rt.eval(&device, relu_id).unwrap();
     assert_eq!(rt.read_f32(relu_id).unwrap(), &[19.0, 22.0, 43.0, 50.0]);
 }
+
+#[test]
+fn fused_add_gelu() {
+    let device = match Device::new() {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    let mut rt = LazyRuntime::new();
+
+    let a = Tensor::from_f32(&device, vec![4], &[0.0, 1.0, -1.0, 2.0]).unwrap();
+    let b = Tensor::from_f32(&device, vec![4], &[0.0, 0.0, 0.0, 0.0]).unwrap();
+    let a_id = a.meta.id;
+    let b_id = b.meta.id;
+    rt.insert_tensor(a).unwrap();
+    rt.insert_tensor(b).unwrap();
+
+    // add -> gelu should be fused
+    let sum_id = ops::add(&mut rt, a_id, b_id).unwrap();
+    let gelu_id = ops::gelu(&mut rt, sum_id).unwrap();
+
+    rt.eval(&device, gelu_id).unwrap();
+    let result = rt.read_f32(gelu_id).unwrap();
+
+    // gelu(0+0)=0, gelu(1+0)≈0.841, gelu(-1+0)≈-0.159, gelu(2+0)≈1.955
+    assert!((result[0] - 0.0).abs() < 0.01);
+    assert!((result[1] - 0.8412).abs() < 0.02);
+    assert!((result[2] - (-0.1588)).abs() < 0.02);
+    assert!((result[3] - 1.9545).abs() < 0.02);
+}

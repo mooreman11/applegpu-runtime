@@ -17,6 +17,9 @@ fn unary_msl(op: &OpKind, expr: &str, dtype: DType) -> String {
         OpKind::Exp => format!("exp({})", expr),
         OpKind::Log => format!("log({})", expr),
         OpKind::Sqrt => format!("sqrt({})", expr),
+        OpKind::Gelu => {
+            format!("({expr} * 0.5f * (1.0f + tanh(0.7978845608f * ({expr} + 0.044715f * {expr} * {expr} * {expr}))))")
+        }
         _ => unreachable!("Not a unary op"),
     }
 }
@@ -362,6 +365,48 @@ mod tests {
 
         assert!(source.contains("half"), "f16 fused kernel should use half type");
         assert!(source.contains("max((in0[id] + in1[id]), (half)0)"));
+        assert_eq!(inputs, vec![1, 2]);
+    }
+
+    #[test]
+    fn find_chain_add_gelu() {
+        let mut g = Graph::new();
+        g.add_node(OpNode {
+            id: 3, op: OpKind::Add, inputs: vec![1, 2],
+            out_shape: Shape::new(vec![4]), out_dtype: DType::Float32,
+            container_id: ContainerId::DEFAULT,
+        });
+        g.add_node(OpNode {
+            id: 4, op: OpKind::Gelu, inputs: vec![3],
+            out_shape: Shape::new(vec![4]), out_dtype: DType::Float32,
+            container_id: ContainerId::DEFAULT,
+        });
+
+        let chains = find_fusible_chains(&g, &[3, 4]);
+        assert_eq!(chains.len(), 1);
+        assert_eq!(chains[0].node_ids, vec![3, 4]);
+    }
+
+    #[test]
+    fn generate_msl_add_gelu() {
+        let mut g = Graph::new();
+        g.add_node(OpNode {
+            id: 3, op: OpKind::Add, inputs: vec![1, 2],
+            out_shape: Shape::new(vec![4]), out_dtype: DType::Float32,
+            container_id: ContainerId::DEFAULT,
+        });
+        g.add_node(OpNode {
+            id: 4, op: OpKind::Gelu, inputs: vec![3],
+            out_shape: Shape::new(vec![4]), out_dtype: DType::Float32,
+            container_id: ContainerId::DEFAULT,
+        });
+
+        let chains = find_fusible_chains(&g, &[3, 4]);
+        let (source, _name, inputs) = generate_fused_msl(&g, &chains[0]);
+
+        assert!(source.contains("tanh"));
+        assert!(source.contains("0.7978845608f"));
+        assert!(source.contains("0.044715f"));
         assert_eq!(inputs, vec![1, 2]);
     }
 

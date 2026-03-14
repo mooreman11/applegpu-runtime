@@ -217,6 +217,80 @@ pub fn scalar_mul(rt: &mut LazyRuntime, input_id: u64, scale: f32) -> Result<u64
     Ok(out_id)
 }
 
+pub fn gelu(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
+    lazy_unary_op(rt, input_id, OpKind::Gelu)
+}
+
+pub fn layer_norm(rt: &mut LazyRuntime, input_id: u64, gamma_id: u64, beta_id: u64, eps: f32) -> Result<u64> {
+    let input_shape = rt.shape(input_id)?;
+    let input_dtype = rt.dtype(input_id)?;
+    validate_compute_dtype(input_dtype)?;
+
+    if input_shape.len() != 2 {
+        return Err(GpuError::InvalidTensor("layer_norm requires 2D input".to_string()));
+    }
+    let cols = input_shape[1];
+
+    let gamma_shape = rt.shape(gamma_id)?;
+    if gamma_shape != vec![cols] {
+        return Err(GpuError::InvalidTensor(format!(
+            "gamma shape {:?} must be [{}]", gamma_shape, cols
+        )));
+    }
+    let beta_shape = rt.shape(beta_id)?;
+    if beta_shape != vec![cols] {
+        return Err(GpuError::InvalidTensor(format!(
+            "beta shape {:?} must be [{}]", beta_shape, cols
+        )));
+    }
+
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op: OpKind::LayerNorm { eps },
+        inputs: vec![input_id, gamma_id, beta_id],
+        out_shape: Shape::new(input_shape),
+        out_dtype: input_dtype,
+        container_id: ContainerId::DEFAULT,
+    });
+    Ok(out_id)
+}
+
+pub fn embedding(rt: &mut LazyRuntime, weights_id: u64, indices_id: u64) -> Result<u64> {
+    let weights_shape = rt.shape(weights_id)?;
+    let weights_dtype = rt.dtype(weights_id)?;
+    let indices_shape = rt.shape(indices_id)?;
+    let indices_dtype = rt.dtype(indices_id)?;
+
+    validate_compute_dtype(weights_dtype)?;
+
+    if weights_shape.len() != 2 {
+        return Err(GpuError::InvalidTensor("embedding weights must be 2D [vocab_size, embed_dim]".to_string()));
+    }
+    if indices_shape.len() != 1 {
+        return Err(GpuError::InvalidTensor("embedding indices must be 1D [seq_len]".to_string()));
+    }
+    if indices_dtype != DType::Int32 {
+        return Err(GpuError::InvalidTensor(format!(
+            "embedding indices must be Int32, got {:?}", indices_dtype
+        )));
+    }
+
+    let seq_len = indices_shape[0];
+    let embed_dim = weights_shape[1];
+
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op: OpKind::Embedding,
+        inputs: vec![weights_id, indices_id],
+        out_shape: Shape::new(vec![seq_len, embed_dim]),
+        out_dtype: weights_dtype,
+        container_id: ContainerId::DEFAULT,
+    });
+    Ok(out_id)
+}
+
 /// Scaled dot-product attention: softmax(Q @ K^T / sqrt(d_k)) @ V
 /// Q: [q_len, d_k], K: [kv_len, d_k], V: [kv_len, d_v]
 /// Output: [q_len, d_v]
@@ -527,6 +601,210 @@ mod tests {
             assert!(v.is_finite());
             assert!(v >= 0.0 && v <= 10.0);
         }
+    }
+
+    #[test]
+    fn lazy_ops_gelu_f32() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        let a = Tensor::from_f32(&device, vec![4], &[0.0, 1.0, -1.0, 2.0]).unwrap();
+        let a_id = a.meta.id;
+        rt.insert_tensor(a).unwrap();
+
+        let g_id = gelu(&mut rt, a_id).unwrap();
+        rt.eval(&device, g_id).unwrap();
+        let result = rt.read_f32(g_id).unwrap();
+
+        // gelu(0) = 0
+        assert!((result[0] - 0.0).abs() < 0.001);
+        // gelu(1) ≈ 0.8412
+        assert!((result[1] - 0.8412).abs() < 0.01);
+        // gelu(-1) ≈ -0.1588
+        assert!((result[2] - (-0.1588)).abs() < 0.01);
+        // gelu(2) ≈ 1.9545
+        assert!((result[3] - 1.9545).abs() < 0.01);
+    }
+
+    #[test]
+    fn lazy_ops_gelu_f16() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        use half::f16;
+        let data: Vec<u16> = [0.0f32, 1.0, -1.0, 2.0].iter().map(|&x| f16::from_f32(x).to_bits()).collect();
+        let a = Tensor::from_f16(&device, vec![4], &data).unwrap();
+        let a_id = a.meta.id;
+        rt.insert_tensor(a).unwrap();
+
+        let g_id = gelu(&mut rt, a_id).unwrap();
+        rt.eval(&device, g_id).unwrap();
+        let result = rt.read_f16(g_id).unwrap();
+
+        assert!((f16::from_bits(result[0]).to_f32() - 0.0).abs() < 0.05);
+        assert!((f16::from_bits(result[1]).to_f32() - 0.8412).abs() < 0.05);
+        assert!((f16::from_bits(result[2]).to_f32() - (-0.1588)).abs() < 0.05);
+        assert!((f16::from_bits(result[3]).to_f32() - 1.9545).abs() < 0.05);
+    }
+
+    #[test]
+    fn lazy_ops_layer_norm_f32() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        // 2x4 input
+        let input_data = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        let gamma_data = [1.0, 1.0, 1.0, 1.0]; // scale = 1
+        let beta_data = [0.0, 0.0, 0.0, 0.0]; // bias = 0
+
+        let input = Tensor::from_f32(&device, vec![2, 4], &input_data).unwrap();
+        let gamma = Tensor::from_f32(&device, vec![4], &gamma_data).unwrap();
+        let beta = Tensor::from_f32(&device, vec![4], &beta_data).unwrap();
+        let input_id = input.meta.id;
+        let gamma_id = gamma.meta.id;
+        let beta_id = beta.meta.id;
+        rt.insert_tensor(input).unwrap();
+        rt.insert_tensor(gamma).unwrap();
+        rt.insert_tensor(beta).unwrap();
+
+        let out_id = layer_norm(&mut rt, input_id, gamma_id, beta_id, 1e-5).unwrap();
+        rt.eval(&device, out_id).unwrap();
+        let result = rt.read_f32(out_id).unwrap();
+
+        // For row [1,2,3,4]: mean=2.5, var=1.25, std=sqrt(1.25+1e-5)
+        // normalized = (x-2.5)/std -> [-1.3416, -0.4472, 0.4472, 1.3416] approx
+        assert!((result[0] - (-1.3416)).abs() < 0.01);
+        assert!((result[1] - (-0.4472)).abs() < 0.01);
+        assert!((result[2] - 0.4472).abs() < 0.01);
+        assert!((result[3] - 1.3416).abs() < 0.01);
+
+        // Second row should also be normalized
+        assert!((result[4] - (-1.3416)).abs() < 0.01);
+    }
+
+    #[test]
+    fn lazy_ops_layer_norm_f16() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        use half::f16;
+
+        let input_data: Vec<u16> = [1.0f32, 2.0, 3.0, 4.0].iter().map(|&x| f16::from_f32(x).to_bits()).collect();
+        let gamma_data: Vec<u16> = [1.0f32; 4].iter().map(|&x| f16::from_f32(x).to_bits()).collect();
+        let beta_data: Vec<u16> = [0.0f32; 4].iter().map(|&x| f16::from_f32(x).to_bits()).collect();
+
+        let input = Tensor::from_f16(&device, vec![1, 4], &input_data).unwrap();
+        let gamma = Tensor::from_f16(&device, vec![4], &gamma_data).unwrap();
+        let beta = Tensor::from_f16(&device, vec![4], &beta_data).unwrap();
+        let input_id = input.meta.id;
+        let gamma_id = gamma.meta.id;
+        let beta_id = beta.meta.id;
+        rt.insert_tensor(input).unwrap();
+        rt.insert_tensor(gamma).unwrap();
+        rt.insert_tensor(beta).unwrap();
+
+        let out_id = layer_norm(&mut rt, input_id, gamma_id, beta_id, 1e-5).unwrap();
+        rt.eval(&device, out_id).unwrap();
+        let result = rt.read_f16(out_id).unwrap();
+
+        assert!((f16::from_bits(result[0]).to_f32() - (-1.3416)).abs() < 0.1);
+        assert!((f16::from_bits(result[3]).to_f32() - 1.3416).abs() < 0.1);
+    }
+
+    #[test]
+    fn lazy_ops_embedding_f32() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        // Weights: 3 vocab x 2 embed_dim
+        let weights_data = [
+            10.0, 11.0,  // row 0
+            20.0, 21.0,  // row 1
+            30.0, 31.0,  // row 2
+        ];
+        let indices_data: [i32; 3] = [2, 0, 1];
+
+        let weights = Tensor::from_f32(&device, vec![3, 2], &weights_data).unwrap();
+        let indices_bytes = unsafe {
+            std::slice::from_raw_parts(indices_data.as_ptr() as *const u8, 12)
+        };
+        let indices = Tensor::from_data(&device, vec![3], DType::Int32, indices_bytes).unwrap();
+        let w_id = weights.meta.id;
+        let i_id = indices.meta.id;
+        rt.insert_tensor(weights).unwrap();
+        rt.insert_tensor(indices).unwrap();
+
+        let out_id = embedding(&mut rt, w_id, i_id).unwrap();
+        assert_eq!(rt.shape(out_id).unwrap(), vec![3, 2]);
+
+        rt.eval(&device, out_id).unwrap();
+        let result = rt.read_f32(out_id).unwrap();
+
+        // indices [2, 0, 1] -> rows [30,31], [10,11], [20,21]
+        assert_eq!(result, &[30.0, 31.0, 10.0, 11.0, 20.0, 21.0]);
+    }
+
+    #[test]
+    fn lazy_ops_embedding_f16() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        use half::f16;
+
+        // Weights: 3 vocab x 2 embed_dim
+        let weights_data: Vec<u16> = [10.0f32, 11.0, 20.0, 21.0, 30.0, 31.0]
+            .iter().map(|&x| f16::from_f32(x).to_bits()).collect();
+        let indices_data: [i32; 2] = [1, 2];
+
+        let weights = Tensor::from_f16(&device, vec![3, 2], &weights_data).unwrap();
+        let indices_bytes = unsafe {
+            std::slice::from_raw_parts(indices_data.as_ptr() as *const u8, 8)
+        };
+        let indices = Tensor::from_data(&device, vec![2], DType::Int32, indices_bytes).unwrap();
+        let w_id = weights.meta.id;
+        let i_id = indices.meta.id;
+        rt.insert_tensor(weights).unwrap();
+        rt.insert_tensor(indices).unwrap();
+
+        let out_id = embedding(&mut rt, w_id, i_id).unwrap();
+        rt.eval(&device, out_id).unwrap();
+        let result = rt.read_f16(out_id).unwrap();
+        let result_f32: Vec<f32> = result.iter().map(|&b| f16::from_bits(b).to_f32()).collect();
+
+        // indices [1, 2] -> rows [20,21], [30,31]
+        assert_eq!(result_f32, &[20.0, 21.0, 30.0, 31.0]);
+    }
+
+    #[test]
+    fn embedding_rejects_non_int32_indices() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        let weights = Tensor::from_f32(&device, vec![3, 2], &[0.0; 6]).unwrap();
+        let indices = Tensor::from_f32(&device, vec![3], &[0.0, 1.0, 2.0]).unwrap();
+        let w_id = weights.meta.id;
+        let i_id = indices.meta.id;
+        rt.insert_tensor(weights).unwrap();
+        rt.insert_tensor(indices).unwrap();
+
+        let result = embedding(&mut rt, w_id, i_id);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn layer_norm_rejects_non_2d() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        let input = Tensor::from_f32(&device, vec![4], &[1.0, 2.0, 3.0, 4.0]).unwrap();
+        let gamma = Tensor::from_f32(&device, vec![4], &[1.0; 4]).unwrap();
+        let beta = Tensor::from_f32(&device, vec![4], &[0.0; 4]).unwrap();
+        let i_id = input.meta.id;
+        let g_id = gamma.meta.id;
+        let b_id = beta.meta.id;
+        rt.insert_tensor(input).unwrap();
+        rt.insert_tensor(gamma).unwrap();
+        rt.insert_tensor(beta).unwrap();
+
+        let result = layer_norm(&mut rt, i_id, g_id, b_id, 1e-5);
+        assert!(result.is_err());
     }
 
     #[test]

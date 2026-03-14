@@ -97,6 +97,28 @@ int32_t gpu_bridge_compute_scalar_mul(
     uint64_t element_count
 );
 
+// Layer normalization: output = gamma * (input - mean) / sqrt(var + eps) + beta
+int32_t gpu_bridge_compute_layer_norm(
+    GPUComputeHandle* compute,
+    const GPUBufferHandle* buf_input,
+    const GPUBufferHandle* buf_gamma,
+    const GPUBufferHandle* buf_beta,
+    GPUBufferHandle* buf_output,
+    uint32_t rows,
+    uint32_t cols,
+    float eps
+);
+
+// Embedding lookup: output[i,j] = weights[indices[i],j]
+int32_t gpu_bridge_compute_embedding(
+    GPUComputeHandle* compute,
+    const GPUBufferHandle* buf_weights,
+    const GPUBufferHandle* buf_indices,
+    GPUBufferHandle* buf_output,
+    uint32_t seq_len,
+    uint32_t embed_dim
+);
+
 // ── Non-blocking (batched) dispatch ──────────────────────────────────────
 
 // Get or create a device-level shared command queue for batched dispatch.
@@ -174,6 +196,30 @@ void* gpu_bridge_compute_fused_nb(
     uint32_t buffer_count,
     GPUBufferHandle* output,
     uint64_t element_count
+);
+
+// Non-blocking layer norm: returns command buffer handle.
+void* gpu_bridge_compute_layer_norm_nb(
+    GPUComputeHandle* compute,
+    void* queue,
+    const GPUBufferHandle* buf_input,
+    const GPUBufferHandle* buf_gamma,
+    const GPUBufferHandle* buf_beta,
+    GPUBufferHandle* buf_output,
+    uint32_t rows,
+    uint32_t cols,
+    float eps
+);
+
+// Non-blocking embedding: returns command buffer handle.
+void* gpu_bridge_compute_embedding_nb(
+    GPUComputeHandle* compute,
+    void* queue,
+    const GPUBufferHandle* buf_weights,
+    const GPUBufferHandle* buf_indices,
+    GPUBufferHandle* buf_output,
+    uint32_t seq_len,
+    uint32_t embed_dim
 );
 
 #endif

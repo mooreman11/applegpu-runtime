@@ -111,6 +111,75 @@ kernel void scalar_mul_f32(
 }
 "#;
 
+const GELU_KERNEL_SOURCE: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void gelu_f32(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    constant uint& count [[buffer(2)]],
+    uint id [[thread_position_in_grid]]
+) {
+    if (id < count) {
+        float x = input[id];
+        output[id] = x * 0.5f * (1.0f + tanh(0.7978845608f * (x + 0.044715f * x * x * x)));
+    }
+}
+"#;
+
+const LAYER_NORM_KERNEL_SOURCE: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void layer_norm_f32(
+    device const float* input [[buffer(0)]],
+    device const float* gamma [[buffer(1)]],
+    device const float* beta [[buffer(2)]],
+    device float* output [[buffer(3)]],
+    constant uint& rows [[buffer(4)]],
+    constant uint& cols [[buffer(5)]],
+    constant float& eps [[buffer(6)]],
+    uint row [[thread_position_in_grid]]
+) {
+    if (row >= rows) return;
+    uint offset = row * cols;
+    float mean = 0.0f;
+    for (uint j = 0; j < cols; j++) mean += input[offset + j];
+    mean /= float(cols);
+    float var = 0.0f;
+    for (uint j = 0; j < cols; j++) {
+        float diff = input[offset + j] - mean;
+        var += diff * diff;
+    }
+    var /= float(cols);
+    float inv_std = 1.0f / sqrt(var + eps);
+    for (uint j = 0; j < cols; j++) {
+        output[offset + j] = gamma[j] * (input[offset + j] - mean) * inv_std + beta[j];
+    }
+}
+"#;
+
+const EMBEDDING_KERNEL_SOURCE: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void embedding_f32(
+    device const float* weights [[buffer(0)]],
+    device const int* indices [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    constant uint& seq_len [[buffer(3)]],
+    constant uint& embed_dim [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint i = gid.y;
+    uint j = gid.x;
+    if (i >= seq_len || j >= embed_dim) return;
+    int idx = indices[i];
+    output[i * embed_dim + j] = weights[idx * embed_dim + j];
+}
+"#;
+
 // ── Float16 kernel sources ──────────────────────────────────────────────────
 
 /// MSL source for f16 binary element-wise ops (add, sub, mul, div).
@@ -199,6 +268,75 @@ kernel void transpose_f16(
     uint col = gid.x;
     if (row >= rows || col >= cols) return;
     output[col * rows + row] = input[row * cols + col];
+}
+"#;
+
+const GELU_KERNEL_SOURCE_F16: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void gelu_f16(
+    device const half* input [[buffer(0)]],
+    device half* output [[buffer(1)]],
+    constant uint& count [[buffer(2)]],
+    uint id [[thread_position_in_grid]]
+) {
+    if (id < count) {
+        float x = float(input[id]);
+        output[id] = half(x * 0.5f * (1.0f + tanh(0.7978845608f * (x + 0.044715f * x * x * x))));
+    }
+}
+"#;
+
+const LAYER_NORM_KERNEL_SOURCE_F16: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void layer_norm_f16(
+    device const half* input [[buffer(0)]],
+    device const half* gamma [[buffer(1)]],
+    device const half* beta [[buffer(2)]],
+    device half* output [[buffer(3)]],
+    constant uint& rows [[buffer(4)]],
+    constant uint& cols [[buffer(5)]],
+    constant float& eps [[buffer(6)]],
+    uint row [[thread_position_in_grid]]
+) {
+    if (row >= rows) return;
+    uint offset = row * cols;
+    float mean = 0.0f;
+    for (uint j = 0; j < cols; j++) mean += float(input[offset + j]);
+    mean /= float(cols);
+    float var = 0.0f;
+    for (uint j = 0; j < cols; j++) {
+        float diff = float(input[offset + j]) - mean;
+        var += diff * diff;
+    }
+    var /= float(cols);
+    float inv_std = 1.0f / sqrt(var + eps);
+    for (uint j = 0; j < cols; j++) {
+        output[offset + j] = half(float(gamma[j]) * (float(input[offset + j]) - mean) * inv_std + float(beta[j]));
+    }
+}
+"#;
+
+const EMBEDDING_KERNEL_SOURCE_F16: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void embedding_f16(
+    device const half* weights [[buffer(0)]],
+    device const int* indices [[buffer(1)]],
+    device half* output [[buffer(2)]],
+    constant uint& seq_len [[buffer(3)]],
+    constant uint& embed_dim [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint i = gid.y;
+    uint j = gid.x;
+    if (i >= seq_len || j >= embed_dim) return;
+    int idx = indices[i];
+    output[i * embed_dim + j] = weights[idx * embed_dim + j];
 }
 "#;
 
@@ -372,6 +510,54 @@ impl ComputePipeline {
         if result == 0 { Ok(()) } else { Err(GpuError::ComputeFailed("ScalarMul dispatch failed".to_string())) }
     }
 
+    /// Dispatch layer normalization: output = gamma * (input - mean) / sqrt(var + eps) + beta.
+    pub fn dispatch_layer_norm(
+        &self,
+        buf_input: &Buffer,
+        buf_gamma: &Buffer,
+        buf_beta: &Buffer,
+        buf_out: &Buffer,
+        rows: usize,
+        cols: usize,
+        eps: f32,
+    ) -> Result<()> {
+        let result = unsafe {
+            ffi::gpu_bridge_compute_layer_norm(
+                self.handle,
+                buf_input.raw_handle() as *const _,
+                buf_gamma.raw_handle() as *const _,
+                buf_beta.raw_handle() as *const _,
+                buf_out.raw_handle(),
+                rows as u32,
+                cols as u32,
+                eps,
+            )
+        };
+        if result == 0 { Ok(()) } else { Err(GpuError::ComputeFailed("LayerNorm dispatch failed".to_string())) }
+    }
+
+    /// Dispatch embedding lookup: output[i,j] = weights[indices[i],j].
+    pub fn dispatch_embedding(
+        &self,
+        buf_weights: &Buffer,
+        buf_indices: &Buffer,
+        buf_out: &Buffer,
+        seq_len: usize,
+        embed_dim: usize,
+    ) -> Result<()> {
+        let result = unsafe {
+            ffi::gpu_bridge_compute_embedding(
+                self.handle,
+                buf_weights.raw_handle() as *const _,
+                buf_indices.raw_handle() as *const _,
+                buf_out.raw_handle(),
+                seq_len as u32,
+                embed_dim as u32,
+            )
+        };
+        if result == 0 { Ok(()) } else { Err(GpuError::ComputeFailed("Embedding dispatch failed".to_string())) }
+    }
+
     // ── Non-blocking dispatch methods ─────────────────────────────────────
 
     /// Non-blocking binary elementwise. Returns command buffer handle.
@@ -533,6 +719,58 @@ impl ComputePipeline {
         };
         if cb.is_null() { Err(GpuError::ComputeFailed("Non-blocking fused dispatch failed".to_string())) } else { Ok(cb) }
     }
+
+    /// Non-blocking layer norm. Returns command buffer handle.
+    pub fn dispatch_layer_norm_nb(
+        &self,
+        queue: *mut std::ffi::c_void,
+        buf_input: &Buffer,
+        buf_gamma: &Buffer,
+        buf_beta: &Buffer,
+        buf_out: &Buffer,
+        rows: usize,
+        cols: usize,
+        eps: f32,
+    ) -> Result<*mut std::ffi::c_void> {
+        let cb = unsafe {
+            ffi::gpu_bridge_compute_layer_norm_nb(
+                self.handle,
+                queue,
+                buf_input.raw_handle() as *const _,
+                buf_gamma.raw_handle() as *const _,
+                buf_beta.raw_handle() as *const _,
+                buf_out.raw_handle(),
+                rows as u32,
+                cols as u32,
+                eps,
+            )
+        };
+        if cb.is_null() { Err(GpuError::ComputeFailed("Non-blocking layer_norm dispatch failed".to_string())) } else { Ok(cb) }
+    }
+
+    /// Non-blocking embedding. Returns command buffer handle.
+    pub fn dispatch_embedding_nb(
+        &self,
+        queue: *mut std::ffi::c_void,
+        buf_weights: &Buffer,
+        buf_indices: &Buffer,
+        buf_out: &Buffer,
+        seq_len: usize,
+        embed_dim: usize,
+    ) -> Result<*mut std::ffi::c_void> {
+        let cb = unsafe {
+            ffi::gpu_bridge_compute_embedding_nb(
+                self.handle,
+                queue,
+                buf_weights.raw_handle() as *const _,
+                buf_indices.raw_handle() as *const _,
+                buf_out.raw_handle(),
+                seq_len as u32,
+                embed_dim as u32,
+            )
+        };
+        if cb.is_null() { Err(GpuError::ComputeFailed("Non-blocking embedding dispatch failed".to_string())) } else { Ok(cb) }
+    }
 }
 
 impl Drop for ComputePipeline {
@@ -585,6 +823,9 @@ impl KernelRegistry {
                     "softmax_f32" => SOFTMAX_KERNEL_SOURCE_F16,
                     "transpose_f32" => TRANSPOSE_KERNEL_SOURCE_F16,
                     "scalar_mul_f32" => SCALAR_MUL_KERNEL_SOURCE_F16,
+                    "gelu_f32" => GELU_KERNEL_SOURCE_F16,
+                    "layer_norm_f32" => LAYER_NORM_KERNEL_SOURCE_F16,
+                    "embedding_f32" => EMBEDDING_KERNEL_SOURCE_F16,
                     _ => BINARY_KERNEL_SOURCE_F16, // fallback
                 };
                 // For named kernels like matmul_f32 -> matmul_f16
@@ -606,6 +847,9 @@ impl KernelRegistry {
                     "softmax_f32" => SOFTMAX_KERNEL_SOURCE,
                     "transpose_f32" => TRANSPOSE_KERNEL_SOURCE,
                     "scalar_mul_f32" => SCALAR_MUL_KERNEL_SOURCE,
+                    "gelu_f32" => GELU_KERNEL_SOURCE,
+                    "layer_norm_f32" => LAYER_NORM_KERNEL_SOURCE,
+                    "embedding_f32" => EMBEDDING_KERNEL_SOURCE,
                     _ => BINARY_KERNEL_SOURCE,
                 };
                 (source, base_name.to_string())
@@ -768,7 +1012,84 @@ impl KernelRegistry {
         pipeline.dispatch_scalar_mul(buf_input, buf_output, scale, element_count)
     }
 
+    /// Dispatch GELU with dtype-aware kernel selection (uses unary dispatch pattern).
+    pub fn dispatch_gelu_typed(
+        &self,
+        device: &Device,
+        dtype: DType,
+        buf_input: &Buffer,
+        buf_out: &Buffer,
+        element_count: usize,
+    ) -> Result<()> {
+        let (source, func) = Self::resolve_kernel("gelu_f32", dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_unary(buf_input, buf_out, element_count)
+    }
+
+    /// Dispatch layer normalization with dtype-aware kernel selection.
+    pub fn dispatch_layer_norm_typed(
+        &self,
+        device: &Device,
+        dtype: DType,
+        buf_input: &Buffer,
+        buf_gamma: &Buffer,
+        buf_beta: &Buffer,
+        buf_out: &Buffer,
+        rows: usize,
+        cols: usize,
+        eps: f32,
+    ) -> Result<()> {
+        let (source, func) = Self::resolve_kernel("layer_norm_f32", dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_layer_norm(buf_input, buf_gamma, buf_beta, buf_out, rows, cols, eps)
+    }
+
+    /// Dispatch embedding lookup with dtype-aware kernel selection.
+    pub fn dispatch_embedding_typed(
+        &self,
+        device: &Device,
+        dtype: DType,
+        buf_weights: &Buffer,
+        buf_indices: &Buffer,
+        buf_out: &Buffer,
+        seq_len: usize,
+        embed_dim: usize,
+    ) -> Result<()> {
+        let (source, func) = Self::resolve_kernel("embedding_f32", dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_embedding(buf_weights, buf_indices, buf_out, seq_len, embed_dim)
+    }
+
     // ── Non-blocking dispatch methods ─────────────────────────────────────
+
+    pub fn dispatch_gelu_typed_nb(
+        &self, device: &Device, dtype: DType, queue: *mut std::ffi::c_void,
+        buf_input: &Buffer, buf_out: &Buffer, element_count: usize,
+    ) -> Result<*mut std::ffi::c_void> {
+        let (source, func) = Self::resolve_kernel("gelu_f32", dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_unary_nb(queue, buf_input, buf_out, element_count)
+    }
+
+    pub fn dispatch_layer_norm_typed_nb(
+        &self, device: &Device, dtype: DType, queue: *mut std::ffi::c_void,
+        buf_input: &Buffer, buf_gamma: &Buffer, buf_beta: &Buffer, buf_out: &Buffer,
+        rows: usize, cols: usize, eps: f32,
+    ) -> Result<*mut std::ffi::c_void> {
+        let (source, func) = Self::resolve_kernel("layer_norm_f32", dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_layer_norm_nb(queue, buf_input, buf_gamma, buf_beta, buf_out, rows, cols, eps)
+    }
+
+    pub fn dispatch_embedding_typed_nb(
+        &self, device: &Device, dtype: DType, queue: *mut std::ffi::c_void,
+        buf_weights: &Buffer, buf_indices: &Buffer, buf_out: &Buffer,
+        seq_len: usize, embed_dim: usize,
+    ) -> Result<*mut std::ffi::c_void> {
+        let (source, func) = Self::resolve_kernel("embedding_f32", dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_embedding_nb(queue, buf_weights, buf_indices, buf_out, seq_len, embed_dim)
+    }
 
     pub fn dispatch_binary_typed_nb(
         &self, device: &Device, function_name: &str, dtype: DType, queue: *mut std::ffi::c_void,

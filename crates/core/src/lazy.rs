@@ -218,6 +218,38 @@ impl LazyRuntime {
             return Ok(out);
         }
 
+        if node.op.is_gelu() {
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+            let input = self.get_tensor(node.inputs[0])?;
+            REGISTRY.dispatch_gelu_typed(device, dtype, &input.buffer, &out.buffer, input.numel())?;
+            return Ok(out);
+        }
+
+        if node.op.is_layer_norm() {
+            let eps = match node.op { crate::graph::OpKind::LayerNorm { eps } => eps, _ => unreachable!() };
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+            let input = self.get_tensor(node.inputs[0])?;
+            let gamma = self.get_tensor(node.inputs[1])?;
+            let beta = self.get_tensor(node.inputs[2])?;
+            let dims = input.meta.shape.dims();
+            let (rows, cols) = (dims[0], dims[1]);
+            REGISTRY.dispatch_layer_norm_typed(device, dtype, &input.buffer, &gamma.buffer, &beta.buffer, &out.buffer, rows, cols, eps)?;
+            return Ok(out);
+        }
+
+        if node.op.is_embedding() {
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+            let weights = self.get_tensor(node.inputs[0])?;
+            let indices = self.get_tensor(node.inputs[1])?;
+            let seq_len = indices.meta.shape.dims()[0];
+            let embed_dim = weights.meta.shape.dims()[1];
+            REGISTRY.dispatch_embedding_typed(device, dtype, &weights.buffer, &indices.buffer, &out.buffer, seq_len, embed_dim)?;
+            return Ok(out);
+        }
+
         if node.op.is_unary() {
             let out_buf = self.pool.acquire(device, out_size)?;
             let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
@@ -309,6 +341,29 @@ impl LazyRuntime {
         if let crate::graph::OpKind::ScalarMul(scale) = node.op {
             let input = self.get_tensor(node.inputs[0])?;
             return REGISTRY.dispatch_scalar_mul_typed_nb(device, dtype, queue, &input.buffer, &out.buffer, scale, input.numel());
+        }
+
+        if node.op.is_gelu() {
+            let input = self.get_tensor(node.inputs[0])?;
+            return REGISTRY.dispatch_gelu_typed_nb(device, dtype, queue, &input.buffer, &out.buffer, input.numel());
+        }
+
+        if node.op.is_layer_norm() {
+            let eps = match node.op { crate::graph::OpKind::LayerNorm { eps } => eps, _ => unreachable!() };
+            let input = self.get_tensor(node.inputs[0])?;
+            let gamma = self.get_tensor(node.inputs[1])?;
+            let beta = self.get_tensor(node.inputs[2])?;
+            let dims = input.meta.shape.dims();
+            let (rows, cols) = (dims[0], dims[1]);
+            return REGISTRY.dispatch_layer_norm_typed_nb(device, dtype, queue, &input.buffer, &gamma.buffer, &beta.buffer, &out.buffer, rows, cols, eps);
+        }
+
+        if node.op.is_embedding() {
+            let weights = self.get_tensor(node.inputs[0])?;
+            let indices = self.get_tensor(node.inputs[1])?;
+            let seq_len = indices.meta.shape.dims()[0];
+            let embed_dim = weights.meta.shape.dims()[1];
+            return REGISTRY.dispatch_embedding_typed_nb(device, dtype, queue, &weights.buffer, &indices.buffer, &out.buffer, seq_len, embed_dim);
         }
 
         if node.op.is_unary() {

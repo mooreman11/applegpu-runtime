@@ -30,6 +30,10 @@ pub enum OpKind {
     Transpose,
     // Scalar multiply (carries the scalar value)
     ScalarMul(f32),
+    // Transformer ops
+    Gelu,
+    LayerNorm { eps: f32 },
+    Embedding,
 }
 
 impl OpKind {
@@ -50,11 +54,14 @@ impl OpKind {
             OpKind::Softmax => "softmax_f32",
             OpKind::Transpose => "transpose_f32",
             OpKind::ScalarMul(_) => "scalar_mul_f32",
+            OpKind::Gelu => "gelu_f32",
+            OpKind::LayerNorm { .. } => "layer_norm_f32",
+            OpKind::Embedding => "embedding_f32",
         }
     }
 
     pub fn is_unary(&self) -> bool {
-        matches!(self, OpKind::Neg | OpKind::Relu | OpKind::Exp | OpKind::Log | OpKind::Sqrt)
+        matches!(self, OpKind::Neg | OpKind::Relu | OpKind::Exp | OpKind::Log | OpKind::Sqrt | OpKind::Gelu)
     }
 
     pub fn is_matmul(&self) -> bool {
@@ -67,7 +74,7 @@ impl OpKind {
 
     pub fn is_elementwise(&self) -> bool {
         matches!(self, OpKind::Add | OpKind::Sub | OpKind::Mul | OpKind::Div |
-                       OpKind::Neg | OpKind::Relu | OpKind::Exp | OpKind::Log | OpKind::Sqrt)
+                       OpKind::Neg | OpKind::Relu | OpKind::Exp | OpKind::Log | OpKind::Sqrt | OpKind::Gelu)
     }
 
     pub fn is_softmax(&self) -> bool {
@@ -80,6 +87,18 @@ impl OpKind {
 
     pub fn is_scalar_mul(&self) -> bool {
         matches!(self, OpKind::ScalarMul(_))
+    }
+
+    pub fn is_gelu(&self) -> bool {
+        matches!(self, OpKind::Gelu)
+    }
+
+    pub fn is_layer_norm(&self) -> bool {
+        matches!(self, OpKind::LayerNorm { .. })
+    }
+
+    pub fn is_embedding(&self) -> bool {
+        matches!(self, OpKind::Embedding)
     }
 }
 
