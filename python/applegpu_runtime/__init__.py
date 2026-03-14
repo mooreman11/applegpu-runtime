@@ -27,6 +27,16 @@ from applegpu_runtime.applegpu_runtime import (
     transpose,
     attention,
     matmul,
+    register_container,
+    deregister_container,
+    pause_container,
+    resume_container,
+    submit_job,
+    run_next,
+    job_status,
+    container_usage,
+    global_usage,
+    queue_depth,
 )
 
 __version__ = version()
@@ -57,4 +67,14 @@ __all__ = [
     "transpose",
     "attention",
     "matmul",
+    "register_container",
+    "deregister_container",
+    "pause_container",
+    "resume_container",
+    "submit_job",
+    "run_next",
+    "job_status",
+    "container_usage",
+    "global_usage",
+    "queue_depth",
 ]

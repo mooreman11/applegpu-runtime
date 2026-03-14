@@ -6,6 +6,7 @@ use std::sync::Mutex;
 
 use applegpu_core::lazy::LazyRuntime;
 use applegpu_core::tensor::Tensor;
+use applegpu_core::scheduler::{ContainerId, ContainerConfig, Priority, JobId, JobStatus};
 
 /// Global lazy runtime.
 static RUNTIME_LAZY: once_cell::sync::Lazy<Mutex<LazyRuntime>> =
@@ -354,6 +355,109 @@ fn attention(q: &GpuTensor, k: &GpuTensor, v: &GpuTensor) -> PyResult<GpuTensor>
     Ok(GpuTensor { id, destroyed: Cell::new(false) })
 }
 
+// ============================================================
+// Scheduler bindings
+// ============================================================
+
+#[pyfunction]
+fn register_container(
+    priority: &str,
+    max_memory_mb: usize,
+    max_tensors: usize,
+    max_pending: usize,
+) -> PyResult<u64> {
+    let priority = match priority {
+        "high" => Priority::High,
+        "normal" => Priority::Normal,
+        "low" => Priority::Low,
+        _ => return Err(PyValueError::new_err(format!("Invalid priority: {}. Use 'high', 'normal', or 'low'", priority))),
+    };
+    let config = ContainerConfig {
+        priority,
+        max_memory_bytes: max_memory_mb * 1024 * 1024,
+        max_tensor_count: max_tensors,
+        max_tensor_size_bytes: 0,
+        max_pending_jobs: max_pending,
+    };
+    let mut rt = RUNTIME_LAZY.lock().unwrap();
+    let id = rt.scheduler.register_container(config)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(id.0)
+}
+
+#[pyfunction]
+fn deregister_container(container_id: u64) -> PyResult<Vec<u64>> {
+    let mut rt = RUNTIME_LAZY.lock().unwrap();
+    let tensors = rt.scheduler.deregister_container(ContainerId(container_id))
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    for &tid in &tensors {
+        rt.remove_tensor_raw(tid);
+    }
+    Ok(tensors)
+}
+
+#[pyfunction]
+fn pause_container(container_id: u64) -> PyResult<()> {
+    let mut rt = RUNTIME_LAZY.lock().unwrap();
+    rt.scheduler.pause_container(ContainerId(container_id))
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
+#[pyfunction]
+fn resume_container(container_id: u64) -> PyResult<()> {
+    let mut rt = RUNTIME_LAZY.lock().unwrap();
+    rt.scheduler.resume_container(ContainerId(container_id))
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
+#[pyfunction]
+fn submit_job(container_id: u64, t: &GpuTensor) -> PyResult<u64> {
+    let mut rt = RUNTIME_LAZY.lock().unwrap();
+    let job_id = rt.scheduler.submit(ContainerId(container_id), t.id)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(job_id.0)
+}
+
+#[pyfunction]
+fn run_next() -> PyResult<Option<u64>> {
+    let runtime = get_device_runtime()?;
+    let mut rt = RUNTIME_LAZY.lock().unwrap();
+    let result = rt.run_next(&runtime.device)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(result.map(|j| j.0))
+}
+
+#[pyfunction]
+fn job_status(job_id: u64) -> PyResult<String> {
+    let rt = RUNTIME_LAZY.lock().unwrap();
+    match rt.scheduler.job_status(JobId(job_id)) {
+        Some((_, JobStatus::Queued)) => Ok("queued".to_string()),
+        Some((_, JobStatus::Running { .. })) => Ok("running".to_string()),
+        Some((_, JobStatus::Completed { .. })) => Ok("completed".to_string()),
+        Some((_, JobStatus::Failed { .. })) => Ok("failed".to_string()),
+        None => Err(PyValueError::new_err(format!("Job {} not found", job_id))),
+    }
+}
+
+#[pyfunction]
+fn container_usage(container_id: u64) -> PyResult<(usize, usize)> {
+    let rt = RUNTIME_LAZY.lock().unwrap();
+    rt.scheduler.container_usage(ContainerId(container_id))
+        .ok_or_else(|| PyValueError::new_err(format!("Container {} not found", container_id)))
+}
+
+#[pyfunction]
+fn global_usage() -> PyResult<(usize, usize)> {
+    let rt = RUNTIME_LAZY.lock().unwrap();
+    Ok(rt.scheduler.global_usage())
+}
+
+#[pyfunction]
+fn queue_depth() -> PyResult<usize> {
+    let rt = RUNTIME_LAZY.lock().unwrap();
+    Ok(rt.scheduler.queue_depth())
+}
+
 #[pymodule]
 fn applegpu_runtime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<GpuTensor>()?;
@@ -382,5 +486,15 @@ fn applegpu_runtime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(transpose, m)?)?;
     m.add_function(wrap_pyfunction!(attention, m)?)?;
     m.add_function(wrap_pyfunction!(matmul, m)?)?;
+    m.add_function(wrap_pyfunction!(register_container, m)?)?;
+    m.add_function(wrap_pyfunction!(deregister_container, m)?)?;
+    m.add_function(wrap_pyfunction!(pause_container, m)?)?;
+    m.add_function(wrap_pyfunction!(resume_container, m)?)?;
+    m.add_function(wrap_pyfunction!(submit_job, m)?)?;
+    m.add_function(wrap_pyfunction!(run_next, m)?)?;
+    m.add_function(wrap_pyfunction!(job_status, m)?)?;
+    m.add_function(wrap_pyfunction!(container_usage, m)?)?;
+    m.add_function(wrap_pyfunction!(global_usage, m)?)?;
+    m.add_function(wrap_pyfunction!(queue_depth, m)?)?;
     Ok(())
 }
