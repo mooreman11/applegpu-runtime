@@ -18,6 +18,11 @@ impl Device {
             .ok_or(GpuError::DeviceNotAvailable)
     }
 
+    /// Get the raw FFI handle. Used internally by buffer and compute modules.
+    pub(crate) fn raw_handle(&self) -> *const ffi::GPUDeviceHandle {
+        self.handle as *const _
+    }
+
     /// Get the device name (e.g. "Apple M1 Pro").
     pub fn name(&self) -> String {
         ffi::device_name(self.handle)

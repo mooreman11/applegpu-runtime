@@ -7,6 +7,10 @@ pub enum GpuError {
     BackendNotInitialized,
     /// Invalid tensor specification
     InvalidTensor(String),
+    /// Buffer allocation failed
+    BufferAllocationFailed(usize),
+    /// Compute operation failed
+    ComputeFailed(String),
 }
 
 impl std::fmt::Display for GpuError {
@@ -15,6 +19,8 @@ impl std::fmt::Display for GpuError {
             GpuError::DeviceNotAvailable => write!(f, "Metal GPU device not available"),
             GpuError::BackendNotInitialized => write!(f, "Backend not initialized, call init_backend() first"),
             GpuError::InvalidTensor(msg) => write!(f, "Invalid tensor: {}", msg),
+            GpuError::BufferAllocationFailed(size) => write!(f, "Failed to allocate GPU buffer of {} bytes", size),
+            GpuError::ComputeFailed(msg) => write!(f, "Compute failed: {}", msg),
         }
     }
 }

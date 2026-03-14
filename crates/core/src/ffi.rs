@@ -44,6 +44,55 @@ pub fn device_name(device: *const GPUDeviceHandle) -> Option<String> {
     }
 }
 
+/// Opaque handle to a GPU buffer from the Swift side.
+#[repr(C)]
+pub struct GPUBufferHandle {
+    _opaque: [u8; 0],
+}
+
+extern "C" {
+    pub fn gpu_bridge_create_buffer(
+        device: *const GPUDeviceHandle,
+        size_bytes: u64,
+    ) -> *mut GPUBufferHandle;
+
+    pub fn gpu_bridge_create_buffer_with_data(
+        device: *const GPUDeviceHandle,
+        data: *const std::ffi::c_void,
+        size_bytes: u64,
+    ) -> *mut GPUBufferHandle;
+
+    pub fn gpu_bridge_destroy_buffer(buffer: *mut GPUBufferHandle);
+
+    pub fn gpu_bridge_buffer_contents(buffer: *const GPUBufferHandle) -> *mut std::ffi::c_void;
+
+    pub fn gpu_bridge_buffer_length(buffer: *const GPUBufferHandle) -> u64;
+}
+
+/// Opaque handle to a compute context from the Swift side.
+#[repr(C)]
+pub struct GPUComputeHandle {
+    _opaque: [u8; 0],
+}
+
+extern "C" {
+    pub fn gpu_bridge_create_compute(
+        device: *const GPUDeviceHandle,
+        kernel_source: *const std::ffi::c_char,
+        function_name: *const std::ffi::c_char,
+    ) -> *mut GPUComputeHandle;
+
+    pub fn gpu_bridge_destroy_compute(compute: *mut GPUComputeHandle);
+
+    pub fn gpu_bridge_compute_elementwise(
+        compute: *mut GPUComputeHandle,
+        buf_a: *const GPUBufferHandle,
+        buf_b: *const GPUBufferHandle,
+        buf_out: *mut GPUBufferHandle,
+        element_count: u64,
+    ) -> i32;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
