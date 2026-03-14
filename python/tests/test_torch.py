@@ -23,10 +23,20 @@ def test_from_torch_preserves_shape():
     assert result.shape == (3, 4)
 
 
-def test_from_torch_rejects_non_float32():
+def test_from_torch_float64_roundtrip():
     t = torch.tensor([1.0, 2.0], dtype=torch.float64)
-    with pytest.raises(ValueError, match="float32"):
-        gpu.from_torch(t)
+    g = gpu.from_torch(t)
+    assert g.dtype == "float64"
+    result = g.to_torch()
+    assert torch.allclose(result, t)
+
+
+def test_from_torch_int32_roundtrip():
+    t = torch.tensor([10, 20, 30], dtype=torch.int32)
+    g = gpu.from_torch(t)
+    assert g.dtype == "int32"
+    result = g.to_torch()
+    assert torch.equal(result, t)
 
 
 def test_to_torch_auto_evals():

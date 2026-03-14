@@ -22,19 +22,43 @@ def test_from_numpy_preserves_shape():
     assert result.shape == (3, 4)
 
 
-def test_from_numpy_rejects_non_float32():
+def test_from_numpy_float64_roundtrip():
     arr = np.array([1.0, 2.0], dtype=np.float64)
+    t = gpu.from_numpy(arr)
+    assert t.dtype == "float64"
+    result = t.to_numpy()
+    np.testing.assert_array_equal(result, arr)
+
+
+def test_from_numpy_int32_roundtrip():
+    arr = np.array([10, 20, 30], dtype=np.int32)
+    t = gpu.from_numpy(arr)
+    assert t.dtype == "int32"
+    result = t.to_numpy()
+    np.testing.assert_array_equal(result, arr)
+
+
+def test_from_numpy_bool_roundtrip():
+    arr = np.array([True, False, True], dtype=np.bool_)
+    t = gpu.from_numpy(arr)
+    assert t.dtype == "bool"
+    result = t.to_numpy()
+    np.testing.assert_array_equal(result, arr)
+
+
+def test_from_numpy_unsupported_dtype():
+    arr = np.array([1+2j, 3+4j], dtype=np.complex128)
     with pytest.raises((ValueError, TypeError)):
         gpu.from_numpy(arr)
 
 
-def test_from_numpy_rejects_non_contiguous():
-    # Use a stride-based view that is neither C- nor F-contiguous
+def test_from_numpy_non_contiguous_accepted():
+    # Non-contiguous arrays are accepted (tobytes serializes correctly)
     arr = np.arange(12, dtype=np.float32).reshape(3, 4)[:, ::2]
     assert not arr.flags['C_CONTIGUOUS']
-    assert not arr.flags['F_CONTIGUOUS']
-    with pytest.raises((ValueError, TypeError)):
-        gpu.from_numpy(arr)
+    t = gpu.from_numpy(arr)
+    result = t.to_numpy()
+    np.testing.assert_array_equal(result.flatten(), arr.flatten())
 
 
 def test_to_numpy_auto_evals():
