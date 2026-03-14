@@ -51,13 +51,19 @@ make check
 
 ## Key Files
 
+- `crates/core/src/ops.rs` — High-level tensor operations (add, sub, mul, div, neg, relu, exp, log, sqrt, matmul)
+- `crates/core/src/compute.rs` — KernelRegistry, ComputePipeline, MSL kernel sources
+- `crates/core/src/buffer.rs` — Safe Rust Buffer wrapper around MTLBuffer (zero-copy shared memory)
+- `crates/core/src/tensor.rs` — DType, Shape, TensorMeta, Tensor (buffer-backed)
 - `crates/core/src/ffi.rs` — Rust-Swift FFI boundary (extern "C" declarations + safe wrappers)
 - `crates/core/src/device.rs` — RAII Device wrapper with Drop-based cleanup
 - `crates/core/src/backend.rs` — Backend enum, Runtime, init_backend() with OnceCell
-- `crates/core/src/tensor.rs` — DType, Shape, TensorMeta, TensorLocation types
 - `crates/core/src/error.rs` — GpuError enum and Result alias
 - `crates/core/build.rs` — Compiles Swift static lib and links it into Rust
-- `swift/Sources/AppleGPUBridge/bridge.swift` — Swift side of C ABI bridge (@_cdecl exports)
+- `swift/Sources/AppleGPUBridge/bridge.swift` — Swift C ABI bridge (@_cdecl exports) + device handle helper
+- `swift/Sources/AppleGPUBridge/buffer.swift` — MTLBuffer C ABI (create, read, write, destroy)
+- `swift/Sources/AppleGPUBridge/compute.swift` — Metal compute pipeline C ABI (binary, unary, matmul dispatch)
+- `swift/Sources/AppleGPUBridge/kernels.swift` — MSL kernel source strings (used by Swift tests)
 - `swift/Sources/AppleGPUBridge/include/bridge.h` — shared C header for the FFI contract
 - `crates/python/src/lib.rs` — PyO3 module definition (Python-facing API surface)
 - `python/applegpu_runtime/__init__.py` — Python package entry point
@@ -76,6 +82,8 @@ Always prefer the fastest path. Profile before and after changes to performance-
 ## Development Workflow
 
 This project uses **TDD**. Write tests first, then implement.
+
+**After pushing or committing significant changes**, update `README.md` to reflect new capabilities, API changes, or status updates. Keep the README consistent with the actual state of the library.
 
 - **Rust tests**: unit tests inline (`#[cfg(test)]`), integration tests in `crates/core/tests/`
 - **Swift tests**: Swift Testing framework in `swift/Tests/AppleGPUBridgeTests/`
