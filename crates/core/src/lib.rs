@@ -1,5 +1,6 @@
 pub mod backend;
 pub mod buffer;
+pub mod compute;
 pub mod device;
 pub mod error;
 pub mod ffi;
