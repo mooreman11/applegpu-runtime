@@ -340,6 +340,194 @@ kernel void embedding_f16(
 }
 "#;
 
+// ── Slice kernel sources ────────────────────────────────────────────────────
+
+const SLICE_DIM0_KERNEL_SOURCE: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void slice_dim0_f32(device const float* input [[buffer(0)]], device float* output [[buffer(1)]], constant uint& cols [[buffer(2)]], constant uint& start_row [[buffer(3)]], uint2 gid [[thread_position_in_grid]]) {
+    uint row = gid.y; uint col = gid.x;
+    if (col >= cols) return;
+    output[row * cols + col] = input[(start_row + row) * cols + col];
+}
+"#;
+
+const SLICE_DIM0_KERNEL_SOURCE_F16: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void slice_dim0_f16(device const half* input [[buffer(0)]], device half* output [[buffer(1)]], constant uint& cols [[buffer(2)]], constant uint& start_row [[buffer(3)]], uint2 gid [[thread_position_in_grid]]) {
+    uint row = gid.y; uint col = gid.x;
+    if (col >= cols) return;
+    output[row * cols + col] = input[(start_row + row) * cols + col];
+}
+"#;
+
+const SLICE_DIM1_KERNEL_SOURCE: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void slice_dim1_f32(device const float* input [[buffer(0)]], device float* output [[buffer(1)]], constant uint& in_cols [[buffer(2)]], constant uint& out_cols [[buffer(3)]], constant uint& start_col [[buffer(4)]], constant uint& rows [[buffer(5)]], uint2 gid [[thread_position_in_grid]]) {
+    uint row = gid.y; uint col = gid.x;
+    if (row >= rows || col >= out_cols) return;
+    output[row * out_cols + col] = input[row * in_cols + (start_col + col)];
+}
+"#;
+
+const SLICE_DIM1_KERNEL_SOURCE_F16: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void slice_dim1_f16(device const half* input [[buffer(0)]], device half* output [[buffer(1)]], constant uint& in_cols [[buffer(2)]], constant uint& out_cols [[buffer(3)]], constant uint& start_col [[buffer(4)]], constant uint& rows [[buffer(5)]], uint2 gid [[thread_position_in_grid]]) {
+    uint row = gid.y; uint col = gid.x;
+    if (row >= rows || col >= out_cols) return;
+    output[row * out_cols + col] = input[row * in_cols + (start_col + col)];
+}
+"#;
+
+// ── Concat kernel sources ───────────────────────────────────────────────────
+
+const CONCAT_DIM0_KERNEL_SOURCE: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void concat_dim0_f32(device const float* a [[buffer(0)]], device const float* b [[buffer(1)]], device float* output [[buffer(2)]], constant uint& rows_a [[buffer(3)]], constant uint& cols [[buffer(4)]], uint2 gid [[thread_position_in_grid]]) {
+    uint row = gid.y; uint col = gid.x;
+    if (col >= cols) return;
+    if (row < rows_a) output[row * cols + col] = a[row * cols + col];
+    else output[row * cols + col] = b[(row - rows_a) * cols + col];
+}
+"#;
+
+const CONCAT_DIM0_KERNEL_SOURCE_F16: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void concat_dim0_f16(device const half* a [[buffer(0)]], device const half* b [[buffer(1)]], device half* output [[buffer(2)]], constant uint& rows_a [[buffer(3)]], constant uint& cols [[buffer(4)]], uint2 gid [[thread_position_in_grid]]) {
+    uint row = gid.y; uint col = gid.x;
+    if (col >= cols) return;
+    if (row < rows_a) output[row * cols + col] = a[row * cols + col];
+    else output[row * cols + col] = b[(row - rows_a) * cols + col];
+}
+"#;
+
+const CONCAT_DIM1_KERNEL_SOURCE: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void concat_dim1_f32(device const float* a [[buffer(0)]], device const float* b [[buffer(1)]], device float* output [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols_a [[buffer(4)]], constant uint& cols_b [[buffer(5)]], uint2 gid [[thread_position_in_grid]]) {
+    uint row = gid.y; uint col = gid.x;
+    uint total_cols = cols_a + cols_b;
+    if (row >= rows || col >= total_cols) return;
+    if (col < cols_a) output[row * total_cols + col] = a[row * cols_a + col];
+    else output[row * total_cols + col] = b[row * cols_b + (col - cols_a)];
+}
+"#;
+
+const CONCAT_DIM1_KERNEL_SOURCE_F16: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void concat_dim1_f16(device const half* a [[buffer(0)]], device const half* b [[buffer(1)]], device half* output [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols_a [[buffer(4)]], constant uint& cols_b [[buffer(5)]], uint2 gid [[thread_position_in_grid]]) {
+    uint row = gid.y; uint col = gid.x;
+    uint total_cols = cols_a + cols_b;
+    if (row >= rows || col >= total_cols) return;
+    if (col < cols_a) output[row * total_cols + col] = a[row * cols_a + col];
+    else output[row * total_cols + col] = b[row * cols_b + (col - cols_a)];
+}
+"#;
+
+// ── AddBias kernel sources ──────────────────────────────────────────────────
+
+const ADD_BIAS_KERNEL_SOURCE: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void add_bias_f32(device const float* input [[buffer(0)]], device const float* bias [[buffer(1)]], device float* output [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint2 gid [[thread_position_in_grid]]) {
+    uint row = gid.y; uint col = gid.x;
+    if (row >= rows || col >= cols) return;
+    output[row * cols + col] = input[row * cols + col] + bias[col];
+}
+"#;
+
+const ADD_BIAS_KERNEL_SOURCE_F16: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void add_bias_f16(device const half* input [[buffer(0)]], device const half* bias [[buffer(1)]], device half* output [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint2 gid [[thread_position_in_grid]]) {
+    uint row = gid.y; uint col = gid.x;
+    if (row >= rows || col >= cols) return;
+    output[row * cols + col] = input[row * cols + col] + bias[col];
+}
+"#;
+
+// ── SoftmaxCausal kernel sources ────────────────────────────────────────────
+
+const SOFTMAX_CAUSAL_KERNEL_SOURCE: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void softmax_causal_f32(device const float* input [[buffer(0)]], device float* output [[buffer(1)]], constant uint& rows [[buffer(2)]], constant uint& cols [[buffer(3)]], uint row [[thread_position_in_grid]]) {
+    if (row >= rows) return;
+    uint offset = row * cols;
+    float max_val = -1e9f;
+    for (uint j = 0; j <= row && j < cols; j++) max_val = max(max_val, input[offset + j]);
+    float sum = 0.0f;
+    for (uint j = 0; j < cols; j++) {
+        if (j <= row) { float e = exp(input[offset + j] - max_val); output[offset + j] = e; sum += e; }
+        else { output[offset + j] = 0.0f; }
+    }
+    for (uint j = 0; j <= row && j < cols; j++) output[offset + j] /= sum;
+}
+"#;
+
+const SOFTMAX_CAUSAL_KERNEL_SOURCE_F16: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void softmax_causal_f16(device const half* input [[buffer(0)]], device half* output [[buffer(1)]], constant uint& rows [[buffer(2)]], constant uint& cols [[buffer(3)]], uint row [[thread_position_in_grid]]) {
+    if (row >= rows) return;
+    uint offset = row * cols;
+    float max_val = -1e9f;
+    for (uint j = 0; j <= row && j < cols; j++) max_val = max(max_val, float(input[offset + j]));
+    float sum = 0.0f;
+    for (uint j = 0; j < cols; j++) {
+        if (j <= row) { float e = exp(float(input[offset + j]) - max_val); output[offset + j] = half(e); sum += e; }
+        else { output[offset + j] = half(0.0f); }
+    }
+    for (uint j = 0; j <= row && j < cols; j++) output[offset + j] = half(float(output[offset + j]) / sum);
+}
+"#;
+
+// ── Argmax kernel sources ───────────────────────────────────────────────────
+
+const ARGMAX_KERNEL_SOURCE: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void argmax_f32(device const float* input [[buffer(0)]], device int* output [[buffer(1)]], constant uint& rows [[buffer(2)]], constant uint& cols [[buffer(3)]], uint row [[thread_position_in_grid]]) {
+    if (row >= rows) return;
+    uint offset = row * cols;
+    float max_val = input[offset]; int max_idx = 0;
+    for (uint j = 1; j < cols; j++) { if (input[offset + j] > max_val) { max_val = input[offset + j]; max_idx = int(j); } }
+    output[row] = max_idx;
+}
+"#;
+
+const ARGMAX_KERNEL_SOURCE_F16: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void argmax_f16(device const half* input [[buffer(0)]], device int* output [[buffer(1)]], constant uint& rows [[buffer(2)]], constant uint& cols [[buffer(3)]], uint row [[thread_position_in_grid]]) {
+    if (row >= rows) return;
+    uint offset = row * cols;
+    float max_val = float(input[offset]); int max_idx = 0;
+    for (uint j = 1; j < cols; j++) { if (float(input[offset + j]) > max_val) { max_val = float(input[offset + j]); max_idx = int(j); } }
+    output[row] = max_idx;
+}
+"#;
+
 /// MSL source for f16 scalar multiply (scalar stays float, read/write half).
 const SCALAR_MUL_KERNEL_SOURCE_F16: &str = r#"
 #include <metal_stdlib>
@@ -558,6 +746,71 @@ impl ComputePipeline {
         if result == 0 { Ok(()) } else { Err(GpuError::ComputeFailed("Embedding dispatch failed".to_string())) }
     }
 
+    /// Dispatch slice_dim0: output[row,col] = input[(start_row+row), col].
+    pub fn dispatch_slice_dim0(
+        &self, buf_input: &Buffer, buf_output: &Buffer, cols: usize, start_row: usize, out_rows: usize,
+    ) -> Result<()> {
+        let result = unsafe {
+            ffi::gpu_bridge_compute_slice_dim0(
+                self.handle, buf_input.raw_handle() as *const _,
+                buf_output.raw_handle(), cols as u32, start_row as u32, out_rows as u32,
+            )
+        };
+        if result == 0 { Ok(()) } else { Err(GpuError::ComputeFailed("slice_dim0 dispatch failed".to_string())) }
+    }
+
+    /// Dispatch slice_dim1: output[row,col] = input[row, start_col+col].
+    pub fn dispatch_slice_dim1(
+        &self, buf_input: &Buffer, buf_output: &Buffer, in_cols: usize, out_cols: usize, start_col: usize, rows: usize,
+    ) -> Result<()> {
+        let result = unsafe {
+            ffi::gpu_bridge_compute_slice_dim1(
+                self.handle, buf_input.raw_handle() as *const _,
+                buf_output.raw_handle(), in_cols as u32, out_cols as u32, start_col as u32, rows as u32,
+            )
+        };
+        if result == 0 { Ok(()) } else { Err(GpuError::ComputeFailed("slice_dim1 dispatch failed".to_string())) }
+    }
+
+    /// Dispatch concat_dim0: output = [a; b] stacked along rows.
+    pub fn dispatch_concat_dim0(
+        &self, buf_a: &Buffer, buf_b: &Buffer, buf_output: &Buffer, rows_a: usize, cols: usize, total_rows: usize,
+    ) -> Result<()> {
+        let result = unsafe {
+            ffi::gpu_bridge_compute_concat_dim0(
+                self.handle, buf_a.raw_handle() as *const _, buf_b.raw_handle() as *const _,
+                buf_output.raw_handle(), rows_a as u32, cols as u32, total_rows as u32,
+            )
+        };
+        if result == 0 { Ok(()) } else { Err(GpuError::ComputeFailed("concat_dim0 dispatch failed".to_string())) }
+    }
+
+    /// Dispatch concat_dim1: output = [a | b] stacked along columns.
+    pub fn dispatch_concat_dim1(
+        &self, buf_a: &Buffer, buf_b: &Buffer, buf_output: &Buffer, rows: usize, cols_a: usize, cols_b: usize,
+    ) -> Result<()> {
+        let result = unsafe {
+            ffi::gpu_bridge_compute_concat_dim1(
+                self.handle, buf_a.raw_handle() as *const _, buf_b.raw_handle() as *const _,
+                buf_output.raw_handle(), rows as u32, cols_a as u32, cols_b as u32,
+            )
+        };
+        if result == 0 { Ok(()) } else { Err(GpuError::ComputeFailed("concat_dim1 dispatch failed".to_string())) }
+    }
+
+    /// Dispatch add_bias: output[row,col] = input[row,col] + bias[col].
+    pub fn dispatch_add_bias(
+        &self, buf_input: &Buffer, buf_bias: &Buffer, buf_output: &Buffer, rows: usize, cols: usize,
+    ) -> Result<()> {
+        let result = unsafe {
+            ffi::gpu_bridge_compute_add_bias(
+                self.handle, buf_input.raw_handle() as *const _, buf_bias.raw_handle() as *const _,
+                buf_output.raw_handle(), rows as u32, cols as u32,
+            )
+        };
+        if result == 0 { Ok(()) } else { Err(GpuError::ComputeFailed("add_bias dispatch failed".to_string())) }
+    }
+
     // ── Non-blocking dispatch methods ─────────────────────────────────────
 
     /// Non-blocking binary elementwise. Returns command buffer handle.
@@ -771,6 +1024,71 @@ impl ComputePipeline {
         };
         if cb.is_null() { Err(GpuError::ComputeFailed("Non-blocking embedding dispatch failed".to_string())) } else { Ok(cb) }
     }
+
+    pub fn dispatch_slice_dim0_nb(
+        &self, queue: *mut std::ffi::c_void, buf_input: &Buffer, buf_output: &Buffer,
+        cols: usize, start_row: usize, out_rows: usize,
+    ) -> Result<*mut std::ffi::c_void> {
+        let cb = unsafe {
+            ffi::gpu_bridge_compute_slice_dim0_nb(
+                self.handle, queue, buf_input.raw_handle() as *const _,
+                buf_output.raw_handle(), cols as u32, start_row as u32, out_rows as u32,
+            )
+        };
+        if cb.is_null() { Err(GpuError::ComputeFailed("Non-blocking slice_dim0 dispatch failed".to_string())) } else { Ok(cb) }
+    }
+
+    pub fn dispatch_slice_dim1_nb(
+        &self, queue: *mut std::ffi::c_void, buf_input: &Buffer, buf_output: &Buffer,
+        in_cols: usize, out_cols: usize, start_col: usize, rows: usize,
+    ) -> Result<*mut std::ffi::c_void> {
+        let cb = unsafe {
+            ffi::gpu_bridge_compute_slice_dim1_nb(
+                self.handle, queue, buf_input.raw_handle() as *const _,
+                buf_output.raw_handle(), in_cols as u32, out_cols as u32, start_col as u32, rows as u32,
+            )
+        };
+        if cb.is_null() { Err(GpuError::ComputeFailed("Non-blocking slice_dim1 dispatch failed".to_string())) } else { Ok(cb) }
+    }
+
+    pub fn dispatch_concat_dim0_nb(
+        &self, queue: *mut std::ffi::c_void, buf_a: &Buffer, buf_b: &Buffer, buf_output: &Buffer,
+        rows_a: usize, cols: usize, total_rows: usize,
+    ) -> Result<*mut std::ffi::c_void> {
+        let cb = unsafe {
+            ffi::gpu_bridge_compute_concat_dim0_nb(
+                self.handle, queue, buf_a.raw_handle() as *const _, buf_b.raw_handle() as *const _,
+                buf_output.raw_handle(), rows_a as u32, cols as u32, total_rows as u32,
+            )
+        };
+        if cb.is_null() { Err(GpuError::ComputeFailed("Non-blocking concat_dim0 dispatch failed".to_string())) } else { Ok(cb) }
+    }
+
+    pub fn dispatch_concat_dim1_nb(
+        &self, queue: *mut std::ffi::c_void, buf_a: &Buffer, buf_b: &Buffer, buf_output: &Buffer,
+        rows: usize, cols_a: usize, cols_b: usize,
+    ) -> Result<*mut std::ffi::c_void> {
+        let cb = unsafe {
+            ffi::gpu_bridge_compute_concat_dim1_nb(
+                self.handle, queue, buf_a.raw_handle() as *const _, buf_b.raw_handle() as *const _,
+                buf_output.raw_handle(), rows as u32, cols_a as u32, cols_b as u32,
+            )
+        };
+        if cb.is_null() { Err(GpuError::ComputeFailed("Non-blocking concat_dim1 dispatch failed".to_string())) } else { Ok(cb) }
+    }
+
+    pub fn dispatch_add_bias_nb(
+        &self, queue: *mut std::ffi::c_void, buf_input: &Buffer, buf_bias: &Buffer, buf_output: &Buffer,
+        rows: usize, cols: usize,
+    ) -> Result<*mut std::ffi::c_void> {
+        let cb = unsafe {
+            ffi::gpu_bridge_compute_add_bias_nb(
+                self.handle, queue, buf_input.raw_handle() as *const _, buf_bias.raw_handle() as *const _,
+                buf_output.raw_handle(), rows as u32, cols as u32,
+            )
+        };
+        if cb.is_null() { Err(GpuError::ComputeFailed("Non-blocking add_bias dispatch failed".to_string())) } else { Ok(cb) }
+    }
 }
 
 impl Drop for ComputePipeline {
@@ -826,6 +1144,13 @@ impl KernelRegistry {
                     "gelu_f32" => GELU_KERNEL_SOURCE_F16,
                     "layer_norm_f32" => LAYER_NORM_KERNEL_SOURCE_F16,
                     "embedding_f32" => EMBEDDING_KERNEL_SOURCE_F16,
+                    "slice_dim0_f32" => SLICE_DIM0_KERNEL_SOURCE_F16,
+                    "slice_dim1_f32" => SLICE_DIM1_KERNEL_SOURCE_F16,
+                    "concat_dim0_f32" => CONCAT_DIM0_KERNEL_SOURCE_F16,
+                    "concat_dim1_f32" => CONCAT_DIM1_KERNEL_SOURCE_F16,
+                    "add_bias_f32" => ADD_BIAS_KERNEL_SOURCE_F16,
+                    "softmax_causal_f32" => SOFTMAX_CAUSAL_KERNEL_SOURCE_F16,
+                    "argmax_f32" => ARGMAX_KERNEL_SOURCE_F16,
                     _ => BINARY_KERNEL_SOURCE_F16, // fallback
                 };
                 // For named kernels like matmul_f32 -> matmul_f16
@@ -850,6 +1175,13 @@ impl KernelRegistry {
                     "gelu_f32" => GELU_KERNEL_SOURCE,
                     "layer_norm_f32" => LAYER_NORM_KERNEL_SOURCE,
                     "embedding_f32" => EMBEDDING_KERNEL_SOURCE,
+                    "slice_dim0_f32" => SLICE_DIM0_KERNEL_SOURCE,
+                    "slice_dim1_f32" => SLICE_DIM1_KERNEL_SOURCE,
+                    "concat_dim0_f32" => CONCAT_DIM0_KERNEL_SOURCE,
+                    "concat_dim1_f32" => CONCAT_DIM1_KERNEL_SOURCE,
+                    "add_bias_f32" => ADD_BIAS_KERNEL_SOURCE,
+                    "softmax_causal_f32" => SOFTMAX_CAUSAL_KERNEL_SOURCE,
+                    "argmax_f32" => ARGMAX_KERNEL_SOURCE,
                     _ => BINARY_KERNEL_SOURCE,
                 };
                 (source, base_name.to_string())
@@ -1058,6 +1390,138 @@ impl KernelRegistry {
         let (source, func) = Self::resolve_kernel("embedding_f32", dtype);
         let pipeline = self.get_or_create(device, source, &func)?;
         pipeline.dispatch_embedding(buf_weights, buf_indices, buf_out, seq_len, embed_dim)
+    }
+
+    // ── New op dispatch methods (typed) ──────────────────────────────────
+
+    pub fn dispatch_slice_dim0_typed(
+        &self, device: &Device, dtype: DType, buf_input: &Buffer, buf_output: &Buffer,
+        cols: usize, start_row: usize, out_rows: usize,
+    ) -> Result<()> {
+        let (source, func) = Self::resolve_kernel("slice_dim0_f32", dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_slice_dim0(buf_input, buf_output, cols, start_row, out_rows)
+    }
+
+    pub fn dispatch_slice_dim1_typed(
+        &self, device: &Device, dtype: DType, buf_input: &Buffer, buf_output: &Buffer,
+        in_cols: usize, out_cols: usize, start_col: usize, rows: usize,
+    ) -> Result<()> {
+        let (source, func) = Self::resolve_kernel("slice_dim1_f32", dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_slice_dim1(buf_input, buf_output, in_cols, out_cols, start_col, rows)
+    }
+
+    pub fn dispatch_concat_dim0_typed(
+        &self, device: &Device, dtype: DType, buf_a: &Buffer, buf_b: &Buffer, buf_output: &Buffer,
+        rows_a: usize, cols: usize, total_rows: usize,
+    ) -> Result<()> {
+        let (source, func) = Self::resolve_kernel("concat_dim0_f32", dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_concat_dim0(buf_a, buf_b, buf_output, rows_a, cols, total_rows)
+    }
+
+    pub fn dispatch_concat_dim1_typed(
+        &self, device: &Device, dtype: DType, buf_a: &Buffer, buf_b: &Buffer, buf_output: &Buffer,
+        rows: usize, cols_a: usize, cols_b: usize,
+    ) -> Result<()> {
+        let (source, func) = Self::resolve_kernel("concat_dim1_f32", dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_concat_dim1(buf_a, buf_b, buf_output, rows, cols_a, cols_b)
+    }
+
+    pub fn dispatch_add_bias_typed(
+        &self, device: &Device, dtype: DType, buf_input: &Buffer, buf_bias: &Buffer, buf_output: &Buffer,
+        rows: usize, cols: usize,
+    ) -> Result<()> {
+        let (source, func) = Self::resolve_kernel("add_bias_f32", dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_add_bias(buf_input, buf_bias, buf_output, rows, cols)
+    }
+
+    pub fn dispatch_softmax_causal_typed(
+        &self, device: &Device, dtype: DType, buf_input: &Buffer, buf_output: &Buffer,
+        rows: usize, cols: usize,
+    ) -> Result<()> {
+        let (source, func) = Self::resolve_kernel("softmax_causal_f32", dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        // Reuse softmax dispatch (same buffer layout: input, output, rows, cols; 1D dispatch per row)
+        pipeline.dispatch_softmax(buf_input, buf_output, rows, cols)
+    }
+
+    pub fn dispatch_argmax_typed(
+        &self, device: &Device, input_dtype: DType, buf_input: &Buffer, buf_output: &Buffer,
+        rows: usize, cols: usize,
+    ) -> Result<()> {
+        let (source, func) = Self::resolve_kernel("argmax_f32", input_dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        // Reuse softmax dispatch (same buffer layout: input, output, rows, cols; 1D dispatch per row)
+        pipeline.dispatch_softmax(buf_input, buf_output, rows, cols)
+    }
+
+    // ── Non-blocking new op dispatch methods (typed) ──────────────────────
+
+    pub fn dispatch_slice_dim0_typed_nb(
+        &self, device: &Device, dtype: DType, queue: *mut std::ffi::c_void,
+        buf_input: &Buffer, buf_output: &Buffer, cols: usize, start_row: usize, out_rows: usize,
+    ) -> Result<*mut std::ffi::c_void> {
+        let (source, func) = Self::resolve_kernel("slice_dim0_f32", dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_slice_dim0_nb(queue, buf_input, buf_output, cols, start_row, out_rows)
+    }
+
+    pub fn dispatch_slice_dim1_typed_nb(
+        &self, device: &Device, dtype: DType, queue: *mut std::ffi::c_void,
+        buf_input: &Buffer, buf_output: &Buffer, in_cols: usize, out_cols: usize, start_col: usize, rows: usize,
+    ) -> Result<*mut std::ffi::c_void> {
+        let (source, func) = Self::resolve_kernel("slice_dim1_f32", dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_slice_dim1_nb(queue, buf_input, buf_output, in_cols, out_cols, start_col, rows)
+    }
+
+    pub fn dispatch_concat_dim0_typed_nb(
+        &self, device: &Device, dtype: DType, queue: *mut std::ffi::c_void,
+        buf_a: &Buffer, buf_b: &Buffer, buf_output: &Buffer, rows_a: usize, cols: usize, total_rows: usize,
+    ) -> Result<*mut std::ffi::c_void> {
+        let (source, func) = Self::resolve_kernel("concat_dim0_f32", dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_concat_dim0_nb(queue, buf_a, buf_b, buf_output, rows_a, cols, total_rows)
+    }
+
+    pub fn dispatch_concat_dim1_typed_nb(
+        &self, device: &Device, dtype: DType, queue: *mut std::ffi::c_void,
+        buf_a: &Buffer, buf_b: &Buffer, buf_output: &Buffer, rows: usize, cols_a: usize, cols_b: usize,
+    ) -> Result<*mut std::ffi::c_void> {
+        let (source, func) = Self::resolve_kernel("concat_dim1_f32", dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_concat_dim1_nb(queue, buf_a, buf_b, buf_output, rows, cols_a, cols_b)
+    }
+
+    pub fn dispatch_add_bias_typed_nb(
+        &self, device: &Device, dtype: DType, queue: *mut std::ffi::c_void,
+        buf_input: &Buffer, buf_bias: &Buffer, buf_output: &Buffer, rows: usize, cols: usize,
+    ) -> Result<*mut std::ffi::c_void> {
+        let (source, func) = Self::resolve_kernel("add_bias_f32", dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_add_bias_nb(queue, buf_input, buf_bias, buf_output, rows, cols)
+    }
+
+    pub fn dispatch_softmax_causal_typed_nb(
+        &self, device: &Device, dtype: DType, queue: *mut std::ffi::c_void,
+        buf_input: &Buffer, buf_output: &Buffer, rows: usize, cols: usize,
+    ) -> Result<*mut std::ffi::c_void> {
+        let (source, func) = Self::resolve_kernel("softmax_causal_f32", dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_softmax_nb(queue, buf_input, buf_output, rows, cols)
+    }
+
+    pub fn dispatch_argmax_typed_nb(
+        &self, device: &Device, input_dtype: DType, queue: *mut std::ffi::c_void,
+        buf_input: &Buffer, buf_output: &Buffer, rows: usize, cols: usize,
+    ) -> Result<*mut std::ffi::c_void> {
+        let (source, func) = Self::resolve_kernel("argmax_f32", input_dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_softmax_nb(queue, buf_input, buf_output, rows, cols)
     }
 
     // ── Non-blocking dispatch methods ─────────────────────────────────────

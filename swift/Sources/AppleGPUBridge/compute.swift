@@ -262,6 +262,143 @@ final class GPUCompute {
         return commandBuffer.status == .completed
     }
 
+    func dispatchSliceDim0(bufIn: MTLBuffer, bufOut: MTLBuffer, cols: Int, startRow: Int, outRows: Int) -> Bool {
+        if outRows == 0 || cols == 0 { return true }
+
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder() else { return false }
+
+        encoder.setComputePipelineState(pipelineState)
+        encoder.setBuffer(bufIn, offset: 0, index: 0)
+        encoder.setBuffer(bufOut, offset: 0, index: 1)
+
+        var c = UInt32(cols), sr = UInt32(startRow)
+        encoder.setBytes(&c, length: MemoryLayout<UInt32>.size, index: 2)
+        encoder.setBytes(&sr, length: MemoryLayout<UInt32>.size, index: 3)
+
+        let w = pipelineState.threadExecutionWidth
+        let h = pipelineState.maxTotalThreadsPerThreadgroup / w
+        let threadsPerGroup = MTLSize(width: w, height: h, depth: 1)
+        let gridSize = MTLSize(width: cols, height: outRows, depth: 1)
+
+        encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadsPerGroup)
+        encoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        return commandBuffer.status == .completed
+    }
+
+    func dispatchSliceDim1(bufIn: MTLBuffer, bufOut: MTLBuffer, inCols: Int, outCols: Int, startCol: Int, rows: Int) -> Bool {
+        if rows == 0 || outCols == 0 { return true }
+
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder() else { return false }
+
+        encoder.setComputePipelineState(pipelineState)
+        encoder.setBuffer(bufIn, offset: 0, index: 0)
+        encoder.setBuffer(bufOut, offset: 0, index: 1)
+
+        var ic = UInt32(inCols), oc = UInt32(outCols), sc = UInt32(startCol), r = UInt32(rows)
+        encoder.setBytes(&ic, length: MemoryLayout<UInt32>.size, index: 2)
+        encoder.setBytes(&oc, length: MemoryLayout<UInt32>.size, index: 3)
+        encoder.setBytes(&sc, length: MemoryLayout<UInt32>.size, index: 4)
+        encoder.setBytes(&r, length: MemoryLayout<UInt32>.size, index: 5)
+
+        let w = pipelineState.threadExecutionWidth
+        let h = pipelineState.maxTotalThreadsPerThreadgroup / w
+        let threadsPerGroup = MTLSize(width: w, height: h, depth: 1)
+        let gridSize = MTLSize(width: outCols, height: rows, depth: 1)
+
+        encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadsPerGroup)
+        encoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        return commandBuffer.status == .completed
+    }
+
+    func dispatchConcatDim0(bufA: MTLBuffer, bufB: MTLBuffer, bufOut: MTLBuffer, rowsA: Int, cols: Int, totalRows: Int) -> Bool {
+        if totalRows == 0 || cols == 0 { return true }
+
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder() else { return false }
+
+        encoder.setComputePipelineState(pipelineState)
+        encoder.setBuffer(bufA, offset: 0, index: 0)
+        encoder.setBuffer(bufB, offset: 0, index: 1)
+        encoder.setBuffer(bufOut, offset: 0, index: 2)
+
+        var ra = UInt32(rowsA), c = UInt32(cols)
+        encoder.setBytes(&ra, length: MemoryLayout<UInt32>.size, index: 3)
+        encoder.setBytes(&c, length: MemoryLayout<UInt32>.size, index: 4)
+
+        let w = pipelineState.threadExecutionWidth
+        let h = pipelineState.maxTotalThreadsPerThreadgroup / w
+        let threadsPerGroup = MTLSize(width: w, height: h, depth: 1)
+        let gridSize = MTLSize(width: cols, height: totalRows, depth: 1)
+
+        encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadsPerGroup)
+        encoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        return commandBuffer.status == .completed
+    }
+
+    func dispatchConcatDim1(bufA: MTLBuffer, bufB: MTLBuffer, bufOut: MTLBuffer, rows: Int, colsA: Int, colsB: Int) -> Bool {
+        let totalCols = colsA + colsB
+        if rows == 0 || totalCols == 0 { return true }
+
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder() else { return false }
+
+        encoder.setComputePipelineState(pipelineState)
+        encoder.setBuffer(bufA, offset: 0, index: 0)
+        encoder.setBuffer(bufB, offset: 0, index: 1)
+        encoder.setBuffer(bufOut, offset: 0, index: 2)
+
+        var r = UInt32(rows), ca = UInt32(colsA), cb = UInt32(colsB)
+        encoder.setBytes(&r, length: MemoryLayout<UInt32>.size, index: 3)
+        encoder.setBytes(&ca, length: MemoryLayout<UInt32>.size, index: 4)
+        encoder.setBytes(&cb, length: MemoryLayout<UInt32>.size, index: 5)
+
+        let w = pipelineState.threadExecutionWidth
+        let h = pipelineState.maxTotalThreadsPerThreadgroup / w
+        let threadsPerGroup = MTLSize(width: w, height: h, depth: 1)
+        let gridSize = MTLSize(width: totalCols, height: rows, depth: 1)
+
+        encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadsPerGroup)
+        encoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        return commandBuffer.status == .completed
+    }
+
+    func dispatchAddBias(bufIn: MTLBuffer, bufBias: MTLBuffer, bufOut: MTLBuffer, rows: Int, cols: Int) -> Bool {
+        if rows == 0 || cols == 0 { return true }
+
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder() else { return false }
+
+        encoder.setComputePipelineState(pipelineState)
+        encoder.setBuffer(bufIn, offset: 0, index: 0)
+        encoder.setBuffer(bufBias, offset: 0, index: 1)
+        encoder.setBuffer(bufOut, offset: 0, index: 2)
+
+        var r = UInt32(rows), c = UInt32(cols)
+        encoder.setBytes(&r, length: MemoryLayout<UInt32>.size, index: 3)
+        encoder.setBytes(&c, length: MemoryLayout<UInt32>.size, index: 4)
+
+        let w = pipelineState.threadExecutionWidth
+        let h = pipelineState.maxTotalThreadsPerThreadgroup / w
+        let threadsPerGroup = MTLSize(width: w, height: h, depth: 1)
+        let gridSize = MTLSize(width: cols, height: rows, depth: 1)
+
+        encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadsPerGroup)
+        encoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        return commandBuffer.status == .completed
+    }
+
     func dispatchEmbedding(bufWeights: MTLBuffer, bufIndices: MTLBuffer, bufOut: MTLBuffer, seqLen: Int, embedDim: Int) -> Bool {
         if seqLen == 0 || embedDim == 0 { return true }
 
@@ -551,6 +688,98 @@ public func gpuBridgeComputeEmbedding(
         bufOut: bufOut.buffer, seqLen: Int(seqLen), embedDim: Int(embedDim)
     )
     return success ? 0 : -1
+}
+
+// MARK: - Slice C ABI exports
+
+@_cdecl("gpu_bridge_compute_slice_dim0")
+public func gpuBridgeComputeSliceDim0(
+    _ computePtr: UnsafeMutableRawPointer?,
+    _ bufInPtr: UnsafeRawPointer?,
+    _ bufOutPtr: UnsafeMutableRawPointer?,
+    _ cols: UInt32,
+    _ startRow: UInt32,
+    _ outRows: UInt32
+) -> Int32 {
+    guard let computePtr = computePtr, let bufInPtr = bufInPtr, let bufOutPtr = bufOutPtr else { return -1 }
+    let compute = Unmanaged<GPUCompute>.fromOpaque(computePtr).takeUnretainedValue()
+    let bufIn = Unmanaged<GPUBuffer>.fromOpaque(bufInPtr).takeUnretainedValue()
+    let bufOut = Unmanaged<GPUBuffer>.fromOpaque(bufOutPtr).takeUnretainedValue()
+    return compute.dispatchSliceDim0(bufIn: bufIn.buffer, bufOut: bufOut.buffer, cols: Int(cols), startRow: Int(startRow), outRows: Int(outRows)) ? 0 : -1
+}
+
+@_cdecl("gpu_bridge_compute_slice_dim1")
+public func gpuBridgeComputeSliceDim1(
+    _ computePtr: UnsafeMutableRawPointer?,
+    _ bufInPtr: UnsafeRawPointer?,
+    _ bufOutPtr: UnsafeMutableRawPointer?,
+    _ inCols: UInt32,
+    _ outCols: UInt32,
+    _ startCol: UInt32,
+    _ rows: UInt32
+) -> Int32 {
+    guard let computePtr = computePtr, let bufInPtr = bufInPtr, let bufOutPtr = bufOutPtr else { return -1 }
+    let compute = Unmanaged<GPUCompute>.fromOpaque(computePtr).takeUnretainedValue()
+    let bufIn = Unmanaged<GPUBuffer>.fromOpaque(bufInPtr).takeUnretainedValue()
+    let bufOut = Unmanaged<GPUBuffer>.fromOpaque(bufOutPtr).takeUnretainedValue()
+    return compute.dispatchSliceDim1(bufIn: bufIn.buffer, bufOut: bufOut.buffer, inCols: Int(inCols), outCols: Int(outCols), startCol: Int(startCol), rows: Int(rows)) ? 0 : -1
+}
+
+// MARK: - Concat C ABI exports
+
+@_cdecl("gpu_bridge_compute_concat_dim0")
+public func gpuBridgeComputeConcatDim0(
+    _ computePtr: UnsafeMutableRawPointer?,
+    _ bufAPtr: UnsafeRawPointer?,
+    _ bufBPtr: UnsafeRawPointer?,
+    _ bufOutPtr: UnsafeMutableRawPointer?,
+    _ rowsA: UInt32,
+    _ cols: UInt32,
+    _ totalRows: UInt32
+) -> Int32 {
+    guard let computePtr = computePtr, let bufAPtr = bufAPtr, let bufBPtr = bufBPtr, let bufOutPtr = bufOutPtr else { return -1 }
+    let compute = Unmanaged<GPUCompute>.fromOpaque(computePtr).takeUnretainedValue()
+    let bufA = Unmanaged<GPUBuffer>.fromOpaque(bufAPtr).takeUnretainedValue()
+    let bufB = Unmanaged<GPUBuffer>.fromOpaque(bufBPtr).takeUnretainedValue()
+    let bufOut = Unmanaged<GPUBuffer>.fromOpaque(bufOutPtr).takeUnretainedValue()
+    return compute.dispatchConcatDim0(bufA: bufA.buffer, bufB: bufB.buffer, bufOut: bufOut.buffer, rowsA: Int(rowsA), cols: Int(cols), totalRows: Int(totalRows)) ? 0 : -1
+}
+
+@_cdecl("gpu_bridge_compute_concat_dim1")
+public func gpuBridgeComputeConcatDim1(
+    _ computePtr: UnsafeMutableRawPointer?,
+    _ bufAPtr: UnsafeRawPointer?,
+    _ bufBPtr: UnsafeRawPointer?,
+    _ bufOutPtr: UnsafeMutableRawPointer?,
+    _ rows: UInt32,
+    _ colsA: UInt32,
+    _ colsB: UInt32
+) -> Int32 {
+    guard let computePtr = computePtr, let bufAPtr = bufAPtr, let bufBPtr = bufBPtr, let bufOutPtr = bufOutPtr else { return -1 }
+    let compute = Unmanaged<GPUCompute>.fromOpaque(computePtr).takeUnretainedValue()
+    let bufA = Unmanaged<GPUBuffer>.fromOpaque(bufAPtr).takeUnretainedValue()
+    let bufB = Unmanaged<GPUBuffer>.fromOpaque(bufBPtr).takeUnretainedValue()
+    let bufOut = Unmanaged<GPUBuffer>.fromOpaque(bufOutPtr).takeUnretainedValue()
+    return compute.dispatchConcatDim1(bufA: bufA.buffer, bufB: bufB.buffer, bufOut: bufOut.buffer, rows: Int(rows), colsA: Int(colsA), colsB: Int(colsB)) ? 0 : -1
+}
+
+// MARK: - AddBias C ABI exports
+
+@_cdecl("gpu_bridge_compute_add_bias")
+public func gpuBridgeComputeAddBias(
+    _ computePtr: UnsafeMutableRawPointer?,
+    _ bufInPtr: UnsafeRawPointer?,
+    _ bufBiasPtr: UnsafeRawPointer?,
+    _ bufOutPtr: UnsafeMutableRawPointer?,
+    _ rows: UInt32,
+    _ cols: UInt32
+) -> Int32 {
+    guard let computePtr = computePtr, let bufInPtr = bufInPtr, let bufBiasPtr = bufBiasPtr, let bufOutPtr = bufOutPtr else { return -1 }
+    let compute = Unmanaged<GPUCompute>.fromOpaque(computePtr).takeUnretainedValue()
+    let bufIn = Unmanaged<GPUBuffer>.fromOpaque(bufInPtr).takeUnretainedValue()
+    let bufBias = Unmanaged<GPUBuffer>.fromOpaque(bufBiasPtr).takeUnretainedValue()
+    let bufOut = Unmanaged<GPUBuffer>.fromOpaque(bufOutPtr).takeUnretainedValue()
+    return compute.dispatchAddBias(bufIn: bufIn.buffer, bufBias: bufBias.buffer, bufOut: bufOut.buffer, rows: Int(rows), cols: Int(cols)) ? 0 : -1
 }
 
 // MARK: - Non-blocking (batched) C ABI exports
@@ -1028,5 +1257,230 @@ public func gpuBridgeComputeEmbeddingNB(
     encoder.endEncoding()
     commandBuffer.commit()
 
+    return Unmanaged.passRetained(commandBuffer as AnyObject).toOpaque()
+}
+
+// MARK: - Non-blocking slice/concat/add_bias C ABI exports
+
+@_cdecl("gpu_bridge_compute_slice_dim0_nb")
+public func gpuBridgeComputeSliceDim0NB(
+    _ computePtr: UnsafeMutableRawPointer?,
+    _ queuePtr: UnsafeMutableRawPointer?,
+    _ bufInPtr: UnsafeRawPointer?,
+    _ bufOutPtr: UnsafeMutableRawPointer?,
+    _ cols: UInt32,
+    _ startRow: UInt32,
+    _ outRows: UInt32
+) -> UnsafeMutableRawPointer? {
+    guard let computePtr = computePtr, let queuePtr = queuePtr,
+          let bufInPtr = bufInPtr, let bufOutPtr = bufOutPtr else { return nil }
+
+    let compute = Unmanaged<GPUCompute>.fromOpaque(computePtr).takeUnretainedValue()
+    let queue = Unmanaged<MTLCommandQueue>.fromOpaque(queuePtr).takeUnretainedValue()
+    let bufIn = Unmanaged<GPUBuffer>.fromOpaque(bufInPtr).takeUnretainedValue()
+    let bufOut = Unmanaged<GPUBuffer>.fromOpaque(bufOutPtr).takeUnretainedValue()
+
+    if outRows == 0 || cols == 0 { return nil }
+
+    guard let commandBuffer = queue.makeCommandBuffer(),
+          let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
+
+    encoder.setComputePipelineState(compute.pipelineState)
+    encoder.setBuffer(bufIn.buffer, offset: 0, index: 0)
+    encoder.setBuffer(bufOut.buffer, offset: 0, index: 1)
+
+    var c = cols, sr = startRow
+    encoder.setBytes(&c, length: MemoryLayout<UInt32>.size, index: 2)
+    encoder.setBytes(&sr, length: MemoryLayout<UInt32>.size, index: 3)
+
+    let w = compute.pipelineState.threadExecutionWidth
+    let h = compute.pipelineState.maxTotalThreadsPerThreadgroup / w
+    let threadsPerGroup = MTLSize(width: w, height: h, depth: 1)
+    let gridSize = MTLSize(width: Int(cols), height: Int(outRows), depth: 1)
+
+    encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadsPerGroup)
+    encoder.endEncoding()
+    commandBuffer.commit()
+    return Unmanaged.passRetained(commandBuffer as AnyObject).toOpaque()
+}
+
+@_cdecl("gpu_bridge_compute_slice_dim1_nb")
+public func gpuBridgeComputeSliceDim1NB(
+    _ computePtr: UnsafeMutableRawPointer?,
+    _ queuePtr: UnsafeMutableRawPointer?,
+    _ bufInPtr: UnsafeRawPointer?,
+    _ bufOutPtr: UnsafeMutableRawPointer?,
+    _ inCols: UInt32,
+    _ outCols: UInt32,
+    _ startCol: UInt32,
+    _ rows: UInt32
+) -> UnsafeMutableRawPointer? {
+    guard let computePtr = computePtr, let queuePtr = queuePtr,
+          let bufInPtr = bufInPtr, let bufOutPtr = bufOutPtr else { return nil }
+
+    let compute = Unmanaged<GPUCompute>.fromOpaque(computePtr).takeUnretainedValue()
+    let queue = Unmanaged<MTLCommandQueue>.fromOpaque(queuePtr).takeUnretainedValue()
+    let bufIn = Unmanaged<GPUBuffer>.fromOpaque(bufInPtr).takeUnretainedValue()
+    let bufOut = Unmanaged<GPUBuffer>.fromOpaque(bufOutPtr).takeUnretainedValue()
+
+    if rows == 0 || outCols == 0 { return nil }
+
+    guard let commandBuffer = queue.makeCommandBuffer(),
+          let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
+
+    encoder.setComputePipelineState(compute.pipelineState)
+    encoder.setBuffer(bufIn.buffer, offset: 0, index: 0)
+    encoder.setBuffer(bufOut.buffer, offset: 0, index: 1)
+
+    var ic = inCols, oc = outCols, sc = startCol, r = rows
+    encoder.setBytes(&ic, length: MemoryLayout<UInt32>.size, index: 2)
+    encoder.setBytes(&oc, length: MemoryLayout<UInt32>.size, index: 3)
+    encoder.setBytes(&sc, length: MemoryLayout<UInt32>.size, index: 4)
+    encoder.setBytes(&r, length: MemoryLayout<UInt32>.size, index: 5)
+
+    let w = compute.pipelineState.threadExecutionWidth
+    let h = compute.pipelineState.maxTotalThreadsPerThreadgroup / w
+    let threadsPerGroup = MTLSize(width: w, height: h, depth: 1)
+    let gridSize = MTLSize(width: Int(outCols), height: Int(rows), depth: 1)
+
+    encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadsPerGroup)
+    encoder.endEncoding()
+    commandBuffer.commit()
+    return Unmanaged.passRetained(commandBuffer as AnyObject).toOpaque()
+}
+
+@_cdecl("gpu_bridge_compute_concat_dim0_nb")
+public func gpuBridgeComputeConcatDim0NB(
+    _ computePtr: UnsafeMutableRawPointer?,
+    _ queuePtr: UnsafeMutableRawPointer?,
+    _ bufAPtr: UnsafeRawPointer?,
+    _ bufBPtr: UnsafeRawPointer?,
+    _ bufOutPtr: UnsafeMutableRawPointer?,
+    _ rowsA: UInt32,
+    _ cols: UInt32,
+    _ totalRows: UInt32
+) -> UnsafeMutableRawPointer? {
+    guard let computePtr = computePtr, let queuePtr = queuePtr,
+          let bufAPtr = bufAPtr, let bufBPtr = bufBPtr, let bufOutPtr = bufOutPtr else { return nil }
+
+    let compute = Unmanaged<GPUCompute>.fromOpaque(computePtr).takeUnretainedValue()
+    let queue = Unmanaged<MTLCommandQueue>.fromOpaque(queuePtr).takeUnretainedValue()
+    let bufA = Unmanaged<GPUBuffer>.fromOpaque(bufAPtr).takeUnretainedValue()
+    let bufB = Unmanaged<GPUBuffer>.fromOpaque(bufBPtr).takeUnretainedValue()
+    let bufOut = Unmanaged<GPUBuffer>.fromOpaque(bufOutPtr).takeUnretainedValue()
+
+    if totalRows == 0 || cols == 0 { return nil }
+
+    guard let commandBuffer = queue.makeCommandBuffer(),
+          let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
+
+    encoder.setComputePipelineState(compute.pipelineState)
+    encoder.setBuffer(bufA.buffer, offset: 0, index: 0)
+    encoder.setBuffer(bufB.buffer, offset: 0, index: 1)
+    encoder.setBuffer(bufOut.buffer, offset: 0, index: 2)
+
+    var ra = rowsA, c = cols
+    encoder.setBytes(&ra, length: MemoryLayout<UInt32>.size, index: 3)
+    encoder.setBytes(&c, length: MemoryLayout<UInt32>.size, index: 4)
+
+    let w = compute.pipelineState.threadExecutionWidth
+    let h = compute.pipelineState.maxTotalThreadsPerThreadgroup / w
+    let threadsPerGroup = MTLSize(width: w, height: h, depth: 1)
+    let gridSize = MTLSize(width: Int(cols), height: Int(totalRows), depth: 1)
+
+    encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadsPerGroup)
+    encoder.endEncoding()
+    commandBuffer.commit()
+    return Unmanaged.passRetained(commandBuffer as AnyObject).toOpaque()
+}
+
+@_cdecl("gpu_bridge_compute_concat_dim1_nb")
+public func gpuBridgeComputeConcatDim1NB(
+    _ computePtr: UnsafeMutableRawPointer?,
+    _ queuePtr: UnsafeMutableRawPointer?,
+    _ bufAPtr: UnsafeRawPointer?,
+    _ bufBPtr: UnsafeRawPointer?,
+    _ bufOutPtr: UnsafeMutableRawPointer?,
+    _ rows: UInt32,
+    _ colsA: UInt32,
+    _ colsB: UInt32
+) -> UnsafeMutableRawPointer? {
+    guard let computePtr = computePtr, let queuePtr = queuePtr,
+          let bufAPtr = bufAPtr, let bufBPtr = bufBPtr, let bufOutPtr = bufOutPtr else { return nil }
+
+    let compute = Unmanaged<GPUCompute>.fromOpaque(computePtr).takeUnretainedValue()
+    let queue = Unmanaged<MTLCommandQueue>.fromOpaque(queuePtr).takeUnretainedValue()
+    let bufA = Unmanaged<GPUBuffer>.fromOpaque(bufAPtr).takeUnretainedValue()
+    let bufB = Unmanaged<GPUBuffer>.fromOpaque(bufBPtr).takeUnretainedValue()
+    let bufOut = Unmanaged<GPUBuffer>.fromOpaque(bufOutPtr).takeUnretainedValue()
+
+    let totalCols = Int(colsA) + Int(colsB)
+    if rows == 0 || totalCols == 0 { return nil }
+
+    guard let commandBuffer = queue.makeCommandBuffer(),
+          let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
+
+    encoder.setComputePipelineState(compute.pipelineState)
+    encoder.setBuffer(bufA.buffer, offset: 0, index: 0)
+    encoder.setBuffer(bufB.buffer, offset: 0, index: 1)
+    encoder.setBuffer(bufOut.buffer, offset: 0, index: 2)
+
+    var r = rows, ca = colsA, cb = colsB
+    encoder.setBytes(&r, length: MemoryLayout<UInt32>.size, index: 3)
+    encoder.setBytes(&ca, length: MemoryLayout<UInt32>.size, index: 4)
+    encoder.setBytes(&cb, length: MemoryLayout<UInt32>.size, index: 5)
+
+    let w = compute.pipelineState.threadExecutionWidth
+    let h = compute.pipelineState.maxTotalThreadsPerThreadgroup / w
+    let threadsPerGroup = MTLSize(width: w, height: h, depth: 1)
+    let gridSize = MTLSize(width: totalCols, height: Int(rows), depth: 1)
+
+    encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadsPerGroup)
+    encoder.endEncoding()
+    commandBuffer.commit()
+    return Unmanaged.passRetained(commandBuffer as AnyObject).toOpaque()
+}
+
+@_cdecl("gpu_bridge_compute_add_bias_nb")
+public func gpuBridgeComputeAddBiasNB(
+    _ computePtr: UnsafeMutableRawPointer?,
+    _ queuePtr: UnsafeMutableRawPointer?,
+    _ bufInPtr: UnsafeRawPointer?,
+    _ bufBiasPtr: UnsafeRawPointer?,
+    _ bufOutPtr: UnsafeMutableRawPointer?,
+    _ rows: UInt32,
+    _ cols: UInt32
+) -> UnsafeMutableRawPointer? {
+    guard let computePtr = computePtr, let queuePtr = queuePtr,
+          let bufInPtr = bufInPtr, let bufBiasPtr = bufBiasPtr, let bufOutPtr = bufOutPtr else { return nil }
+
+    let compute = Unmanaged<GPUCompute>.fromOpaque(computePtr).takeUnretainedValue()
+    let queue = Unmanaged<MTLCommandQueue>.fromOpaque(queuePtr).takeUnretainedValue()
+    let bufIn = Unmanaged<GPUBuffer>.fromOpaque(bufInPtr).takeUnretainedValue()
+    let bufBias = Unmanaged<GPUBuffer>.fromOpaque(bufBiasPtr).takeUnretainedValue()
+    let bufOut = Unmanaged<GPUBuffer>.fromOpaque(bufOutPtr).takeUnretainedValue()
+
+    if rows == 0 || cols == 0 { return nil }
+
+    guard let commandBuffer = queue.makeCommandBuffer(),
+          let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
+
+    encoder.setComputePipelineState(compute.pipelineState)
+    encoder.setBuffer(bufIn.buffer, offset: 0, index: 0)
+    encoder.setBuffer(bufBias.buffer, offset: 0, index: 1)
+    encoder.setBuffer(bufOut.buffer, offset: 0, index: 2)
+
+    var r = rows, c = cols
+    encoder.setBytes(&r, length: MemoryLayout<UInt32>.size, index: 3)
+    encoder.setBytes(&c, length: MemoryLayout<UInt32>.size, index: 4)
+
+    let w = compute.pipelineState.threadExecutionWidth
+    let h = compute.pipelineState.maxTotalThreadsPerThreadgroup / w
+    let threadsPerGroup = MTLSize(width: w, height: h, depth: 1)
+    let gridSize = MTLSize(width: Int(cols), height: Int(rows), depth: 1)
+
+    encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadsPerGroup)
+    encoder.endEncoding()
+    commandBuffer.commit()
     return Unmanaged.passRetained(commandBuffer as AnyObject).toOpaque()
 }

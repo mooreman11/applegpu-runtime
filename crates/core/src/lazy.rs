@@ -273,6 +273,82 @@ impl LazyRuntime {
             return Ok(out);
         }
 
+        if let crate::graph::OpKind::Slice { dim, start, .. } = node.op {
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+            let input = self.get_tensor(node.inputs[0])?;
+            let in_dims = input.meta.shape.dims();
+            if dim == 0 {
+                let cols = in_dims[1];
+                let out_rows = node.out_shape.dims()[0];
+                REGISTRY.dispatch_slice_dim0_typed(device, dtype, &input.buffer, &out.buffer, cols, start, out_rows)?;
+            } else {
+                let rows = in_dims[0];
+                let in_cols = in_dims[1];
+                let out_cols = node.out_shape.dims()[1];
+                REGISTRY.dispatch_slice_dim1_typed(device, dtype, &input.buffer, &out.buffer, in_cols, out_cols, start, rows)?;
+            }
+            return Ok(out);
+        }
+
+        if let crate::graph::OpKind::Concat { dim } = node.op {
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+            let a = self.get_tensor(node.inputs[0])?;
+            let b = self.get_tensor(node.inputs[1])?;
+            let a_dims = a.meta.shape.dims();
+            if dim == 0 {
+                let rows_a = a_dims[0];
+                let cols = a_dims[1];
+                let total_rows = node.out_shape.dims()[0];
+                REGISTRY.dispatch_concat_dim0_typed(device, dtype, &a.buffer, &b.buffer, &out.buffer, rows_a, cols, total_rows)?;
+            } else {
+                let rows = a_dims[0];
+                let cols_a = a_dims[1];
+                let cols_b = b.meta.shape.dims()[1];
+                REGISTRY.dispatch_concat_dim1_typed(device, dtype, &a.buffer, &b.buffer, &out.buffer, rows, cols_a, cols_b)?;
+            }
+            return Ok(out);
+        }
+
+        if node.op.is_add_bias() {
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+            let input = self.get_tensor(node.inputs[0])?;
+            let bias = self.get_tensor(node.inputs[1])?;
+            let dims = input.meta.shape.dims();
+            let (rows, cols) = (dims[0], dims[1]);
+            REGISTRY.dispatch_add_bias_typed(device, dtype, &input.buffer, &bias.buffer, &out.buffer, rows, cols)?;
+            return Ok(out);
+        }
+
+        if node.op.is_softmax_causal() {
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+            let input = self.get_tensor(node.inputs[0])?;
+            let dims = input.meta.shape.dims();
+            let (rows, cols) = (dims[0], dims[1]);
+            REGISTRY.dispatch_softmax_causal_typed(device, dtype, &input.buffer, &out.buffer, rows, cols)?;
+            return Ok(out);
+        }
+
+        if node.op.is_argmax() {
+            // Argmax: cross-dtype output. Input is f32/f16, output is Int32.
+            // Acquire output buffer first (pool borrow), then read input (tensor borrow).
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), DType::Int32, out_buf);
+            let input = self.get_tensor(node.inputs[0])?;
+            let input_dtype = input.meta.dtype;
+            let in_dims = input.meta.shape.dims();
+            let (rows, cols) = if in_dims.len() == 2 {
+                (in_dims[0], in_dims[1])
+            } else {
+                (1, in_dims[0])
+            };
+            REGISTRY.dispatch_argmax_typed(device, input_dtype, &input.buffer, &out.buffer, rows, cols)?;
+            return Ok(out);
+        }
+
         if node.op.is_unary() {
             let out_buf = self.pool.acquire(device, out_size)?;
             let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
@@ -405,6 +481,65 @@ impl LazyRuntime {
                 return Err(GpuError::ComputeFailed("Blit copy failed".to_string()));
             }
             return Ok(cb);
+        }
+
+        if let crate::graph::OpKind::Slice { dim, start, .. } = node.op {
+            let input = self.get_tensor(node.inputs[0])?;
+            let in_dims = input.meta.shape.dims();
+            if dim == 0 {
+                let cols = in_dims[1];
+                let out_rows = node.out_shape.dims()[0];
+                return REGISTRY.dispatch_slice_dim0_typed_nb(device, dtype, queue, &input.buffer, &out.buffer, cols, start, out_rows);
+            } else {
+                let rows = in_dims[0];
+                let in_cols = in_dims[1];
+                let out_cols = node.out_shape.dims()[1];
+                return REGISTRY.dispatch_slice_dim1_typed_nb(device, dtype, queue, &input.buffer, &out.buffer, in_cols, out_cols, start, rows);
+            }
+        }
+
+        if let crate::graph::OpKind::Concat { dim } = node.op {
+            let a = self.get_tensor(node.inputs[0])?;
+            let b = self.get_tensor(node.inputs[1])?;
+            let a_dims = a.meta.shape.dims();
+            if dim == 0 {
+                let rows_a = a_dims[0];
+                let cols = a_dims[1];
+                let total_rows = node.out_shape.dims()[0];
+                return REGISTRY.dispatch_concat_dim0_typed_nb(device, dtype, queue, &a.buffer, &b.buffer, &out.buffer, rows_a, cols, total_rows);
+            } else {
+                let rows = a_dims[0];
+                let cols_a = a_dims[1];
+                let cols_b = b.meta.shape.dims()[1];
+                return REGISTRY.dispatch_concat_dim1_typed_nb(device, dtype, queue, &a.buffer, &b.buffer, &out.buffer, rows, cols_a, cols_b);
+            }
+        }
+
+        if node.op.is_add_bias() {
+            let input = self.get_tensor(node.inputs[0])?;
+            let bias = self.get_tensor(node.inputs[1])?;
+            let dims = input.meta.shape.dims();
+            let (rows, cols) = (dims[0], dims[1]);
+            return REGISTRY.dispatch_add_bias_typed_nb(device, dtype, queue, &input.buffer, &bias.buffer, &out.buffer, rows, cols);
+        }
+
+        if node.op.is_softmax_causal() {
+            let input = self.get_tensor(node.inputs[0])?;
+            let dims = input.meta.shape.dims();
+            let (rows, cols) = (dims[0], dims[1]);
+            return REGISTRY.dispatch_softmax_causal_typed_nb(device, dtype, queue, &input.buffer, &out.buffer, rows, cols);
+        }
+
+        if node.op.is_argmax() {
+            let input = self.get_tensor(node.inputs[0])?;
+            let input_dtype = input.meta.dtype;
+            let in_dims = input.meta.shape.dims();
+            let (rows, cols) = if in_dims.len() == 2 {
+                (in_dims[0], in_dims[1])
+            } else {
+                (1, in_dims[0])
+            };
+            return REGISTRY.dispatch_argmax_typed_nb(device, input_dtype, queue, &input.buffer, &out.buffer, rows, cols);
         }
 
         if node.op.is_unary() {

@@ -36,6 +36,16 @@ pub enum OpKind {
     Embedding,
     // Shape ops (data copy, no compute kernel)
     Reshape { new_shape: Vec<usize> },
+    // Slice along a dimension
+    Slice { dim: usize, start: usize, end: usize },
+    // Concatenate along a dimension (binary)
+    Concat { dim: usize },
+    // Add bias: 2D input + 1D bias broadcast
+    AddBias,
+    // Softmax with causal (upper-triangle) mask
+    SoftmaxCausal,
+    // Argmax reduction (output is always Int32)
+    Argmax,
 }
 
 impl OpKind {
@@ -60,6 +70,11 @@ impl OpKind {
             OpKind::LayerNorm { .. } => "layer_norm_f32",
             OpKind::Embedding => "embedding_f32",
             OpKind::Reshape { .. } => "reshape",
+            OpKind::Slice { dim, .. } => if *dim == 0 { "slice_dim0_f32" } else { "slice_dim1_f32" },
+            OpKind::Concat { dim } => if *dim == 0 { "concat_dim0_f32" } else { "concat_dim1_f32" },
+            OpKind::AddBias => "add_bias_f32",
+            OpKind::SoftmaxCausal => "softmax_causal_f32",
+            OpKind::Argmax => "argmax_f32",
         }
     }
 
@@ -106,6 +121,26 @@ impl OpKind {
 
     pub fn is_reshape(&self) -> bool {
         matches!(self, OpKind::Reshape { .. })
+    }
+
+    pub fn is_slice(&self) -> bool {
+        matches!(self, OpKind::Slice { .. })
+    }
+
+    pub fn is_concat(&self) -> bool {
+        matches!(self, OpKind::Concat { .. })
+    }
+
+    pub fn is_add_bias(&self) -> bool {
+        matches!(self, OpKind::AddBias)
+    }
+
+    pub fn is_softmax_causal(&self) -> bool {
+        matches!(self, OpKind::SoftmaxCausal)
+    }
+
+    pub fn is_argmax(&self) -> bool {
+        matches!(self, OpKind::Argmax)
     }
 }
 

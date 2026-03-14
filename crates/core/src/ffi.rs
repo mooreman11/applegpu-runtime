@@ -254,6 +254,113 @@ extern "C" {
         size_bytes: u64,
     ) -> *mut std::ffi::c_void;
 
+    // ── Slice dispatch ──
+
+    pub fn gpu_bridge_compute_slice_dim0(
+        compute: *mut GPUComputeHandle,
+        buf_input: *const GPUBufferHandle,
+        buf_output: *mut GPUBufferHandle,
+        cols: u32,
+        start_row: u32,
+        out_rows: u32,
+    ) -> i32;
+
+    pub fn gpu_bridge_compute_slice_dim0_nb(
+        compute: *mut GPUComputeHandle,
+        queue: *mut std::ffi::c_void,
+        buf_input: *const GPUBufferHandle,
+        buf_output: *mut GPUBufferHandle,
+        cols: u32,
+        start_row: u32,
+        out_rows: u32,
+    ) -> *mut std::ffi::c_void;
+
+    pub fn gpu_bridge_compute_slice_dim1(
+        compute: *mut GPUComputeHandle,
+        buf_input: *const GPUBufferHandle,
+        buf_output: *mut GPUBufferHandle,
+        in_cols: u32,
+        out_cols: u32,
+        start_col: u32,
+        rows: u32,
+    ) -> i32;
+
+    pub fn gpu_bridge_compute_slice_dim1_nb(
+        compute: *mut GPUComputeHandle,
+        queue: *mut std::ffi::c_void,
+        buf_input: *const GPUBufferHandle,
+        buf_output: *mut GPUBufferHandle,
+        in_cols: u32,
+        out_cols: u32,
+        start_col: u32,
+        rows: u32,
+    ) -> *mut std::ffi::c_void;
+
+    // ── Concat dispatch ──
+
+    pub fn gpu_bridge_compute_concat_dim0(
+        compute: *mut GPUComputeHandle,
+        buf_a: *const GPUBufferHandle,
+        buf_b: *const GPUBufferHandle,
+        buf_output: *mut GPUBufferHandle,
+        rows_a: u32,
+        cols: u32,
+        total_rows: u32,
+    ) -> i32;
+
+    pub fn gpu_bridge_compute_concat_dim0_nb(
+        compute: *mut GPUComputeHandle,
+        queue: *mut std::ffi::c_void,
+        buf_a: *const GPUBufferHandle,
+        buf_b: *const GPUBufferHandle,
+        buf_output: *mut GPUBufferHandle,
+        rows_a: u32,
+        cols: u32,
+        total_rows: u32,
+    ) -> *mut std::ffi::c_void;
+
+    pub fn gpu_bridge_compute_concat_dim1(
+        compute: *mut GPUComputeHandle,
+        buf_a: *const GPUBufferHandle,
+        buf_b: *const GPUBufferHandle,
+        buf_output: *mut GPUBufferHandle,
+        rows: u32,
+        cols_a: u32,
+        cols_b: u32,
+    ) -> i32;
+
+    pub fn gpu_bridge_compute_concat_dim1_nb(
+        compute: *mut GPUComputeHandle,
+        queue: *mut std::ffi::c_void,
+        buf_a: *const GPUBufferHandle,
+        buf_b: *const GPUBufferHandle,
+        buf_output: *mut GPUBufferHandle,
+        rows: u32,
+        cols_a: u32,
+        cols_b: u32,
+    ) -> *mut std::ffi::c_void;
+
+    // ── AddBias dispatch ──
+
+    pub fn gpu_bridge_compute_add_bias(
+        compute: *mut GPUComputeHandle,
+        buf_input: *const GPUBufferHandle,
+        buf_bias: *const GPUBufferHandle,
+        buf_output: *mut GPUBufferHandle,
+        rows: u32,
+        cols: u32,
+    ) -> i32;
+
+    pub fn gpu_bridge_compute_add_bias_nb(
+        compute: *mut GPUComputeHandle,
+        queue: *mut std::ffi::c_void,
+        buf_input: *const GPUBufferHandle,
+        buf_bias: *const GPUBufferHandle,
+        buf_output: *mut GPUBufferHandle,
+        rows: u32,
+        cols: u32,
+    ) -> *mut std::ffi::c_void;
+
     pub fn gpu_bridge_compute_fused_nb(
         compute: *mut GPUComputeHandle,
         queue: *mut std::ffi::c_void,

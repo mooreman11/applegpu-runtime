@@ -315,6 +315,187 @@ pub fn embedding(rt: &mut LazyRuntime, weights_id: u64, indices_id: u64) -> Resu
     Ok(out_id)
 }
 
+/// Slice: extract a sub-tensor along a given dimension.
+/// dim=0 slices rows, dim=1 slices columns.
+pub fn slice(rt: &mut LazyRuntime, input_id: u64, dim: usize, start: usize, end: usize) -> Result<u64> {
+    let dtype = rt.dtype(input_id)?;
+    validate_compute_dtype(dtype)?;
+    let shape = rt.shape(input_id)?;
+
+    if dim >= shape.len() {
+        return Err(GpuError::InvalidTensor(format!(
+            "slice dim {} >= ndim {}", dim, shape.len()
+        )));
+    }
+    if start >= end {
+        return Err(GpuError::InvalidTensor(format!(
+            "slice start {} >= end {}", start, end
+        )));
+    }
+    if end > shape[dim] {
+        return Err(GpuError::InvalidTensor(format!(
+            "slice end {} > shape[{}] = {}", end, dim, shape[dim]
+        )));
+    }
+
+    let mut out_shape = shape.clone();
+    out_shape[dim] = end - start;
+
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op: OpKind::Slice { dim, start, end },
+        inputs: vec![input_id],
+        out_shape: Shape::new(out_shape),
+        out_dtype: dtype,
+        container_id: ContainerId::DEFAULT,
+    });
+    Ok(out_id)
+}
+
+/// Concat: concatenate two tensors along a given dimension.
+pub fn concat(rt: &mut LazyRuntime, a_id: u64, b_id: u64, dim: usize) -> Result<u64> {
+    let a_dtype = rt.dtype(a_id)?;
+    validate_compute_dtype(a_dtype)?;
+    let b_dtype = rt.dtype(b_id)?;
+    if a_dtype != b_dtype {
+        return Err(GpuError::InvalidTensor(format!(
+            "concat dtype mismatch: {:?} vs {:?}", a_dtype, b_dtype
+        )));
+    }
+
+    let a_shape = rt.shape(a_id)?;
+    let b_shape = rt.shape(b_id)?;
+
+    if a_shape.len() != b_shape.len() {
+        return Err(GpuError::InvalidTensor(format!(
+            "concat ndim mismatch: {:?} vs {:?}", a_shape, b_shape
+        )));
+    }
+    if dim >= a_shape.len() {
+        return Err(GpuError::InvalidTensor(format!(
+            "concat dim {} >= ndim {}", dim, a_shape.len()
+        )));
+    }
+
+    for i in 0..a_shape.len() {
+        if i != dim && a_shape[i] != b_shape[i] {
+            return Err(GpuError::InvalidTensor(format!(
+                "concat shape mismatch on dim {}: {} vs {}", i, a_shape[i], b_shape[i]
+            )));
+        }
+    }
+
+    let mut out_shape = a_shape.clone();
+    out_shape[dim] = a_shape[dim] + b_shape[dim];
+
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op: OpKind::Concat { dim },
+        inputs: vec![a_id, b_id],
+        out_shape: Shape::new(out_shape),
+        out_dtype: a_dtype,
+        container_id: ContainerId::DEFAULT,
+    });
+    Ok(out_id)
+}
+
+/// AddBias: add a 1D bias to each row of a 2D tensor.
+/// input: [rows, cols], bias: [cols] -> output: [rows, cols]
+pub fn add_bias(rt: &mut LazyRuntime, input_id: u64, bias_id: u64) -> Result<u64> {
+    let input_dtype = rt.dtype(input_id)?;
+    validate_compute_dtype(input_dtype)?;
+    let bias_dtype = rt.dtype(bias_id)?;
+    if input_dtype != bias_dtype {
+        return Err(GpuError::InvalidTensor(format!(
+            "add_bias dtype mismatch: {:?} vs {:?}", input_dtype, bias_dtype
+        )));
+    }
+
+    let input_shape = rt.shape(input_id)?;
+    let bias_shape = rt.shape(bias_id)?;
+
+    if input_shape.len() != 2 {
+        return Err(GpuError::InvalidTensor(format!(
+            "add_bias requires 2D input, got {:?}", input_shape
+        )));
+    }
+    if bias_shape.len() != 1 {
+        return Err(GpuError::InvalidTensor(format!(
+            "add_bias requires 1D bias, got {:?}", bias_shape
+        )));
+    }
+    if bias_shape[0] != input_shape[1] {
+        return Err(GpuError::InvalidTensor(format!(
+            "add_bias bias length {} != input cols {}", bias_shape[0], input_shape[1]
+        )));
+    }
+
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op: OpKind::AddBias,
+        inputs: vec![input_id, bias_id],
+        out_shape: Shape::new(input_shape),
+        out_dtype: input_dtype,
+        container_id: ContainerId::DEFAULT,
+    });
+    Ok(out_id)
+}
+
+/// Softmax with causal (upper-triangle) mask.
+/// For position (row, col) where col > row, value is treated as -inf.
+pub fn softmax_causal(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
+    let dtype = rt.dtype(input_id)?;
+    validate_compute_dtype(dtype)?;
+    let shape = rt.shape(input_id)?;
+    if shape.len() != 2 {
+        return Err(GpuError::InvalidTensor(format!(
+            "softmax_causal requires 2D tensor, got {:?}", shape
+        )));
+    }
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op: OpKind::SoftmaxCausal,
+        inputs: vec![input_id],
+        out_shape: Shape::new(shape),
+        out_dtype: dtype,
+        container_id: ContainerId::DEFAULT,
+    });
+    Ok(out_id)
+}
+
+/// Argmax along last dimension. Output dtype is always Int32.
+/// 2D [rows, cols] -> [rows]. 1D [cols] -> [1].
+pub fn argmax(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
+    let input_dtype = rt.dtype(input_id)?;
+    validate_compute_dtype(input_dtype)?;
+    let shape = rt.shape(input_id)?;
+
+    let (out_shape, _rows, _cols) = if shape.len() == 2 {
+        (vec![shape[0]], shape[0], shape[1])
+    } else if shape.len() == 1 {
+        (vec![1], 1, shape[0])
+    } else {
+        return Err(GpuError::InvalidTensor(format!(
+            "argmax requires 1D or 2D tensor, got {:?}", shape
+        )));
+    };
+
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op: OpKind::Argmax,
+        inputs: vec![input_id],
+        out_shape: Shape::new(out_shape),
+        out_dtype: DType::Int32,
+        container_id: ContainerId::DEFAULT,
+    });
+    Ok(out_id)
+}
+
 /// Scaled dot-product attention: softmax(Q @ K^T / sqrt(d_k)) @ V
 /// Q: [q_len, d_k], K: [kv_len, d_k], V: [kv_len, d_v]
 /// Output: [q_len, d_v]
@@ -899,5 +1080,203 @@ mod tests {
         rt.insert_tensor(a).unwrap();
         rt.insert_tensor(b).unwrap();
         assert!(crate::ops::add(&mut rt, a_id, b_id).is_err());
+    }
+
+    // ── Slice tests ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_slice_dim1() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        // 2x4 tensor: [[1,2,3,4],[5,6,7,8]]
+        let t = Tensor::from_f32(&device, vec![2, 4], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]).unwrap();
+        let id = t.meta.id;
+        rt.insert_tensor(t).unwrap();
+        // Slice columns [1, 3) -> [[2,3],[6,7]]
+        let s_id = crate::ops::slice(&mut rt, id, 1, 1, 3).unwrap();
+        assert_eq!(rt.shape(s_id).unwrap(), vec![2, 2]);
+        rt.eval(&device, s_id).unwrap();
+        assert_eq!(rt.read_f32(s_id).unwrap(), &[2.0, 3.0, 6.0, 7.0]);
+    }
+
+    #[test]
+    fn test_slice_dim0() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        // 3x2 tensor: [[1,2],[3,4],[5,6]]
+        let t = Tensor::from_f32(&device, vec![3, 2], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
+        let id = t.meta.id;
+        rt.insert_tensor(t).unwrap();
+        // Slice rows [1, 3) -> [[3,4],[5,6]]
+        let s_id = crate::ops::slice(&mut rt, id, 0, 1, 3).unwrap();
+        assert_eq!(rt.shape(s_id).unwrap(), vec![2, 2]);
+        rt.eval(&device, s_id).unwrap();
+        assert_eq!(rt.read_f32(s_id).unwrap(), &[3.0, 4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn test_slice_validates() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        let t = Tensor::from_f32(&device, vec![2, 4], &[0.0; 8]).unwrap();
+        let id = t.meta.id;
+        rt.insert_tensor(t).unwrap();
+        // dim out of range
+        assert!(crate::ops::slice(&mut rt, id, 2, 0, 1).is_err());
+        // start >= end
+        assert!(crate::ops::slice(&mut rt, id, 0, 2, 1).is_err());
+        // end > shape[dim]
+        assert!(crate::ops::slice(&mut rt, id, 0, 0, 5).is_err());
+    }
+
+    // ── Concat tests ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_concat_dim1() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        let a = Tensor::from_f32(&device, vec![2, 2], &[1.0, 2.0, 5.0, 6.0]).unwrap();
+        let b = Tensor::from_f32(&device, vec![2, 3], &[3.0, 4.0, 0.0, 7.0, 8.0, 0.0]).unwrap();
+        let a_id = a.meta.id;
+        let b_id = b.meta.id;
+        rt.insert_tensor(a).unwrap();
+        rt.insert_tensor(b).unwrap();
+        let c_id = crate::ops::concat(&mut rt, a_id, b_id, 1).unwrap();
+        assert_eq!(rt.shape(c_id).unwrap(), vec![2, 5]);
+        rt.eval(&device, c_id).unwrap();
+        assert_eq!(rt.read_f32(c_id).unwrap(), &[1.0, 2.0, 3.0, 4.0, 0.0, 5.0, 6.0, 7.0, 8.0, 0.0]);
+    }
+
+    #[test]
+    fn test_concat_dim0() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        let a = Tensor::from_f32(&device, vec![2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
+        let b = Tensor::from_f32(&device, vec![1, 3], &[7.0, 8.0, 9.0]).unwrap();
+        let a_id = a.meta.id;
+        let b_id = b.meta.id;
+        rt.insert_tensor(a).unwrap();
+        rt.insert_tensor(b).unwrap();
+        let c_id = crate::ops::concat(&mut rt, a_id, b_id, 0).unwrap();
+        assert_eq!(rt.shape(c_id).unwrap(), vec![3, 3]);
+        rt.eval(&device, c_id).unwrap();
+        assert_eq!(rt.read_f32(c_id).unwrap(), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]);
+    }
+
+    // ── AddBias tests ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_add_bias() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        // 2x3 input + 3-element bias
+        let input = Tensor::from_f32(&device, vec![2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
+        let bias = Tensor::from_f32(&device, vec![3], &[10.0, 20.0, 30.0]).unwrap();
+        let i_id = input.meta.id;
+        let b_id = bias.meta.id;
+        rt.insert_tensor(input).unwrap();
+        rt.insert_tensor(bias).unwrap();
+        let out_id = crate::ops::add_bias(&mut rt, i_id, b_id).unwrap();
+        rt.eval(&device, out_id).unwrap();
+        assert_eq!(rt.read_f32(out_id).unwrap(), &[11.0, 22.0, 33.0, 14.0, 25.0, 36.0]);
+    }
+
+    #[test]
+    fn test_add_bias_validates() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        let input = Tensor::from_f32(&device, vec![4], &[1.0; 4]).unwrap();
+        let bias = Tensor::from_f32(&device, vec![4], &[1.0; 4]).unwrap();
+        let i_id = input.meta.id;
+        let b_id = bias.meta.id;
+        rt.insert_tensor(input).unwrap();
+        rt.insert_tensor(bias).unwrap();
+        // input is 1D, not 2D
+        assert!(crate::ops::add_bias(&mut rt, i_id, b_id).is_err());
+    }
+
+    // ── SoftmaxCausal tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_softmax_causal() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        // 3x3 input of ones
+        let t = Tensor::from_f32(&device, vec![3, 3], &[1.0; 9]).unwrap();
+        let id = t.meta.id;
+        rt.insert_tensor(t).unwrap();
+        let s_id = crate::ops::softmax_causal(&mut rt, id).unwrap();
+        rt.eval(&device, s_id).unwrap();
+        let result = rt.read_f32(s_id).unwrap();
+        // Row 0: only col 0 visible -> [1.0, 0.0, 0.0]
+        assert!((result[0] - 1.0).abs() < 0.001);
+        assert!((result[1] - 0.0).abs() < 0.001);
+        assert!((result[2] - 0.0).abs() < 0.001);
+        // Row 1: cols 0,1 visible -> [0.5, 0.5, 0.0]
+        assert!((result[3] - 0.5).abs() < 0.001);
+        assert!((result[4] - 0.5).abs() < 0.001);
+        assert!((result[5] - 0.0).abs() < 0.001);
+        // Row 2: all visible -> [0.333, 0.333, 0.333]
+        assert!((result[6] - 0.3333).abs() < 0.001);
+        assert!((result[7] - 0.3333).abs() < 0.001);
+        assert!((result[8] - 0.3333).abs() < 0.001);
+        // Each row sums to 1
+        for r in 0..3 {
+            let sum: f32 = (0..3).map(|c| result[r * 3 + c]).sum();
+            assert!((sum - 1.0).abs() < 0.001);
+        }
+    }
+
+    // ── Argmax tests ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_argmax_f32() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        // 2x4 tensor
+        let t = Tensor::from_f32(&device, vec![2, 4], &[1.0, 3.0, 2.0, 0.0, 5.0, 1.0, 9.0, 2.0]).unwrap();
+        let id = t.meta.id;
+        rt.insert_tensor(t).unwrap();
+        let a_id = crate::ops::argmax(&mut rt, id).unwrap();
+        assert_eq!(rt.shape(a_id).unwrap(), vec![2]);
+        assert_eq!(rt.dtype(a_id).unwrap(), DType::Int32);
+        rt.eval(&device, a_id).unwrap();
+        let bytes = rt.read_bytes(a_id).unwrap();
+        let indices: &[i32] = unsafe {
+            std::slice::from_raw_parts(bytes.as_ptr() as *const i32, 2)
+        };
+        assert_eq!(indices[0], 1); // max of [1,3,2,0] at index 1
+        assert_eq!(indices[1], 2); // max of [5,1,9,2] at index 2
+    }
+
+    #[test]
+    fn test_argmax_returns_int32() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        let t = Tensor::from_f32(&device, vec![1, 3], &[0.0, 5.0, 2.0]).unwrap();
+        let id = t.meta.id;
+        rt.insert_tensor(t).unwrap();
+        let a_id = crate::ops::argmax(&mut rt, id).unwrap();
+        assert_eq!(rt.dtype(a_id).unwrap(), DType::Int32);
+        rt.eval(&device, a_id).unwrap();
+        let bytes = rt.read_bytes(a_id).unwrap();
+        let idx = i32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        assert_eq!(idx, 1);
+    }
+
+    #[test]
+    fn test_argmax_1d_input() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        let t = Tensor::from_f32(&device, vec![4], &[1.0, 0.0, 7.0, 3.0]).unwrap();
+        let id = t.meta.id;
+        rt.insert_tensor(t).unwrap();
+        let a_id = crate::ops::argmax(&mut rt, id).unwrap();
+        assert_eq!(rt.shape(a_id).unwrap(), vec![1]);
+        assert_eq!(rt.dtype(a_id).unwrap(), DType::Int32);
+        rt.eval(&device, a_id).unwrap();
+        let bytes = rt.read_bytes(a_id).unwrap();
+        let idx = i32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        assert_eq!(idx, 2); // max at index 2
     }
 }

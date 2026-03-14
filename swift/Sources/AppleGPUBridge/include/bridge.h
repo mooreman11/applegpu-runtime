@@ -231,4 +231,111 @@ void* gpu_bridge_blit_copy_nb(
     uint64_t size_bytes
 );
 
+// ── Slice dispatch ──────────────────────────────────────────────────────────
+
+int32_t gpu_bridge_compute_slice_dim0(
+    GPUComputeHandle* compute,
+    const GPUBufferHandle* buf_input,
+    GPUBufferHandle* buf_output,
+    uint32_t cols,
+    uint32_t start_row,
+    uint32_t out_rows
+);
+
+void* gpu_bridge_compute_slice_dim0_nb(
+    GPUComputeHandle* compute,
+    void* queue,
+    const GPUBufferHandle* buf_input,
+    GPUBufferHandle* buf_output,
+    uint32_t cols,
+    uint32_t start_row,
+    uint32_t out_rows
+);
+
+int32_t gpu_bridge_compute_slice_dim1(
+    GPUComputeHandle* compute,
+    const GPUBufferHandle* buf_input,
+    GPUBufferHandle* buf_output,
+    uint32_t in_cols,
+    uint32_t out_cols,
+    uint32_t start_col,
+    uint32_t rows
+);
+
+void* gpu_bridge_compute_slice_dim1_nb(
+    GPUComputeHandle* compute,
+    void* queue,
+    const GPUBufferHandle* buf_input,
+    GPUBufferHandle* buf_output,
+    uint32_t in_cols,
+    uint32_t out_cols,
+    uint32_t start_col,
+    uint32_t rows
+);
+
+// ── Concat dispatch ─────────────────────────────────────────────────────────
+
+int32_t gpu_bridge_compute_concat_dim0(
+    GPUComputeHandle* compute,
+    const GPUBufferHandle* buf_a,
+    const GPUBufferHandle* buf_b,
+    GPUBufferHandle* buf_output,
+    uint32_t rows_a,
+    uint32_t cols,
+    uint32_t total_rows
+);
+
+void* gpu_bridge_compute_concat_dim0_nb(
+    GPUComputeHandle* compute,
+    void* queue,
+    const GPUBufferHandle* buf_a,
+    const GPUBufferHandle* buf_b,
+    GPUBufferHandle* buf_output,
+    uint32_t rows_a,
+    uint32_t cols,
+    uint32_t total_rows
+);
+
+int32_t gpu_bridge_compute_concat_dim1(
+    GPUComputeHandle* compute,
+    const GPUBufferHandle* buf_a,
+    const GPUBufferHandle* buf_b,
+    GPUBufferHandle* buf_output,
+    uint32_t rows,
+    uint32_t cols_a,
+    uint32_t cols_b
+);
+
+void* gpu_bridge_compute_concat_dim1_nb(
+    GPUComputeHandle* compute,
+    void* queue,
+    const GPUBufferHandle* buf_a,
+    const GPUBufferHandle* buf_b,
+    GPUBufferHandle* buf_output,
+    uint32_t rows,
+    uint32_t cols_a,
+    uint32_t cols_b
+);
+
+// ── AddBias dispatch ────────────────────────────────────────────────────────
+
+int32_t gpu_bridge_compute_add_bias(
+    GPUComputeHandle* compute,
+    const GPUBufferHandle* buf_input,
+    const GPUBufferHandle* buf_bias,
+    GPUBufferHandle* buf_output,
+    uint32_t rows,
+    uint32_t cols
+);
+
+void* gpu_bridge_compute_add_bias_nb(
+    GPUComputeHandle* compute,
+    void* queue,
+    const GPUBufferHandle* buf_input,
+    const GPUBufferHandle* buf_bias,
+    GPUBufferHandle* buf_output,
+    uint32_t rows,
+    uint32_t cols
+);
+
 #endif

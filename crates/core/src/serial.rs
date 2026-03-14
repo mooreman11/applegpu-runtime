@@ -73,6 +73,11 @@ fn op_to_discriminant(op: &OpKind) -> u32 {
         OpKind::LayerNorm { .. } => 15,
         OpKind::Embedding => 16,
         OpKind::Reshape { .. } => 17,
+        OpKind::Slice { .. } => 18,
+        OpKind::Concat { .. } => 19,
+        OpKind::AddBias => 20,
+        OpKind::SoftmaxCausal => 21,
+        OpKind::Argmax => 22,
     }
 }
 
@@ -125,6 +130,19 @@ fn discriminant_to_op(d: u32, r: &mut impl Read) -> io::Result<OpKind> {
             }
             Ok(OpKind::Reshape { new_shape })
         }
+        18 => {
+            let dim = read_u32(r)? as usize;
+            let start = read_u64(r)? as usize;
+            let end = read_u64(r)? as usize;
+            Ok(OpKind::Slice { dim, start, end })
+        }
+        19 => {
+            let dim = read_u32(r)? as usize;
+            Ok(OpKind::Concat { dim })
+        }
+        20 => Ok(OpKind::AddBias),
+        21 => Ok(OpKind::SoftmaxCausal),
+        22 => Ok(OpKind::Argmax),
         _ => Err(io::Error::new(io::ErrorKind::InvalidData, format!("Unknown op type: {}", d))),
     }
 }
@@ -180,6 +198,14 @@ impl EvalRequest {
                 for &d in new_shape {
                     write_u64(&mut buf, d as u64).unwrap();
                 }
+            }
+            if let OpKind::Slice { dim, start, end } = node.op {
+                write_u32(&mut buf, dim as u32).unwrap();
+                write_u64(&mut buf, start as u64).unwrap();
+                write_u64(&mut buf, end as u64).unwrap();
+            }
+            if let OpKind::Concat { dim } = node.op {
+                write_u32(&mut buf, dim as u32).unwrap();
             }
         }
 
