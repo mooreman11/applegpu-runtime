@@ -7,7 +7,7 @@ use crate::graph::{Graph, OpNode};
 use crate::limits::ResourceLimits;
 use crate::pool::BufferPool;
 use crate::scheduler::{ContainerId, Scheduler};
-use crate::tensor::Tensor;
+use crate::tensor::{DType, Tensor};
 
 use once_cell::sync::Lazy;
 
@@ -147,7 +147,7 @@ impl LazyRuntime {
         // Handle fused kernels first
         if let crate::graph::OpKind::FusedElementwise { ref kernel_source, ref function_name } = node.op {
             let out_buf = self.pool.acquire(device, out_size)?;
-            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), out_buf);
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
             let input_tensors: Vec<&Tensor> = node.inputs.iter()
                 .map(|&id| self.get_tensor(id))
                 .collect::<Result<Vec<_>>>()?;
@@ -168,7 +168,7 @@ impl LazyRuntime {
 
         if node.op.is_softmax() {
             let out_buf = self.pool.acquire(device, out_size)?;
-            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), out_buf);
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
             let input = self.get_tensor(node.inputs[0])?;
             let dims = input.meta.shape.dims();
             let (rows, cols) = (dims[0], dims[1]);
@@ -178,7 +178,7 @@ impl LazyRuntime {
 
         if node.op.is_transpose() {
             let out_buf = self.pool.acquire(device, out_size)?;
-            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), out_buf);
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
             let input = self.get_tensor(node.inputs[0])?;
             let dims = input.meta.shape.dims();
             let (rows, cols) = (dims[0], dims[1]);
@@ -188,7 +188,7 @@ impl LazyRuntime {
 
         if let crate::graph::OpKind::ScalarMul(scale) = node.op {
             let out_buf = self.pool.acquire(device, out_size)?;
-            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), out_buf);
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
             let input = self.get_tensor(node.inputs[0])?;
             REGISTRY.dispatch_scalar_mul(device, &input.buffer, &out.buffer, scale, input.numel())?;
             return Ok(out);
@@ -196,7 +196,7 @@ impl LazyRuntime {
 
         if node.op.is_unary() {
             let out_buf = self.pool.acquire(device, out_size)?;
-            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), out_buf);
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
             let input = self.get_tensor(node.inputs[0])?;
             REGISTRY.dispatch_unary(
                 device,
@@ -208,7 +208,7 @@ impl LazyRuntime {
             Ok(out)
         } else if node.op.is_matmul() {
             let out_buf = self.pool.acquire(device, out_size)?;
-            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), out_buf);
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
             let a = self.get_tensor(node.inputs[0])?;
             let b = self.get_tensor(node.inputs[1])?;
             let a_dims = a.meta.shape.dims();
@@ -220,7 +220,7 @@ impl LazyRuntime {
         } else {
             // Binary element-wise
             let out_buf = self.pool.acquire(device, out_size)?;
-            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), out_buf);
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
             let a = self.get_tensor(node.inputs[0])?;
             let b = self.get_tensor(node.inputs[1])?;
             REGISTRY.dispatch_binary(
@@ -243,6 +243,23 @@ impl LazyRuntime {
                 id
             ))
         })
+    }
+
+    /// Get the dtype of a tensor (materialized or pending).
+    pub fn dtype(&self, id: u64) -> Result<DType> {
+        if let Some(t) = self.tensors.get(&id) {
+            return Ok(t.meta.dtype);
+        }
+        if let Some(node) = self.graph.get_node(id) {
+            return Ok(node.out_dtype);
+        }
+        Err(GpuError::GraphError(format!("Tensor {} not found", id)))
+    }
+
+    /// Read tensor data as f16 slice (raw u16 bit patterns). Requires the tensor to be materialized.
+    pub fn read_f16(&self, id: u64) -> Result<Vec<u16>> {
+        let t = self.get_tensor(id)?;
+        Ok(t.as_f16_slice().to_vec())
     }
 
     /// Read tensor data as f32 slice. Requires the tensor to be materialized.
@@ -304,7 +321,7 @@ impl LazyRuntime {
             crate::serial::EvalResponse::Ok { tensor_id, shape, data } => {
                 let buffer = crate::buffer::Buffer::from_bytes(device, &data)?;
                 let size = shape.iter().product::<usize>() * 4;
-                let tensor = Tensor::from_raw(tensor_id, shape, buffer);
+                let tensor = Tensor::from_raw(tensor_id, shape, DType::Float32, buffer);
                 let container_id = self.resolve_container(id);
                 self.scheduler.allocate_tensor(container_id, tensor_id, size)?;
                 self.tensors.insert(tensor_id, tensor);

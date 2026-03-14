@@ -53,7 +53,7 @@ fn serialize_and_execute_remotely_in_process() {
     let mut server_rt = LazyRuntime::new();
     for td in &received.tensors {
         let buffer = Buffer::from_bytes(&device, &td.data).unwrap();
-        let tensor = Tensor::from_raw(td.id, td.shape.clone(), buffer);
+        let tensor = Tensor::from_raw(td.id, td.shape.clone(), td.dtype, buffer);
         server_rt.insert_tensor(tensor).unwrap();
     }
     for node in &received.nodes {
@@ -108,7 +108,7 @@ fn serialize_matmul_remotely() {
     let mut server_rt = LazyRuntime::new();
     for td in &received.tensors {
         let buffer = Buffer::from_bytes(&device, &td.data).unwrap();
-        let tensor = Tensor::from_raw(td.id, td.shape.clone(), buffer);
+        let tensor = Tensor::from_raw(td.id, td.shape.clone(), td.dtype, buffer);
         server_rt.insert_tensor(tensor).unwrap();
     }
     for node in &received.nodes {

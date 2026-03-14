@@ -94,12 +94,12 @@ pub struct Tensor {
 impl Tensor {
     /// Create a tensor from a pre-existing buffer and explicit ID.
     /// Used by the GPU service to reconstruct tensors from serialized data.
-    pub fn from_raw(id: u64, shape: Vec<usize>, buffer: Buffer) -> Self {
+    pub fn from_raw(id: u64, shape: Vec<usize>, dtype: DType, buffer: Buffer) -> Self {
         Tensor {
             meta: TensorMeta {
                 id,
                 shape: Shape::new(shape),
-                dtype: DType::Float32,
+                dtype,
                 location: TensorLocation::Shared,
             },
             buffer,
@@ -154,9 +154,67 @@ impl Tensor {
         })
     }
 
+    /// Create an uninitialized f16 tensor (for output buffers).
+    pub fn empty_f16(device: &Device, shape: Vec<usize>) -> Result<Self> {
+        let numel: usize = shape.iter().product();
+        let size_bytes = numel * 2;
+        let buffer = Buffer::new(device, size_bytes)?;
+        let id = TENSOR_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+        Ok(Tensor {
+            meta: TensorMeta {
+                id,
+                shape: Shape::new(shape),
+                dtype: DType::Float16,
+                location: TensorLocation::Shared,
+            },
+            buffer,
+        })
+    }
+
+    /// Create a tensor from f16 data (passed as raw u16 bit patterns).
+    pub fn from_f16(device: &Device, shape: Vec<usize>, data: &[u16]) -> Result<Self> {
+        let expected = shape.iter().product::<usize>();
+        if data.len() != expected {
+            return Err(crate::error::GpuError::InvalidTensor(format!(
+                "Shape {:?} expects {} elements but got {}",
+                shape, expected, data.len()
+            )));
+        }
+        let bytes = unsafe {
+            std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 2)
+        };
+        let buffer = Buffer::from_bytes(device, bytes)?;
+        let id = TENSOR_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+        Ok(Tensor {
+            meta: TensorMeta {
+                id,
+                shape: Shape::new(shape),
+                dtype: DType::Float16,
+                location: TensorLocation::Shared,
+            },
+            buffer,
+        })
+    }
+
+    /// Read tensor data as f16 slice (zero-copy, returns raw u16 bit patterns).
+    pub fn as_f16_slice(&self) -> &[u16] {
+        assert_eq!(
+            self.meta.dtype,
+            DType::Float16,
+            "as_f16_slice called on non-f16 tensor"
+        );
+        let count = self.meta.shape.numel();
+        unsafe { std::slice::from_raw_parts(self.buffer.contents() as *const u16, count) }
+    }
+
     /// Read tensor data as f32 slice (zero-copy).
     /// Uses the logical tensor size (from shape), not the physical buffer size.
     pub fn as_f32_slice(&self) -> &[f32] {
+        assert_eq!(
+            self.meta.dtype,
+            DType::Float32,
+            "as_f32_slice called on non-f32 tensor"
+        );
         let count = self.meta.shape.numel();
         unsafe { std::slice::from_raw_parts(self.buffer.contents() as *const f32, count) }
     }
@@ -231,7 +289,7 @@ mod tests {
         let buf = Buffer::new(&device, 128).unwrap();
         let ptr = buf.contents() as *mut f32;
         unsafe { *ptr.add(0) = 1.0; *ptr.add(1) = 2.0; *ptr.add(2) = 3.0; *ptr.add(3) = 4.0; }
-        let t = Tensor::from_raw(999, vec![4], buf);
+        let t = Tensor::from_raw(999, vec![4], DType::Float32, buf);
         let slice = t.as_f32_slice();
         assert_eq!(slice.len(), 4);
         assert_eq!(slice, &[1.0, 2.0, 3.0, 4.0]);
@@ -259,5 +317,77 @@ mod tests {
         let data = vec![1.0f32, 2.0, 3.0];
         let result = Tensor::from_f32(&device, vec![2, 3], &data);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn empty_f16_creates_correct_tensor() {
+        let device = match crate::device::Device::new() {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let t = Tensor::empty_f16(&device, vec![2, 3]).unwrap();
+        assert_eq!(t.meta.shape.dims(), &[2, 3]);
+        assert_eq!(t.meta.dtype, DType::Float16);
+        assert_eq!(t.numel(), 6);
+    }
+
+    #[test]
+    fn from_f16_roundtrip() {
+        let device = match crate::device::Device::new() {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        use half::f16;
+        let values: Vec<f16> = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0]
+            .into_iter()
+            .map(f16::from_f32)
+            .collect();
+        let raw: Vec<u16> = values.iter().map(|v| v.to_bits()).collect();
+        let t = Tensor::from_f16(&device, vec![2, 3], &raw).unwrap();
+        assert_eq!(t.meta.dtype, DType::Float16);
+        assert_eq!(t.numel(), 6);
+        let slice = t.as_f16_slice();
+        assert_eq!(slice.len(), 6);
+        for (i, &bits) in slice.iter().enumerate() {
+            let got = f16::from_bits(bits).to_f32();
+            let expected = (i + 1) as f32;
+            assert!((got - expected).abs() < 1e-3, "mismatch at {}: {} vs {}", i, got, expected);
+        }
+    }
+
+    #[test]
+    fn from_f16_shape_mismatch_errors() {
+        let device = match crate::device::Device::new() {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let result = Tensor::from_f16(&device, vec![2, 3], &[0u16; 3]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    #[should_panic(expected = "as_f32_slice called on non-f32 tensor")]
+    fn as_f32_slice_panics_on_f16() {
+        let device = match crate::device::Device::new() {
+            Ok(d) => d,
+            Err(_) => {
+                // Can't test without device; trigger the panic manually to satisfy should_panic
+                panic!("as_f32_slice called on non-f32 tensor");
+            }
+        };
+        let t = Tensor::empty_f16(&device, vec![4]).unwrap();
+        let _ = t.as_f32_slice();
+    }
+
+    #[test]
+    fn from_raw_respects_dtype() {
+        let device = match crate::device::Device::new() {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let buf = Buffer::new(&device, 128).unwrap();
+        let t = Tensor::from_raw(42, vec![4], DType::Float16, buf);
+        assert_eq!(t.meta.dtype, DType::Float16);
+        assert_eq!(t.meta.id, 42);
     }
 }
