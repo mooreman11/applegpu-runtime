@@ -42,4 +42,23 @@ int32_t gpu_bridge_compute_elementwise(
     uint64_t element_count
 );
 
+// Execute unary operation: out = op(input)
+int32_t gpu_bridge_compute_unary(
+    GPUComputeHandle* compute,
+    const GPUBufferHandle* buf_input,
+    GPUBufferHandle* buf_out,
+    uint64_t element_count
+);
+
+// Execute matrix multiply: C[M,N] = A[M,K] * B[K,N]
+int32_t gpu_bridge_compute_matmul(
+    GPUComputeHandle* compute,
+    const GPUBufferHandle* buf_a,
+    const GPUBufferHandle* buf_b,
+    GPUBufferHandle* buf_c,
+    uint32_t M,
+    uint32_t N,
+    uint32_t K
+);
+
 #endif
