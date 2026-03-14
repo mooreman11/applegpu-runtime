@@ -145,6 +145,87 @@ final class GPUCompute {
 
         return commandBuffer.status == .completed
     }
+
+    func dispatchSoftmax(bufIn: MTLBuffer, bufOut: MTLBuffer, rows: Int, cols: Int) -> Bool {
+        if rows == 0 || cols == 0 { return true }
+
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder() else { return false }
+
+        encoder.setComputePipelineState(pipelineState)
+        encoder.setBuffer(bufIn, offset: 0, index: 0)
+        encoder.setBuffer(bufOut, offset: 0, index: 1)
+
+        var r = UInt32(rows), c = UInt32(cols)
+        encoder.setBytes(&r, length: MemoryLayout<UInt32>.size, index: 2)
+        encoder.setBytes(&c, length: MemoryLayout<UInt32>.size, index: 3)
+
+        let threadGroupSize = min(pipelineState.maxTotalThreadsPerThreadgroup, rows)
+        let threadGroups = (rows + threadGroupSize - 1) / threadGroupSize
+
+        encoder.dispatchThreadgroups(
+            MTLSize(width: threadGroups, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: threadGroupSize, height: 1, depth: 1)
+        )
+        encoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        return commandBuffer.status == .completed
+    }
+
+    func dispatchTranspose(bufIn: MTLBuffer, bufOut: MTLBuffer, rows: Int, cols: Int) -> Bool {
+        if rows == 0 || cols == 0 { return true }
+
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder() else { return false }
+
+        encoder.setComputePipelineState(pipelineState)
+        encoder.setBuffer(bufIn, offset: 0, index: 0)
+        encoder.setBuffer(bufOut, offset: 0, index: 1)
+
+        var r = UInt32(rows), c = UInt32(cols)
+        encoder.setBytes(&r, length: MemoryLayout<UInt32>.size, index: 2)
+        encoder.setBytes(&c, length: MemoryLayout<UInt32>.size, index: 3)
+
+        let w = pipelineState.threadExecutionWidth
+        let h = pipelineState.maxTotalThreadsPerThreadgroup / w
+        let threadsPerGroup = MTLSize(width: w, height: h, depth: 1)
+        let gridSize = MTLSize(width: cols, height: rows, depth: 1)
+
+        encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadsPerGroup)
+        encoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        return commandBuffer.status == .completed
+    }
+
+    func dispatchScalarMul(bufIn: MTLBuffer, bufOut: MTLBuffer, scale: Float, count: Int) -> Bool {
+        if count == 0 { return true }
+
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder() else { return false }
+
+        encoder.setComputePipelineState(pipelineState)
+        encoder.setBuffer(bufIn, offset: 0, index: 0)
+        encoder.setBuffer(bufOut, offset: 0, index: 1)
+
+        var s = scale
+        encoder.setBytes(&s, length: MemoryLayout<Float>.size, index: 2)
+        var c = UInt32(count)
+        encoder.setBytes(&c, length: MemoryLayout<UInt32>.size, index: 3)
+
+        let threadGroupSize = min(pipelineState.maxTotalThreadsPerThreadgroup, count)
+        let threadGroups = (count + threadGroupSize - 1) / threadGroupSize
+
+        encoder.dispatchThreadgroups(
+            MTLSize(width: threadGroups, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: threadGroupSize, height: 1, depth: 1)
+        )
+        encoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        return commandBuffer.status == .completed
+    }
 }
 
 // MARK: - C ABI exports
@@ -284,4 +365,72 @@ public func gpuBridgeComputeFused(
         count: Int(elementCount)
     )
     return success ? 0 : -1
+}
+
+@_cdecl("gpu_bridge_compute_softmax")
+public func gpuBridgeComputeSoftmax(
+    _ computePtr: UnsafeMutableRawPointer?,
+    _ bufInPtr: UnsafeRawPointer?,
+    _ bufOutPtr: UnsafeMutableRawPointer?,
+    _ rows: UInt32,
+    _ cols: UInt32
+) -> Int32 {
+    guard let computePtr = computePtr,
+          let bufInPtr = bufInPtr,
+          let bufOutPtr = bufOutPtr else { return -1 }
+
+    let compute = Unmanaged<GPUCompute>.fromOpaque(computePtr).takeUnretainedValue()
+    let bufIn = Unmanaged<GPUBuffer>.fromOpaque(bufInPtr).takeUnretainedValue()
+    let bufOut = Unmanaged<GPUBuffer>.fromOpaque(bufOutPtr).takeUnretainedValue()
+
+    let success = compute.dispatchSoftmax(
+        bufIn: bufIn.buffer, bufOut: bufOut.buffer,
+        rows: Int(rows), cols: Int(cols)
+    )
+    return success ? 0 : -1
+}
+
+@_cdecl("gpu_bridge_compute_transpose")
+public func gpuBridgeComputeTranspose(
+    _ computePtr: UnsafeMutableRawPointer?,
+    _ bufInPtr: UnsafeRawPointer?,
+    _ bufOutPtr: UnsafeMutableRawPointer?,
+    _ rows: UInt32,
+    _ cols: UInt32
+) -> Int32 {
+    guard let computePtr = computePtr,
+          let bufInPtr = bufInPtr,
+          let bufOutPtr = bufOutPtr else { return -1 }
+
+    let compute = Unmanaged<GPUCompute>.fromOpaque(computePtr).takeUnretainedValue()
+    let bufIn = Unmanaged<GPUBuffer>.fromOpaque(bufInPtr).takeUnretainedValue()
+    let bufOut = Unmanaged<GPUBuffer>.fromOpaque(bufOutPtr).takeUnretainedValue()
+
+    let success = compute.dispatchTranspose(
+        bufIn: bufIn.buffer, bufOut: bufOut.buffer,
+        rows: Int(rows), cols: Int(cols)
+    )
+    return success ? 0 : -1
+}
+
+@_cdecl("gpu_bridge_compute_scalar_mul")
+public func gpuBridgeComputeScalarMul(
+    _ computePtr: UnsafeMutableRawPointer?,
+    _ bufInPtr: UnsafeRawPointer?,
+    _ bufOutPtr: UnsafeMutableRawPointer?,
+    _ scale: Float,
+    _ elementCount: UInt64
+) -> Int32 {
+    guard let computePtr = computePtr,
+          let bufInPtr = bufInPtr,
+          let bufOutPtr = bufOutPtr else { return -1 }
+
+    let compute = Unmanaged<GPUCompute>.fromOpaque(computePtr).takeUnretainedValue()
+    let bufIn = Unmanaged<GPUBuffer>.fromOpaque(bufInPtr).takeUnretainedValue()
+    let bufOut = Unmanaged<GPUBuffer>.fromOpaque(bufOutPtr).takeUnretainedValue()
+
+    return compute.dispatchScalarMul(
+        bufIn: bufIn.buffer, bufOut: bufOut.buffer,
+        scale: scale, count: Int(elementCount)
+    ) ? 0 : -1
 }

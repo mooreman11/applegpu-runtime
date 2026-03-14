@@ -70,4 +70,31 @@ int32_t gpu_bridge_compute_fused(
     uint64_t element_count
 );
 
+// Softmax along last dimension of 2D tensor [rows, cols]
+int32_t gpu_bridge_compute_softmax(
+    GPUComputeHandle* compute,
+    const GPUBufferHandle* buf_input,
+    GPUBufferHandle* buf_output,
+    uint32_t rows,
+    uint32_t cols
+);
+
+// 2D transpose: output[cols, rows] = input[rows, cols]
+int32_t gpu_bridge_compute_transpose(
+    GPUComputeHandle* compute,
+    const GPUBufferHandle* buf_input,
+    GPUBufferHandle* buf_output,
+    uint32_t rows,
+    uint32_t cols
+);
+
+// Scalar multiply: output[i] = input[i] * scale
+int32_t gpu_bridge_compute_scalar_mul(
+    GPUComputeHandle* compute,
+    const GPUBufferHandle* buf_input,
+    GPUBufferHandle* buf_output,
+    float scale,
+    uint64_t element_count
+);
+
 #endif
