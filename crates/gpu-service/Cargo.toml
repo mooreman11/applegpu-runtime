@@ -1,0 +1,11 @@
+[package]
+name = "applegpu-service"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "gpu-service"
+path = "src/main.rs"
+
+[dependencies]
+applegpu-core = { path = "../core" }

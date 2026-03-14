@@ -92,6 +92,20 @@ pub struct Tensor {
 }
 
 impl Tensor {
+    /// Create a tensor from a pre-existing buffer and explicit ID.
+    /// Used by the GPU service to reconstruct tensors from serialized data.
+    pub fn from_raw(id: u64, shape: Vec<usize>, buffer: Buffer) -> Self {
+        Tensor {
+            meta: TensorMeta {
+                id,
+                shape: Shape::new(shape),
+                dtype: DType::Float32,
+                location: TensorLocation::Shared,
+            },
+            buffer,
+        }
+    }
+
     /// Create a tensor from f32 data.
     pub fn from_f32(device: &Device, shape: Vec<usize>, data: &[f32]) -> Result<Self> {
         let expected = shape.iter().product::<usize>();

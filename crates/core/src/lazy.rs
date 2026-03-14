@@ -48,6 +48,11 @@ impl LazyRuntime {
         self.graph.has_node(id)
     }
 
+    /// Get a graph node by ID (for serialization).
+    pub fn graph_node(&self, id: u64) -> Option<&crate::graph::OpNode> {
+        self.graph.get_node(id)
+    }
+
     /// Check if an ID exists (either materialized or pending).
     pub fn exists(&self, id: u64) -> bool {
         self.is_materialized(id) || self.is_pending(id)
