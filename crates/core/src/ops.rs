@@ -1,6 +1,7 @@
 use crate::error::{GpuError, Result};
 use crate::graph::{OpKind, OpNode};
 use crate::lazy::LazyRuntime;
+use crate::scheduler::ContainerId;
 use crate::tensor::{DType, Shape};
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -30,6 +31,7 @@ fn lazy_binary_op(rt: &mut LazyRuntime, a_id: u64, b_id: u64, op: OpKind) -> Res
         inputs: vec![a_id, b_id],
         out_shape: Shape::new(a_shape),
         out_dtype: DType::Float32,
+        container_id: ContainerId::DEFAULT,
     });
     Ok(out_id)
 }
@@ -44,6 +46,7 @@ fn lazy_unary_op(rt: &mut LazyRuntime, input_id: u64, op: OpKind) -> Result<u64>
         inputs: vec![input_id],
         out_shape: Shape::new(shape),
         out_dtype: DType::Float32,
+        container_id: ContainerId::DEFAULT,
     });
     Ok(out_id)
 }
@@ -113,6 +116,7 @@ pub fn matmul(rt: &mut LazyRuntime, a_id: u64, b_id: u64) -> Result<u64> {
         inputs: vec![a_id, b_id],
         out_shape: Shape::new(vec![m, n]),
         out_dtype: DType::Float32,
+        container_id: ContainerId::DEFAULT,
     });
     Ok(out_id)
 }
@@ -132,6 +136,7 @@ pub fn softmax(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
         inputs: vec![input_id],
         out_shape: Shape::new(shape),
         out_dtype: DType::Float32,
+        container_id: ContainerId::DEFAULT,
     });
     Ok(out_id)
 }
@@ -151,6 +156,7 @@ pub fn transpose(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
         inputs: vec![input_id],
         out_shape: Shape::new(vec![shape[1], shape[0]]),
         out_dtype: DType::Float32,
+        container_id: ContainerId::DEFAULT,
     });
     Ok(out_id)
 }
@@ -165,6 +171,7 @@ pub fn scalar_mul(rt: &mut LazyRuntime, input_id: u64, scale: f32) -> Result<u64
         inputs: vec![input_id],
         out_shape: Shape::new(shape),
         out_dtype: DType::Float32,
+        container_id: ContainerId::DEFAULT,
     });
     Ok(out_id)
 }

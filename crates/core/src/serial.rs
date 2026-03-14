@@ -1,6 +1,7 @@
 use std::io::{self, Read, Write, Cursor};
 
 use crate::graph::{OpKind, OpNode};
+use crate::scheduler::ContainerId;
 use crate::tensor::{DType, Shape};
 
 const MAGIC_REQUEST: &[u8; 4] = b"AGPU";
@@ -212,6 +213,7 @@ impl EvalRequest {
                 inputs,
                 out_shape: Shape::new(out_shape),
                 out_dtype: DType::Float32,
+                container_id: ContainerId::DEFAULT,
             });
         }
 
@@ -297,6 +299,7 @@ mod tests {
                     inputs: vec![1],
                     out_shape: Shape::new(vec![4]),
                     out_dtype: DType::Float32,
+                    container_id: ContainerId::DEFAULT,
                 },
             ],
         };
@@ -328,6 +331,7 @@ mod tests {
                     inputs: vec![1, 2],
                     out_shape: Shape::new(vec![4]),
                     out_dtype: DType::Float32,
+                    container_id: ContainerId::DEFAULT,
                 },
             ],
         };
@@ -384,6 +388,7 @@ mod tests {
                     inputs: vec![1, 2],
                     out_shape: Shape::new(vec![2, 2]),
                     out_dtype: DType::Float32,
+                    container_id: ContainerId::DEFAULT,
                 },
             ],
         };

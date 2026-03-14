@@ -1,4 +1,5 @@
 use crate::graph::{Graph, OpKind, OpNode};
+use crate::scheduler::ContainerId;
 use crate::tensor::{DType, Shape};
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -211,6 +212,7 @@ pub fn optimize(graph: &mut Graph, exec_order: &[u64]) -> Vec<u64> {
             inputs: leaf_inputs,
             out_shape: chain.out_shape.clone(),
             out_dtype: chain.out_dtype,
+            container_id: ContainerId::DEFAULT,
         };
 
         // Remove all chain nodes from graph
@@ -241,10 +243,12 @@ mod tests {
         g.add_node(OpNode {
             id: 3, op: OpKind::Add, inputs: vec![1, 2],
             out_shape: Shape::new(vec![4]), out_dtype: DType::Float32,
+            container_id: ContainerId::DEFAULT,
         });
         g.add_node(OpNode {
             id: 4, op: OpKind::Relu, inputs: vec![3],
             out_shape: Shape::new(vec![4]), out_dtype: DType::Float32,
+            container_id: ContainerId::DEFAULT,
         });
 
         let chains = find_fusible_chains(&g, &[3, 4]);
@@ -259,10 +263,12 @@ mod tests {
         g.add_node(OpNode {
             id: 3, op: OpKind::Add, inputs: vec![1, 2],
             out_shape: Shape::new(vec![4]), out_dtype: DType::Float32,
+            container_id: ContainerId::DEFAULT,
         });
         g.add_node(OpNode {
             id: 4, op: OpKind::Relu, inputs: vec![3],
             out_shape: Shape::new(vec![4]), out_dtype: DType::Float32,
+            container_id: ContainerId::DEFAULT,
         });
 
         let chains = find_fusible_chains(&g, &[3, 4]);
@@ -279,10 +285,12 @@ mod tests {
         g.add_node(OpNode {
             id: 3, op: OpKind::Add, inputs: vec![1, 2],
             out_shape: Shape::new(vec![4]), out_dtype: DType::Float32,
+            container_id: ContainerId::DEFAULT,
         });
         g.add_node(OpNode {
             id: 4, op: OpKind::Relu, inputs: vec![3],
             out_shape: Shape::new(vec![4]), out_dtype: DType::Float32,
+            container_id: ContainerId::DEFAULT,
         });
 
         let new_order = optimize(&mut g, &[3, 4]);
@@ -299,6 +307,7 @@ mod tests {
         g.add_node(OpNode {
             id: 3, op: OpKind::Add, inputs: vec![1, 2],
             out_shape: Shape::new(vec![4]), out_dtype: DType::Float32,
+            container_id: ContainerId::DEFAULT,
         });
 
         let new_order = optimize(&mut g, &[3]);
@@ -312,14 +321,17 @@ mod tests {
         g.add_node(OpNode {
             id: 3, op: OpKind::Add, inputs: vec![1, 2],
             out_shape: Shape::new(vec![2, 2]), out_dtype: DType::Float32,
+            container_id: ContainerId::DEFAULT,
         });
         g.add_node(OpNode {
             id: 4, op: OpKind::Matmul, inputs: vec![3, 2],
             out_shape: Shape::new(vec![2, 2]), out_dtype: DType::Float32,
+            container_id: ContainerId::DEFAULT,
         });
         g.add_node(OpNode {
             id: 5, op: OpKind::Relu, inputs: vec![4],
             out_shape: Shape::new(vec![2, 2]), out_dtype: DType::Float32,
+            container_id: ContainerId::DEFAULT,
         });
 
         let new_order = optimize(&mut g, &[3, 4, 5]);
@@ -332,14 +344,17 @@ mod tests {
         g.add_node(OpNode {
             id: 3, op: OpKind::Add, inputs: vec![1, 2],
             out_shape: Shape::new(vec![4]), out_dtype: DType::Float32,
+            container_id: ContainerId::DEFAULT,
         });
         g.add_node(OpNode {
             id: 4, op: OpKind::Relu, inputs: vec![3],
             out_shape: Shape::new(vec![4]), out_dtype: DType::Float32,
+            container_id: ContainerId::DEFAULT,
         });
         g.add_node(OpNode {
             id: 5, op: OpKind::Mul, inputs: vec![3, 1],
             out_shape: Shape::new(vec![4]), out_dtype: DType::Float32,
+            container_id: ContainerId::DEFAULT,
         });
 
         let chains = find_fusible_chains(&g, &[3, 4, 5]);

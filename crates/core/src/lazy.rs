@@ -322,6 +322,7 @@ impl LazyRuntime {
 mod tests {
     use super::*;
     use crate::graph::OpKind;
+    use crate::scheduler::ContainerId;
     use crate::tensor::{DType, Shape};
 
     fn get_device() -> Option<Device> {
@@ -361,6 +362,7 @@ mod tests {
             inputs: vec![a_id, b_id],
             out_shape: Shape::new(vec![4]),
             out_dtype: DType::Float32,
+            container_id: ContainerId::DEFAULT,
         });
 
         assert!(rt.is_pending(c_id));
@@ -392,6 +394,7 @@ mod tests {
             inputs: vec![a_id],
             out_shape: Shape::new(vec![4]),
             out_dtype: DType::Float32,
+            container_id: ContainerId::DEFAULT,
         });
 
         let relu_id = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -401,6 +404,7 @@ mod tests {
             inputs: vec![neg_id],
             out_shape: Shape::new(vec![4]),
             out_dtype: DType::Float32,
+            container_id: ContainerId::DEFAULT,
         });
 
         assert!(rt.is_pending(neg_id));

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use crate::scheduler::ContainerId;
 use crate::tensor::{DType, Shape};
 
 /// The kind of operation a graph node represents.
@@ -95,6 +96,8 @@ pub struct OpNode {
     pub out_shape: Shape,
     /// Output dtype.
     pub out_dtype: DType,
+    /// Container that owns this operation. Defaults to ContainerId::DEFAULT.
+    pub container_id: ContainerId,
 }
 
 /// A computation graph (DAG of operations).
@@ -189,6 +192,18 @@ impl Graph {
     pub fn len(&self) -> usize {
         self.nodes.len()
     }
+
+    /// Remove all nodes belonging to a container. Returns their IDs.
+    pub fn remove_nodes_for_container(&mut self, container_id: ContainerId) -> Vec<u64> {
+        let ids: Vec<u64> = self.nodes.iter()
+            .filter(|(_, node)| node.container_id == container_id)
+            .map(|(&id, _)| id)
+            .collect();
+        for &id in &ids {
+            self.nodes.remove(&id);
+        }
+        ids
+    }
 }
 
 #[cfg(test)]
@@ -215,6 +230,7 @@ mod tests {
             inputs: vec![1, 2],
             out_shape: Shape::new(vec![4]),
             out_dtype: DType::Float32,
+            container_id: ContainerId::DEFAULT,
         });
         g.add_node(OpNode {
             id: 4,
@@ -222,6 +238,7 @@ mod tests {
             inputs: vec![3],
             out_shape: Shape::new(vec![4]),
             out_dtype: DType::Float32,
+            container_id: ContainerId::DEFAULT,
         });
 
         let order = g.topo_sort(4).unwrap();
@@ -237,6 +254,7 @@ mod tests {
             inputs: vec![1, 2],
             out_shape: Shape::new(vec![4]),
             out_dtype: DType::Float32,
+            container_id: ContainerId::DEFAULT,
         });
         g.add_node(OpNode {
             id: 4,
@@ -244,6 +262,7 @@ mod tests {
             inputs: vec![1, 2],
             out_shape: Shape::new(vec![4]),
             out_dtype: DType::Float32,
+            container_id: ContainerId::DEFAULT,
         });
         g.add_node(OpNode {
             id: 5,
@@ -251,6 +270,7 @@ mod tests {
             inputs: vec![3, 4],
             out_shape: Shape::new(vec![4]),
             out_dtype: DType::Float32,
+            container_id: ContainerId::DEFAULT,
         });
 
         let order = g.topo_sort(5).unwrap();
@@ -269,6 +289,7 @@ mod tests {
             inputs: vec![1, 2],
             out_shape: Shape::new(vec![4]),
             out_dtype: DType::Float32,
+            container_id: ContainerId::DEFAULT,
         });
         g.add_node(OpNode {
             id: 4,
@@ -276,9 +297,40 @@ mod tests {
             inputs: vec![1],
             out_shape: Shape::new(vec![4]),
             out_dtype: DType::Float32,
+            container_id: ContainerId::DEFAULT,
         });
 
         let order = g.topo_sort(4).unwrap();
         assert_eq!(order, vec![4]); // only node 4, not node 3
+    }
+
+    #[test]
+    fn remove_nodes_for_container() {
+        let c1 = ContainerId(1);
+        let c2 = ContainerId(2);
+        let mut g = Graph::new();
+        g.add_node(OpNode {
+            id: 10, op: OpKind::Add, inputs: vec![1, 2],
+            out_shape: Shape::new(vec![4]), out_dtype: DType::Float32,
+            container_id: c1,
+        });
+        g.add_node(OpNode {
+            id: 11, op: OpKind::Neg, inputs: vec![3],
+            out_shape: Shape::new(vec![4]), out_dtype: DType::Float32,
+            container_id: c2,
+        });
+        g.add_node(OpNode {
+            id: 12, op: OpKind::Relu, inputs: vec![10],
+            out_shape: Shape::new(vec![4]), out_dtype: DType::Float32,
+            container_id: c1,
+        });
+
+        let removed = g.remove_nodes_for_container(c1);
+        assert_eq!(removed.len(), 2);
+        assert!(removed.contains(&10));
+        assert!(removed.contains(&12));
+        assert!(g.has_node(11));
+        assert!(!g.has_node(10));
+        assert!(!g.has_node(12));
     }
 }
