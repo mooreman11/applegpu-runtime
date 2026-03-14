@@ -116,6 +116,30 @@ extern "C" {
         output: *mut GPUBufferHandle,
         element_count: u64,
     ) -> i32;
+
+    pub fn gpu_bridge_compute_softmax(
+        compute: *mut GPUComputeHandle,
+        buf_input: *const GPUBufferHandle,
+        buf_output: *mut GPUBufferHandle,
+        rows: u32,
+        cols: u32,
+    ) -> i32;
+
+    pub fn gpu_bridge_compute_transpose(
+        compute: *mut GPUComputeHandle,
+        buf_input: *const GPUBufferHandle,
+        buf_output: *mut GPUBufferHandle,
+        rows: u32,
+        cols: u32,
+    ) -> i32;
+
+    pub fn gpu_bridge_compute_scalar_mul(
+        compute: *mut GPUComputeHandle,
+        buf_input: *const GPUBufferHandle,
+        buf_output: *mut GPUBufferHandle,
+        scale: f32,
+        element_count: u64,
+    ) -> i32;
 }
 
 #[cfg(test)]

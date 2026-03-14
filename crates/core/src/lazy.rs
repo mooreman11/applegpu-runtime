@@ -123,6 +123,31 @@ impl LazyRuntime {
             return Ok(out);
         }
 
+        if node.op.is_softmax() {
+            let input = self.get_tensor(node.inputs[0])?;
+            let dims = input.meta.shape.dims();
+            let (rows, cols) = (dims[0], dims[1]);
+            let out = Tensor::empty_f32(device, node.out_shape.dims().to_vec())?;
+            REGISTRY.dispatch_softmax(device, &input.buffer, &out.buffer, rows, cols)?;
+            return Ok(out);
+        }
+
+        if node.op.is_transpose() {
+            let input = self.get_tensor(node.inputs[0])?;
+            let dims = input.meta.shape.dims();
+            let (rows, cols) = (dims[0], dims[1]);
+            let out = Tensor::empty_f32(device, node.out_shape.dims().to_vec())?;
+            REGISTRY.dispatch_transpose(device, &input.buffer, &out.buffer, rows, cols)?;
+            return Ok(out);
+        }
+
+        if let crate::graph::OpKind::ScalarMul(scale) = node.op {
+            let input = self.get_tensor(node.inputs[0])?;
+            let out = Tensor::empty_f32(device, node.out_shape.dims().to_vec())?;
+            REGISTRY.dispatch_scalar_mul(device, &input.buffer, &out.buffer, scale, input.numel())?;
+            return Ok(out);
+        }
+
         if node.op.is_unary() {
             let input = self.get_tensor(node.inputs[0])?;
             let out = Tensor::empty_f32(device, node.out_shape.dims().to_vec())?;

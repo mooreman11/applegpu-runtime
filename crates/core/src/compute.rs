@@ -56,6 +56,60 @@ kernel void matmul_f32(
 }
 "#;
 
+const SOFTMAX_KERNEL_SOURCE: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void softmax_f32(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    constant uint& rows [[buffer(2)]],
+    constant uint& cols [[buffer(3)]],
+    uint row [[thread_position_in_grid]]
+) {
+    if (row >= rows) return;
+    uint offset = row * cols;
+    float max_val = input[offset];
+    for (uint j = 1; j < cols; j++) { max_val = max(max_val, input[offset + j]); }
+    float sum = 0.0f;
+    for (uint j = 0; j < cols; j++) { float e = exp(input[offset + j] - max_val); output[offset + j] = e; sum += e; }
+    for (uint j = 0; j < cols; j++) { output[offset + j] /= sum; }
+}
+"#;
+
+const TRANSPOSE_KERNEL_SOURCE: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void transpose_f32(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    constant uint& rows [[buffer(2)]],
+    constant uint& cols [[buffer(3)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint row = gid.y;
+    uint col = gid.x;
+    if (row >= rows || col >= cols) return;
+    output[col * rows + row] = input[row * cols + col];
+}
+"#;
+
+const SCALAR_MUL_KERNEL_SOURCE: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void scalar_mul_f32(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    constant float& scale [[buffer(2)]],
+    constant uint& count [[buffer(3)]],
+    uint id [[thread_position_in_grid]]
+) {
+    if (id < count) { output[id] = input[id] * scale; }
+}
+"#;
+
 /// A Metal compute pipeline. Wraps command queue + pipeline state.
 pub struct ComputePipeline {
     handle: *mut ffi::GPUComputeHandle,
@@ -173,6 +227,42 @@ impl ComputePipeline {
         };
         if result == 0 { Ok(()) } else { Err(GpuError::ComputeFailed("Fused kernel dispatch failed".to_string())) }
     }
+
+    pub fn dispatch_softmax(
+        &self, buf_input: &Buffer, buf_output: &Buffer, rows: usize, cols: usize,
+    ) -> Result<()> {
+        let result = unsafe {
+            ffi::gpu_bridge_compute_softmax(
+                self.handle, buf_input.raw_handle() as *const _,
+                buf_output.raw_handle(), rows as u32, cols as u32,
+            )
+        };
+        if result == 0 { Ok(()) } else { Err(GpuError::ComputeFailed("Softmax dispatch failed".to_string())) }
+    }
+
+    pub fn dispatch_transpose(
+        &self, buf_input: &Buffer, buf_output: &Buffer, rows: usize, cols: usize,
+    ) -> Result<()> {
+        let result = unsafe {
+            ffi::gpu_bridge_compute_transpose(
+                self.handle, buf_input.raw_handle() as *const _,
+                buf_output.raw_handle(), rows as u32, cols as u32,
+            )
+        };
+        if result == 0 { Ok(()) } else { Err(GpuError::ComputeFailed("Transpose dispatch failed".to_string())) }
+    }
+
+    pub fn dispatch_scalar_mul(
+        &self, buf_input: &Buffer, buf_output: &Buffer, scale: f32, element_count: usize,
+    ) -> Result<()> {
+        let result = unsafe {
+            ffi::gpu_bridge_compute_scalar_mul(
+                self.handle, buf_input.raw_handle() as *const _,
+                buf_output.raw_handle(), scale, element_count as u64,
+            )
+        };
+        if result == 0 { Ok(()) } else { Err(GpuError::ComputeFailed("ScalarMul dispatch failed".to_string())) }
+    }
 }
 
 impl Drop for ComputePipeline {
@@ -265,6 +355,30 @@ impl KernelRegistry {
     ) -> Result<()> {
         let pipeline = self.get_or_create(device, kernel_source, function_name)?;
         pipeline.dispatch_fused(input_buffers, buf_out, element_count)
+    }
+
+    pub fn dispatch_softmax(
+        &self, device: &Device, buf_input: &Buffer, buf_output: &Buffer,
+        rows: usize, cols: usize,
+    ) -> Result<()> {
+        let pipeline = self.get_or_create(device, SOFTMAX_KERNEL_SOURCE, "softmax_f32")?;
+        pipeline.dispatch_softmax(buf_input, buf_output, rows, cols)
+    }
+
+    pub fn dispatch_transpose(
+        &self, device: &Device, buf_input: &Buffer, buf_output: &Buffer,
+        rows: usize, cols: usize,
+    ) -> Result<()> {
+        let pipeline = self.get_or_create(device, TRANSPOSE_KERNEL_SOURCE, "transpose_f32")?;
+        pipeline.dispatch_transpose(buf_input, buf_output, rows, cols)
+    }
+
+    pub fn dispatch_scalar_mul(
+        &self, device: &Device, buf_input: &Buffer, buf_output: &Buffer,
+        scale: f32, element_count: usize,
+    ) -> Result<()> {
+        let pipeline = self.get_or_create(device, SCALAR_MUL_KERNEL_SOURCE, "scalar_mul_f32")?;
+        pipeline.dispatch_scalar_mul(buf_input, buf_output, scale, element_count)
     }
 }
 

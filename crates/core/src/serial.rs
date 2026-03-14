@@ -65,6 +65,9 @@ fn op_to_discriminant(op: &OpKind) -> u32 {
         OpKind::Sqrt => OP_SQRT,
         OpKind::Matmul => OP_MATMUL,
         OpKind::FusedElementwise { .. } => OP_FUSED,
+        OpKind::Softmax => 11,
+        OpKind::Transpose => 12,
+        OpKind::ScalarMul(_) => 13,
     }
 }
 
@@ -94,6 +97,13 @@ fn discriminant_to_op(d: u32, r: &mut impl Read) -> io::Result<OpKind> {
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
             Ok(OpKind::FusedElementwise { kernel_source, function_name })
+        }
+        11 => Ok(OpKind::Softmax),
+        12 => Ok(OpKind::Transpose),
+        13 => {
+            let mut scale_bytes = [0u8; 4];
+            r.read_exact(&mut scale_bytes)?;
+            Ok(OpKind::ScalarMul(f32::from_le_bytes(scale_bytes)))
         }
         _ => Err(io::Error::new(io::ErrorKind::InvalidData, format!("Unknown op type: {}", d))),
     }
@@ -138,6 +148,9 @@ impl EvalRequest {
                 buf.write_all(kernel_source.as_bytes()).unwrap();
                 write_u32(&mut buf, function_name.len() as u32).unwrap();
                 buf.write_all(function_name.as_bytes()).unwrap();
+            }
+            if let OpKind::ScalarMul(scale) = node.op {
+                buf.write_all(&scale.to_le_bytes()).unwrap();
             }
         }
 

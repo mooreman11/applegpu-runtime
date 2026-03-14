@@ -23,6 +23,12 @@ pub enum OpKind {
         kernel_source: String,
         function_name: String,
     },
+    // Reduction ops
+    Softmax,
+    // Shape ops
+    Transpose,
+    // Scalar multiply (carries the scalar value)
+    ScalarMul(f32),
 }
 
 impl OpKind {
@@ -40,6 +46,9 @@ impl OpKind {
             OpKind::Sqrt => "elementwise_sqrt",
             OpKind::Matmul => "matmul_f32",
             OpKind::FusedElementwise { ref function_name, .. } => function_name.as_str(),
+            OpKind::Softmax => "softmax_f32",
+            OpKind::Transpose => "transpose_f32",
+            OpKind::ScalarMul(_) => "scalar_mul_f32",
         }
     }
 
@@ -58,6 +67,18 @@ impl OpKind {
     pub fn is_elementwise(&self) -> bool {
         matches!(self, OpKind::Add | OpKind::Sub | OpKind::Mul | OpKind::Div |
                        OpKind::Neg | OpKind::Relu | OpKind::Exp | OpKind::Log | OpKind::Sqrt)
+    }
+
+    pub fn is_softmax(&self) -> bool {
+        matches!(self, OpKind::Softmax)
+    }
+
+    pub fn is_transpose(&self) -> bool {
+        matches!(self, OpKind::Transpose)
+    }
+
+    pub fn is_scalar_mul(&self) -> bool {
+        matches!(self, OpKind::ScalarMul(_))
     }
 }
 
