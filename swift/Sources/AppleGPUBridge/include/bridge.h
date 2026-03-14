@@ -97,4 +97,83 @@ int32_t gpu_bridge_compute_scalar_mul(
     uint64_t element_count
 );
 
+// ── Non-blocking (batched) dispatch ──────────────────────────────────────
+
+// Get or create a device-level shared command queue for batched dispatch.
+void* gpu_bridge_get_shared_queue(GPUDeviceHandle* device);
+
+// Wait for a command buffer to complete (consumes the retained reference).
+void gpu_bridge_wait_command_buffer(void* command_buffer);
+
+// Non-blocking elementwise: returns command buffer handle (or NULL on failure).
+void* gpu_bridge_compute_elementwise_nb(
+    GPUComputeHandle* compute,
+    void* queue,
+    const GPUBufferHandle* buf_a,
+    const GPUBufferHandle* buf_b,
+    GPUBufferHandle* buf_out,
+    uint64_t element_count
+);
+
+// Non-blocking unary: returns command buffer handle.
+void* gpu_bridge_compute_unary_nb(
+    GPUComputeHandle* compute,
+    void* queue,
+    const GPUBufferHandle* buf_input,
+    GPUBufferHandle* buf_out,
+    uint64_t element_count
+);
+
+// Non-blocking matmul: returns command buffer handle.
+void* gpu_bridge_compute_matmul_nb(
+    GPUComputeHandle* compute,
+    void* queue,
+    const GPUBufferHandle* buf_a,
+    const GPUBufferHandle* buf_b,
+    GPUBufferHandle* buf_c,
+    uint32_t M,
+    uint32_t N,
+    uint32_t K
+);
+
+// Non-blocking softmax: returns command buffer handle.
+void* gpu_bridge_compute_softmax_nb(
+    GPUComputeHandle* compute,
+    void* queue,
+    const GPUBufferHandle* buf_input,
+    GPUBufferHandle* buf_output,
+    uint32_t rows,
+    uint32_t cols
+);
+
+// Non-blocking transpose: returns command buffer handle.
+void* gpu_bridge_compute_transpose_nb(
+    GPUComputeHandle* compute,
+    void* queue,
+    const GPUBufferHandle* buf_input,
+    GPUBufferHandle* buf_output,
+    uint32_t rows,
+    uint32_t cols
+);
+
+// Non-blocking scalar multiply: returns command buffer handle.
+void* gpu_bridge_compute_scalar_mul_nb(
+    GPUComputeHandle* compute,
+    void* queue,
+    const GPUBufferHandle* buf_input,
+    GPUBufferHandle* buf_output,
+    float scale,
+    uint64_t element_count
+);
+
+// Non-blocking fused kernel: returns command buffer handle.
+void* gpu_bridge_compute_fused_nb(
+    GPUComputeHandle* compute,
+    void* queue,
+    const GPUBufferHandle* const* input_buffers,
+    uint32_t buffer_count,
+    GPUBufferHandle* output,
+    uint64_t element_count
+);
+
 #endif

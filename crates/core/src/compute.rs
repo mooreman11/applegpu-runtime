@@ -371,6 +371,168 @@ impl ComputePipeline {
         };
         if result == 0 { Ok(()) } else { Err(GpuError::ComputeFailed("ScalarMul dispatch failed".to_string())) }
     }
+
+    // ── Non-blocking dispatch methods ─────────────────────────────────────
+
+    /// Non-blocking binary elementwise. Returns command buffer handle.
+    pub fn dispatch_elementwise_nb(
+        &self,
+        queue: *mut std::ffi::c_void,
+        buf_a: &Buffer,
+        buf_b: &Buffer,
+        buf_out: &Buffer,
+        element_count: usize,
+    ) -> Result<*mut std::ffi::c_void> {
+        let cb = unsafe {
+            ffi::gpu_bridge_compute_elementwise_nb(
+                self.handle,
+                queue,
+                buf_a.raw_handle() as *const _,
+                buf_b.raw_handle() as *const _,
+                buf_out.raw_handle(),
+                element_count as u64,
+            )
+        };
+        if cb.is_null() { Err(GpuError::ComputeFailed("Non-blocking binary dispatch failed".to_string())) } else { Ok(cb) }
+    }
+
+    /// Non-blocking unary. Returns command buffer handle.
+    pub fn dispatch_unary_nb(
+        &self,
+        queue: *mut std::ffi::c_void,
+        buf_input: &Buffer,
+        buf_out: &Buffer,
+        element_count: usize,
+    ) -> Result<*mut std::ffi::c_void> {
+        let cb = unsafe {
+            ffi::gpu_bridge_compute_unary_nb(
+                self.handle,
+                queue,
+                buf_input.raw_handle() as *const _,
+                buf_out.raw_handle(),
+                element_count as u64,
+            )
+        };
+        if cb.is_null() { Err(GpuError::ComputeFailed("Non-blocking unary dispatch failed".to_string())) } else { Ok(cb) }
+    }
+
+    /// Non-blocking matmul. Returns command buffer handle.
+    pub fn dispatch_matmul_nb(
+        &self,
+        queue: *mut std::ffi::c_void,
+        buf_a: &Buffer,
+        buf_b: &Buffer,
+        buf_c: &Buffer,
+        m: usize,
+        n: usize,
+        k: usize,
+    ) -> Result<*mut std::ffi::c_void> {
+        let cb = unsafe {
+            ffi::gpu_bridge_compute_matmul_nb(
+                self.handle,
+                queue,
+                buf_a.raw_handle() as *const _,
+                buf_b.raw_handle() as *const _,
+                buf_c.raw_handle(),
+                m as u32,
+                n as u32,
+                k as u32,
+            )
+        };
+        if cb.is_null() { Err(GpuError::ComputeFailed("Non-blocking matmul dispatch failed".to_string())) } else { Ok(cb) }
+    }
+
+    /// Non-blocking softmax. Returns command buffer handle.
+    pub fn dispatch_softmax_nb(
+        &self,
+        queue: *mut std::ffi::c_void,
+        buf_input: &Buffer,
+        buf_output: &Buffer,
+        rows: usize,
+        cols: usize,
+    ) -> Result<*mut std::ffi::c_void> {
+        let cb = unsafe {
+            ffi::gpu_bridge_compute_softmax_nb(
+                self.handle,
+                queue,
+                buf_input.raw_handle() as *const _,
+                buf_output.raw_handle(),
+                rows as u32,
+                cols as u32,
+            )
+        };
+        if cb.is_null() { Err(GpuError::ComputeFailed("Non-blocking softmax dispatch failed".to_string())) } else { Ok(cb) }
+    }
+
+    /// Non-blocking transpose. Returns command buffer handle.
+    pub fn dispatch_transpose_nb(
+        &self,
+        queue: *mut std::ffi::c_void,
+        buf_input: &Buffer,
+        buf_output: &Buffer,
+        rows: usize,
+        cols: usize,
+    ) -> Result<*mut std::ffi::c_void> {
+        let cb = unsafe {
+            ffi::gpu_bridge_compute_transpose_nb(
+                self.handle,
+                queue,
+                buf_input.raw_handle() as *const _,
+                buf_output.raw_handle(),
+                rows as u32,
+                cols as u32,
+            )
+        };
+        if cb.is_null() { Err(GpuError::ComputeFailed("Non-blocking transpose dispatch failed".to_string())) } else { Ok(cb) }
+    }
+
+    /// Non-blocking scalar multiply. Returns command buffer handle.
+    pub fn dispatch_scalar_mul_nb(
+        &self,
+        queue: *mut std::ffi::c_void,
+        buf_input: &Buffer,
+        buf_output: &Buffer,
+        scale: f32,
+        element_count: usize,
+    ) -> Result<*mut std::ffi::c_void> {
+        let cb = unsafe {
+            ffi::gpu_bridge_compute_scalar_mul_nb(
+                self.handle,
+                queue,
+                buf_input.raw_handle() as *const _,
+                buf_output.raw_handle(),
+                scale,
+                element_count as u64,
+            )
+        };
+        if cb.is_null() { Err(GpuError::ComputeFailed("Non-blocking scalar_mul dispatch failed".to_string())) } else { Ok(cb) }
+    }
+
+    /// Non-blocking fused dispatch. Returns command buffer handle.
+    pub fn dispatch_fused_nb(
+        &self,
+        queue: *mut std::ffi::c_void,
+        input_buffers: &[&Buffer],
+        buf_out: &Buffer,
+        element_count: usize,
+    ) -> Result<*mut std::ffi::c_void> {
+        let ptrs: Vec<*const ffi::GPUBufferHandle> = input_buffers
+            .iter()
+            .map(|b| b.raw_handle() as *const _)
+            .collect();
+
+        let cb = unsafe {
+            ffi::gpu_bridge_compute_fused_nb(
+                self.handle,
+                queue,
+                ptrs.as_ptr(),
+                ptrs.len() as u32,
+                buf_out.raw_handle(),
+                element_count as u64,
+            )
+        };
+        if cb.is_null() { Err(GpuError::ComputeFailed("Non-blocking fused dispatch failed".to_string())) } else { Ok(cb) }
+    }
 }
 
 impl Drop for ComputePipeline {
@@ -605,6 +767,81 @@ impl KernelRegistry {
         let pipeline = self.get_or_create(device, source, &func)?;
         pipeline.dispatch_scalar_mul(buf_input, buf_output, scale, element_count)
     }
+
+    // ── Non-blocking dispatch methods ─────────────────────────────────────
+
+    pub fn dispatch_binary_typed_nb(
+        &self, device: &Device, function_name: &str, dtype: DType, queue: *mut std::ffi::c_void,
+        buf_a: &Buffer, buf_b: &Buffer, buf_out: &Buffer, element_count: usize,
+    ) -> Result<*mut std::ffi::c_void> {
+        let (source, func) = Self::resolve_kernel(function_name, dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_elementwise_nb(queue, buf_a, buf_b, buf_out, element_count)
+    }
+
+    pub fn dispatch_unary_typed_nb(
+        &self, device: &Device, function_name: &str, dtype: DType, queue: *mut std::ffi::c_void,
+        buf_input: &Buffer, buf_out: &Buffer, element_count: usize,
+    ) -> Result<*mut std::ffi::c_void> {
+        let (source, func) = Self::resolve_kernel(function_name, dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_unary_nb(queue, buf_input, buf_out, element_count)
+    }
+
+    pub fn dispatch_matmul_typed_nb(
+        &self, device: &Device, dtype: DType, queue: *mut std::ffi::c_void,
+        buf_a: &Buffer, buf_b: &Buffer, buf_c: &Buffer, m: usize, n: usize, k: usize,
+    ) -> Result<*mut std::ffi::c_void> {
+        let (source, func) = Self::resolve_kernel("matmul_f32", dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_matmul_nb(queue, buf_a, buf_b, buf_c, m, n, k)
+    }
+
+    pub fn dispatch_softmax_typed_nb(
+        &self, device: &Device, dtype: DType, queue: *mut std::ffi::c_void,
+        buf_input: &Buffer, buf_output: &Buffer, rows: usize, cols: usize,
+    ) -> Result<*mut std::ffi::c_void> {
+        let (source, func) = Self::resolve_kernel("softmax_f32", dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_softmax_nb(queue, buf_input, buf_output, rows, cols)
+    }
+
+    pub fn dispatch_transpose_typed_nb(
+        &self, device: &Device, dtype: DType, queue: *mut std::ffi::c_void,
+        buf_input: &Buffer, buf_output: &Buffer, rows: usize, cols: usize,
+    ) -> Result<*mut std::ffi::c_void> {
+        let (source, func) = Self::resolve_kernel("transpose_f32", dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_transpose_nb(queue, buf_input, buf_output, rows, cols)
+    }
+
+    pub fn dispatch_scalar_mul_typed_nb(
+        &self, device: &Device, dtype: DType, queue: *mut std::ffi::c_void,
+        buf_input: &Buffer, buf_output: &Buffer, scale: f32, element_count: usize,
+    ) -> Result<*mut std::ffi::c_void> {
+        let (source, func) = Self::resolve_kernel("scalar_mul_f32", dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_scalar_mul_nb(queue, buf_input, buf_output, scale, element_count)
+    }
+
+    pub fn dispatch_fused_nb(
+        &self, device: &Device, kernel_source: &str, function_name: &str,
+        queue: *mut std::ffi::c_void, input_buffers: &[&Buffer], buf_out: &Buffer,
+        element_count: usize,
+    ) -> Result<*mut std::ffi::c_void> {
+        let pipeline = self.get_or_create(device, kernel_source, function_name)?;
+        pipeline.dispatch_fused_nb(queue, input_buffers, buf_out, element_count)
+    }
+}
+
+/// Get or create the device-level shared command queue.
+pub fn get_shared_queue(device: &Device) -> *mut std::ffi::c_void {
+    unsafe { ffi::gpu_bridge_get_shared_queue(device.raw_handle() as *mut _) }
+}
+
+/// Wait for a command buffer to complete (consumes the retained reference).
+pub fn wait_command_buffer(cb: *mut std::ffi::c_void) {
+    unsafe { ffi::gpu_bridge_wait_command_buffer(cb) }
 }
 
 #[cfg(test)]

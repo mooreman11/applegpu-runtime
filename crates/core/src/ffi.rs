@@ -140,6 +140,78 @@ extern "C" {
         scale: f32,
         element_count: u64,
     ) -> i32;
+
+    // ── Non-blocking (batched) dispatch ──────────────────────────────────
+
+    pub fn gpu_bridge_get_shared_queue(
+        device: *mut GPUDeviceHandle,
+    ) -> *mut std::ffi::c_void;
+
+    pub fn gpu_bridge_wait_command_buffer(cb: *mut std::ffi::c_void);
+
+    pub fn gpu_bridge_compute_elementwise_nb(
+        compute: *mut GPUComputeHandle,
+        queue: *mut std::ffi::c_void,
+        buf_a: *const GPUBufferHandle,
+        buf_b: *const GPUBufferHandle,
+        buf_out: *mut GPUBufferHandle,
+        element_count: u64,
+    ) -> *mut std::ffi::c_void;
+
+    pub fn gpu_bridge_compute_unary_nb(
+        compute: *mut GPUComputeHandle,
+        queue: *mut std::ffi::c_void,
+        buf_input: *const GPUBufferHandle,
+        buf_out: *mut GPUBufferHandle,
+        element_count: u64,
+    ) -> *mut std::ffi::c_void;
+
+    pub fn gpu_bridge_compute_matmul_nb(
+        compute: *mut GPUComputeHandle,
+        queue: *mut std::ffi::c_void,
+        buf_a: *const GPUBufferHandle,
+        buf_b: *const GPUBufferHandle,
+        buf_c: *mut GPUBufferHandle,
+        m: u32,
+        n: u32,
+        k: u32,
+    ) -> *mut std::ffi::c_void;
+
+    pub fn gpu_bridge_compute_softmax_nb(
+        compute: *mut GPUComputeHandle,
+        queue: *mut std::ffi::c_void,
+        buf_input: *const GPUBufferHandle,
+        buf_output: *mut GPUBufferHandle,
+        rows: u32,
+        cols: u32,
+    ) -> *mut std::ffi::c_void;
+
+    pub fn gpu_bridge_compute_transpose_nb(
+        compute: *mut GPUComputeHandle,
+        queue: *mut std::ffi::c_void,
+        buf_input: *const GPUBufferHandle,
+        buf_output: *mut GPUBufferHandle,
+        rows: u32,
+        cols: u32,
+    ) -> *mut std::ffi::c_void;
+
+    pub fn gpu_bridge_compute_scalar_mul_nb(
+        compute: *mut GPUComputeHandle,
+        queue: *mut std::ffi::c_void,
+        buf_input: *const GPUBufferHandle,
+        buf_output: *mut GPUBufferHandle,
+        scale: f32,
+        element_count: u64,
+    ) -> *mut std::ffi::c_void;
+
+    pub fn gpu_bridge_compute_fused_nb(
+        compute: *mut GPUComputeHandle,
+        queue: *mut std::ffi::c_void,
+        input_buffers: *const *const GPUBufferHandle,
+        buffer_count: u32,
+        output: *mut GPUBufferHandle,
+        element_count: u64,
+    ) -> *mut std::ffi::c_void;
 }
 
 #[cfg(test)]

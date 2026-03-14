@@ -94,6 +94,11 @@ impl LazyRuntime {
 
     /// Evaluate a tensor: execute all pending ops needed to materialize it.
     /// After evaluation, the tensor is in `self.tensors` and its graph nodes are removed.
+    ///
+    /// Uses command buffer batching: all ops are submitted non-blocking to a
+    /// shared command queue, then we wait only on the last command buffer.
+    /// Metal guarantees in-order execution on the same queue, so all prior
+    /// command buffers complete before the last one.
     pub fn eval(&mut self, device: &Device, id: u64) -> Result<()> {
         if self.is_materialized(id) {
             return Ok(()); // already done
@@ -109,6 +114,9 @@ impl LazyRuntime {
         // Run fusion optimization pass
         order = crate::fusion::optimize(&mut self.graph, &order);
 
+        let queue = crate::compute::get_shared_queue(device);
+        let mut last_cb: Option<*mut std::ffi::c_void> = None;
+
         for node_id in order {
             if self.is_materialized(node_id) {
                 continue; // already evaluated (shared subexpression)
@@ -118,10 +126,22 @@ impl LazyRuntime {
                 GpuError::GraphError(format!("Node {} not found in graph", node_id))
             })?;
 
-            let result = self.execute_node(device, &node)?;
+            let out_size = node.out_shape.numel() * node.out_dtype.size_bytes();
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+
+            let cb = self.execute_node_nb(device, queue, &node, &out)?;
+            last_cb = Some(cb);
+
             let size = node.out_shape.numel() * node.out_dtype.size_bytes();
             self.scheduler.allocate_tensor(container_id, node_id, size)?;
-            self.tensors.insert(node_id, result);
+            self.tensors.insert(node_id, out);
+        }
+
+        // Wait only on the last command buffer — Metal in-order queue guarantees
+        // all prior submissions are complete when this one finishes.
+        if let Some(cb) = last_cb {
+            crate::compute::wait_command_buffer(cb);
         }
 
         Ok(())
@@ -138,9 +158,11 @@ impl LazyRuntime {
         ContainerId::DEFAULT
     }
 
-    /// Execute a single graph node, producing a materialized Tensor.
+    /// Execute a single graph node synchronously, producing a materialized Tensor.
     /// Acquires output buffer from pool FIRST (mutable borrow on pool),
     /// then reads input tensors (shared borrow on tensors) to satisfy the borrow checker.
+    /// Retained for eval_remote and any path that needs synchronous single-op execution.
+    #[allow(dead_code)]
     fn execute_node(&mut self, device: &Device, node: &OpNode) -> Result<Tensor> {
         let out_size = node.out_shape.numel() * node.out_dtype.size_bytes();
 
@@ -236,6 +258,92 @@ impl LazyRuntime {
                 a.numel(),
             )?;
             Ok(out)
+        }
+    }
+
+    /// Execute a single graph node without blocking. The output tensor is pre-allocated
+    /// by the caller. Returns the command buffer handle for deferred waiting.
+    fn execute_node_nb(
+        &self,
+        device: &Device,
+        queue: *mut std::ffi::c_void,
+        node: &OpNode,
+        out: &Tensor,
+    ) -> Result<*mut std::ffi::c_void> {
+        // Handle fused kernels first
+        if let crate::graph::OpKind::FusedElementwise { ref kernel_source, ref function_name } = node.op {
+            let input_tensors: Vec<&Tensor> = node.inputs.iter()
+                .map(|&id| self.get_tensor(id))
+                .collect::<Result<Vec<_>>>()?;
+            let input_buffers: Vec<&crate::buffer::Buffer> = input_tensors.iter()
+                .map(|t| &t.buffer)
+                .collect();
+            let numel = input_tensors[0].numel();
+            return REGISTRY.dispatch_fused_nb(
+                device,
+                kernel_source,
+                function_name,
+                queue,
+                &input_buffers,
+                &out.buffer,
+                numel,
+            );
+        }
+
+        let dtype = node.out_dtype;
+
+        if node.op.is_softmax() {
+            let input = self.get_tensor(node.inputs[0])?;
+            let dims = input.meta.shape.dims();
+            let (rows, cols) = (dims[0], dims[1]);
+            return REGISTRY.dispatch_softmax_typed_nb(device, dtype, queue, &input.buffer, &out.buffer, rows, cols);
+        }
+
+        if node.op.is_transpose() {
+            let input = self.get_tensor(node.inputs[0])?;
+            let dims = input.meta.shape.dims();
+            let (rows, cols) = (dims[0], dims[1]);
+            return REGISTRY.dispatch_transpose_typed_nb(device, dtype, queue, &input.buffer, &out.buffer, rows, cols);
+        }
+
+        if let crate::graph::OpKind::ScalarMul(scale) = node.op {
+            let input = self.get_tensor(node.inputs[0])?;
+            return REGISTRY.dispatch_scalar_mul_typed_nb(device, dtype, queue, &input.buffer, &out.buffer, scale, input.numel());
+        }
+
+        if node.op.is_unary() {
+            let input = self.get_tensor(node.inputs[0])?;
+            REGISTRY.dispatch_unary_typed_nb(
+                device,
+                node.op.kernel_name(),
+                dtype,
+                queue,
+                &input.buffer,
+                &out.buffer,
+                input.numel(),
+            )
+        } else if node.op.is_matmul() {
+            let a = self.get_tensor(node.inputs[0])?;
+            let b = self.get_tensor(node.inputs[1])?;
+            let a_dims = a.meta.shape.dims();
+            let b_dims = b.meta.shape.dims();
+            let (m, k) = (a_dims[0], a_dims[1]);
+            let n = b_dims[1];
+            REGISTRY.dispatch_matmul_typed_nb(device, dtype, queue, &a.buffer, &b.buffer, &out.buffer, m, n, k)
+        } else {
+            // Binary element-wise
+            let a = self.get_tensor(node.inputs[0])?;
+            let b = self.get_tensor(node.inputs[1])?;
+            REGISTRY.dispatch_binary_typed_nb(
+                device,
+                node.op.kernel_name(),
+                dtype,
+                queue,
+                &a.buffer,
+                &b.buffer,
+                &out.buffer,
+                a.numel(),
+            )
         }
     }
 
