@@ -87,10 +87,11 @@ Active development. Current capabilities:
 - **GpuTensor class** with Python operators (`+`, `-`, `*`, `/`, `@`, unary `-`) and auto-cleanup
 - **Scaled dot-product attention** — `gpu.attention(Q, K, V)` with proper 1/sqrt(d_k) scaling
 - **Multi-container scheduler** — priority-based fair queuing with per-container resource quotas, deficit-based scheduling, starvation prevention, and pause/resume support
+- **Persistent memory pool** — power-of-two bucketed buffer reuse with watermark eviction, reducing Metal allocation churn for iterative workloads
 - **Resource limits** — configurable max tensor size, total GPU memory, and tensor count via `gpu.set_limits()` or env vars, enforced per-container and globally
 - **Lazy execution** — ops build a DAG, computation deferred until materialization
 - 14 GPU operations: add, sub, mul, div, neg, relu, exp, log, sqrt, matmul, softmax, transpose, scalar_mul, attention
-- 166 tests passing across all layers (101 Rust + 13 Swift + 65 Python)
+- 188 tests passing across all layers (119 Rust + 13 Swift + 69 Python)
 
 ### Multi-Container Scheduler
 
