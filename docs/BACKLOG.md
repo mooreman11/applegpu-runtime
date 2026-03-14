@@ -89,9 +89,10 @@ _Unlocks the workload everyone cares about. Without these, it's a fast linear al
 - [ ] **PyTorch autograd integration** — `torch.autograd.Function` wrappers (requires backward ops)
 - [ ] **Direct from_torch via data_ptr()** — bypass NumPy bridge when Metal bytesNoCopy is available
 
-### Multi-dtype Support
-- [ ] **Multi-dtype adapters** — extend from_numpy/to_numpy to support float16, float64, int8, int32 (adapter layer only)
-- [ ] **Multi-dtype compute kernels** — MSL kernel variants for float16/float64/int types (touches all kernels + dispatch)
+### ~~Multi-dtype Support~~ DONE
+- [x] **Multi-dtype adapters** — all 10 dtypes (float16/32/64, int8/16/32/64, uint8/32, bool) supported in tensor(), from_numpy, to_numpy, to_list, dtype getter
+- [x] **Multi-dtype compute kernels** — MSL kernel variants for float16/float64/int types (touches all kernels + dispatch)
+- [x] **Comprehensive multi-dtype tests** — 26 parametrized Python tests covering creation, NumPy roundtrip, to_list type fidelity, compute validation, and backward compat
 
 ### Infrastructure
 - [ ] **Phase 7b: AVF VM integration** — VZVirtualMachine lifecycle, virtio-vsock transport (Metal GPU can't pass through to guest VMs)
