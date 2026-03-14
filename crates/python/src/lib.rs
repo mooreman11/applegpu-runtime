@@ -4,10 +4,10 @@ use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use numpy::{PyArray1, PyArrayDyn, PyArrayMethods, PyReadonlyArrayDyn, PyUntypedArrayMethods, IntoPyArray, IxDyn};
+use numpy::{PyArray1, PyArrayMethods, PyReadonlyArrayDyn, PyUntypedArrayMethods, IntoPyArray, IxDyn};
 
 use applegpu_core::lazy::LazyRuntime;
-use applegpu_core::tensor::Tensor;
+use applegpu_core::tensor::{DType, Tensor};
 use applegpu_core::scheduler::{ContainerId, ContainerConfig, Priority, JobId, JobStatus};
 
 /// Global lazy runtime.
@@ -18,6 +18,21 @@ static RUNTIME_LAZY: once_cell::sync::Lazy<Mutex<LazyRuntime>> =
 fn get_device_runtime() -> PyResult<&'static applegpu_core::backend::Runtime> {
     applegpu_core::backend::get_runtime()
         .map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
+/// Helper: auto-evaluate a tensor if it is pending (lazy).
+fn auto_eval(rt: &mut LazyRuntime, id: u64) -> PyResult<()> {
+    if rt.is_pending(id) {
+        let runtime = get_device_runtime()?;
+        if let Some(ref socket_path) = runtime.socket_path {
+            rt.eval_remote(&runtime.device, id, socket_path)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        } else {
+            rt.eval(&runtime.device, id)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        }
+    }
+    Ok(())
 }
 
 /// A GPU tensor. Wraps a lazy tensor ID with automatic memory cleanup.
@@ -52,69 +67,85 @@ impl GpuTensor {
         self.id
     }
 
-    /// Read tensor data as a NumPy ndarray (float32) with the tensor's shape.
+    /// Get the dtype as a string ("float32" or "float16").
+    #[getter]
+    fn dtype(&self) -> PyResult<String> {
+        let rt = RUNTIME_LAZY.lock().unwrap();
+        let dtype = rt.dtype(self.id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(match dtype {
+            DType::Float32 => "float32",
+            DType::Float16 => "float16",
+            other => return Err(PyValueError::new_err(format!("Unsupported dtype: {:?}", other))),
+        }.to_string())
+    }
+
+    /// Read tensor data as a NumPy ndarray with the tensor's shape.
     /// Auto-evaluates if the tensor is lazy.
-    fn to_numpy<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArrayDyn<f32>>> {
-        let runtime = get_device_runtime()?;
+    /// Returns float32 ndarray for f32 tensors, float16 ndarray for f16 tensors.
+    fn to_numpy<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let mut rt = RUNTIME_LAZY.lock().unwrap();
+        auto_eval(&mut rt, self.id)?;
 
-        // Auto-eval if lazy
-        if rt.is_pending(self.id) {
-            if let Some(ref socket_path) = runtime.socket_path {
-                rt.eval_remote(&runtime.device, self.id, socket_path)
-                    .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            } else {
-                rt.eval(&runtime.device, self.id)
-                    .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            }
-        }
-
-        let data = rt.read_f32(self.id)
+        let dtype = rt.dtype(self.id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let shape = rt.shape(self.id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-        drop(rt); // release lock before creating numpy array
-
-        // Create 1D array then reshape to correct shape
-        let flat: Bound<'py, PyArray1<f32>> = data.into_pyarray_bound(py);
-        let nd_shape: Vec<usize> = shape;
-        let reshaped = flat.reshape(IxDyn(&nd_shape))
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok(reshaped)
+        match dtype {
+            DType::Float32 => {
+                let data = rt.read_f32(self.id)
+                    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+                drop(rt);
+                let flat: Bound<'py, PyArray1<f32>> = data.into_pyarray_bound(py);
+                let reshaped = flat.reshape(IxDyn(&shape))
+                    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+                Ok(reshaped.into_any())
+            }
+            DType::Float16 => {
+                let data = rt.read_f16(self.id)
+                    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+                drop(rt);
+                // pyo3-numpy has no native f16 type. Create u16 array, then view as np.float16.
+                let flat: Bound<'py, PyArray1<u16>> = data.into_pyarray_bound(py);
+                let np = py.import_bound("numpy")?;
+                let f16_dtype = np.getattr("float16")?;
+                let viewed = flat.call_method1("view", (&f16_dtype,))?;
+                let reshaped = viewed.call_method1("reshape", (shape,))?;
+                Ok(reshaped)
+            }
+            other => Err(PyValueError::new_err(format!("Unsupported dtype for to_numpy: {:?}", other))),
+        }
     }
 
-    /// Read tensor data as a flat list of f32 values.
+    /// Read tensor data as a flat list of f64 values.
     /// Auto-evaluates if the tensor is lazy.
-    fn to_list(&self) -> PyResult<Vec<f32>> {
-        let runtime = get_device_runtime()?;
+    fn to_list(&self) -> PyResult<Vec<f64>> {
         let mut rt = RUNTIME_LAZY.lock().unwrap();
-        if rt.is_pending(self.id) {
-            if let Some(ref socket_path) = runtime.socket_path {
-                // VM backend: send over IPC
-                rt.eval_remote(&runtime.device, self.id, socket_path)
+        auto_eval(&mut rt, self.id)?;
+
+        let dtype = rt.dtype(self.id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+        match dtype {
+            DType::Float32 => {
+                let data = rt.read_f32(self.id)
                     .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            } else {
-                // MLX backend: execute locally
-                rt.eval(&runtime.device, self.id)
-                    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+                Ok(data.into_iter().map(|v| v as f64).collect())
             }
+            DType::Float16 => {
+                let data = rt.read_f16(self.id)
+                    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+                Ok(data.into_iter().map(|v| half::f16::from_bits(v).to_f64()).collect())
+            }
+            other => Err(PyValueError::new_err(format!("Unsupported dtype for to_list: {:?}", other))),
         }
-        rt.read_f32(self.id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
     }
 
     /// Explicitly evaluate this tensor, materializing its result on the GPU.
     fn eval(&self) -> PyResult<()> {
-        let runtime = get_device_runtime()?;
         let mut rt = RUNTIME_LAZY.lock().unwrap();
-        if let Some(ref socket_path) = runtime.socket_path {
-            rt.eval_remote(&runtime.device, self.id, socket_path)
-                .map_err(|e| PyValueError::new_err(e.to_string()))
-        } else {
-            rt.eval(&runtime.device, self.id)
-                .map_err(|e| PyValueError::new_err(e.to_string()))
-        }
+        auto_eval(&mut rt, self.id)
     }
 
     // Unary ops
@@ -217,7 +248,7 @@ impl GpuTensor {
     /// Convert to a PyTorch tensor. Auto-evaluates if lazy.
     /// Returns an independent copy (clone) so mutations don't affect GPU data.
     fn to_torch<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        // Get numpy array via existing to_numpy
+        // Get numpy array via existing to_numpy (handles f16 and f32)
         let np_array = self.to_numpy(py)?;
 
         // Lazy import torch
@@ -309,47 +340,71 @@ fn dtype_size(name: &str) -> PyResult<usize> {
     Ok(dt.size_bytes())
 }
 
-/// Create a GpuTensor from a NumPy ndarray (float32, C-contiguous).
+/// Create a GpuTensor from a NumPy ndarray (float32 or float16, C-contiguous).
 /// Data is copied; mutations to the original array do not affect the tensor.
 #[pyfunction]
 #[pyo3(signature = (arr))]
-fn from_numpy(_py: Python<'_>, arr: &Bound<'_, pyo3::types::PyAny>) -> PyResult<GpuTensor> {
-    // Try to downcast to f32 array; give a clear error for other dtypes
-    let arr: PyReadonlyArrayDyn<'_, f32> = arr.extract()
-        .map_err(|_| PyTypeError::new_err(
-            "from_numpy requires a float32 ndarray. Use arr.astype(np.float32)."
-        ))?;
-
-    // as_slice returns Err if not C-contiguous
-    let data: Vec<f32> = arr.as_slice()
-        .map_err(|_| PyValueError::new_err(
-            "Array must be C-contiguous. Use np.ascontiguousarray()."
-        ))?
-        .to_vec();
-
-    let shape: Vec<usize> = arr.shape().to_vec();
+fn from_numpy(py: Python<'_>, arr: &Bound<'_, pyo3::types::PyAny>) -> PyResult<GpuTensor> {
+    // Check the numpy dtype string to dispatch
+    let dtype_str: String = arr.getattr("dtype")?.getattr("name")?.extract()?;
 
     let runtime = get_device_runtime()?;
-    let t = Tensor::from_f32(&runtime.device, shape, &data)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    let id = t.meta.id;
-    RUNTIME_LAZY.lock().unwrap().insert_tensor(t)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    Ok(GpuTensor { id, destroyed: Cell::new(false) })
+
+    match dtype_str.as_str() {
+        "float32" => {
+            let arr: PyReadonlyArrayDyn<'_, f32> = arr.extract()
+                .map_err(|_| PyTypeError::new_err(
+                    "from_numpy: failed to extract float32 ndarray."
+                ))?;
+            let data: Vec<f32> = arr.as_slice()
+                .map_err(|_| PyValueError::new_err(
+                    "Array must be C-contiguous. Use np.ascontiguousarray()."
+                ))?
+                .to_vec();
+            let shape: Vec<usize> = arr.shape().to_vec();
+            let t = Tensor::from_f32(&runtime.device, shape, &data)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let id = t.meta.id;
+            RUNTIME_LAZY.lock().unwrap().insert_tensor(t)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            Ok(GpuTensor { id, destroyed: Cell::new(false) })
+        }
+        "float16" => {
+            // numpy float16 is stored as u16 in memory. View as u16 to extract raw bits.
+            let np = py.import_bound("numpy")?;
+            let u16_dtype = np.getattr("uint16")?;
+            let u16_arr = arr.call_method1("view", (&u16_dtype,))?;
+            let flat = u16_arr.call_method0("flatten")?;
+            let data: Vec<u16> = flat.extract()?;
+            let shape: Vec<usize> = arr.getattr("shape")?.extract()?;
+            let t = Tensor::from_f16(&runtime.device, shape, &data)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let id = t.meta.id;
+            RUNTIME_LAZY.lock().unwrap().insert_tensor(t)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            Ok(GpuTensor { id, destroyed: Cell::new(false) })
+        }
+        other => Err(PyTypeError::new_err(format!(
+            "from_numpy requires a float32 or float16 ndarray, got {}. Use arr.astype(np.float32).",
+            other
+        ))),
+    }
 }
 
-/// Create a GpuTensor from a PyTorch tensor (float32).
+/// Create a GpuTensor from a PyTorch tensor (float32 or float16).
 /// Internally converts via NumPy: detach -> cpu -> contiguous -> numpy -> from_numpy.
 /// Data is copied; mutations to the original tensor do not affect the GPU tensor.
 #[pyfunction]
 fn from_torch(py: Python<'_>, tensor: &Bound<'_, pyo3::types::PyAny>) -> PyResult<GpuTensor> {
     // Lazy import torch for dtype check
     let torch = py.import_bound("torch")?;
-    let float32 = torch.getattr("float32")?;
     let tensor_dtype = tensor.getattr("dtype")?;
-    if !tensor_dtype.eq(&float32)? {
+    let float32 = torch.getattr("float32")?;
+    let float16 = torch.getattr("float16")?;
+
+    if !tensor_dtype.eq(&float32)? && !tensor_dtype.eq(&float16)? {
         return Err(PyValueError::new_err(format!(
-            "Expected float32 tensor, got {}. Use tensor.float().",
+            "Expected float32 or float16 tensor, got {}. Use tensor.float() or tensor.half().",
             tensor_dtype
         )));
     }
@@ -360,19 +415,39 @@ fn from_torch(py: Python<'_>, tensor: &Bound<'_, pyo3::types::PyAny>) -> PyResul
         .call_method0("cpu")?
         .call_method0("contiguous")?;
 
-    // Convert to numpy (zero-copy for contiguous CPU float32)
+    // Convert to numpy (zero-copy for contiguous CPU tensors)
     let np_array = prepared.call_method0("numpy")?;
 
-    // Delegate to existing from_numpy
+    // Delegate to existing from_numpy (handles both f32 and f16)
     from_numpy(py, &np_array)
 }
 
 /// Create a tensor from data. Returns a GpuTensor object.
+/// dtype: "float32" (default) or "float16".
 #[pyfunction]
-fn tensor(data: Vec<f32>, shape: Vec<usize>) -> PyResult<GpuTensor> {
+#[pyo3(signature = (data, shape, dtype=None))]
+fn tensor(data: Vec<f64>, shape: Vec<usize>, dtype: Option<&str>) -> PyResult<GpuTensor> {
     let runtime = get_device_runtime()?;
-    let t = Tensor::from_f32(&runtime.device, shape, &data)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let dtype_str = dtype.unwrap_or("float32");
+
+    let t = match dtype_str {
+        "float32" | "f32" => {
+            let f32_data: Vec<f32> = data.iter().map(|&v| v as f32).collect();
+            Tensor::from_f32(&runtime.device, shape, &f32_data)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?
+        }
+        "float16" | "f16" => {
+            let u16_data: Vec<u16> = data.iter()
+                .map(|&v| half::f16::from_f64(v).to_bits())
+                .collect();
+            Tensor::from_f16(&runtime.device, shape, &u16_data)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?
+        }
+        other => return Err(PyValueError::new_err(format!(
+            "Unsupported dtype: '{}'. Use 'float32' or 'float16'.", other
+        ))),
+    };
+
     let id = t.meta.id;
     RUNTIME_LAZY.lock().unwrap().insert_tensor(t)
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -408,7 +483,7 @@ fn tensor_count() -> PyResult<usize> {
 // Backward-compatible module-level functions that accept GpuTensor
 
 #[pyfunction]
-fn to_list(t: &GpuTensor) -> PyResult<Vec<f32>> { t.to_list() }
+fn to_list(t: &GpuTensor) -> PyResult<Vec<f64>> { t.to_list() }
 
 #[pyfunction]
 fn shape(t: &GpuTensor) -> PyResult<Vec<usize>> { t.shape() }
