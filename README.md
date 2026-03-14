@@ -89,10 +89,11 @@ Active development. Current capabilities:
 - **Multi-container scheduler** — priority-based fair queuing with per-container resource quotas, deficit-based scheduling, starvation prevention, and pause/resume support
 - **Persistent memory pool** — power-of-two bucketed buffer reuse with watermark eviction, reducing Metal allocation churn for iterative workloads
 - **NumPy interop** — `gpu.from_numpy(arr)` and `tensor.to_numpy()` for seamless data interchange with the Python ecosystem
+- **PyTorch interop** — `gpu.from_torch(tensor)` and `tensor.to_torch()` for bidirectional data exchange with PyTorch
 - **Resource limits** — configurable max tensor size, total GPU memory, and tensor count via `gpu.set_limits()` or env vars, enforced per-container and globally
 - **Lazy execution** — ops build a DAG, computation deferred until materialization
 - 14 GPU operations: add, sub, mul, div, neg, relu, exp, log, sqrt, matmul, softmax, transpose, scalar_mul, attention
-- 195 tests passing across all layers (119 Rust + 13 Swift + 76 Python)
+- 204 tests passing across all layers (119 Rust + 13 Swift + 85 Python)
 
 ### Multi-Container Scheduler
 
