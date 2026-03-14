@@ -1,8 +1,10 @@
 use pyo3::prelude::*;
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyTypeError, PyValueError};
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::Mutex;
+
+use numpy::{PyArray1, PyArrayDyn, PyArrayMethods, PyReadonlyArrayDyn, PyUntypedArrayMethods, IntoPyArray, IxDyn};
 
 use applegpu_core::lazy::LazyRuntime;
 use applegpu_core::tensor::Tensor;
@@ -48,6 +50,38 @@ impl GpuTensor {
     #[getter]
     fn id(&self) -> u64 {
         self.id
+    }
+
+    /// Read tensor data as a NumPy ndarray (float32) with the tensor's shape.
+    /// Auto-evaluates if the tensor is lazy.
+    fn to_numpy<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArrayDyn<f32>>> {
+        let runtime = get_device_runtime()?;
+        let mut rt = RUNTIME_LAZY.lock().unwrap();
+
+        // Auto-eval if lazy
+        if rt.is_pending(self.id) {
+            if let Some(ref socket_path) = runtime.socket_path {
+                rt.eval_remote(&runtime.device, self.id, socket_path)
+                    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            } else {
+                rt.eval(&runtime.device, self.id)
+                    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            }
+        }
+
+        let data = rt.read_f32(self.id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let shape = rt.shape(self.id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+        drop(rt); // release lock before creating numpy array
+
+        // Create 1D array then reshape to correct shape
+        let flat: Bound<'py, PyArray1<f32>> = data.into_pyarray_bound(py);
+        let nd_shape: Vec<usize> = shape;
+        let reshaped = flat.reshape(IxDyn(&nd_shape))
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(reshaped)
     }
 
     /// Read tensor data as a flat list of f32 values.
@@ -256,6 +290,35 @@ fn dtype_size(name: &str) -> PyResult<usize> {
         _ => return Err(PyValueError::new_err(format!("Unknown dtype: {}", name))),
     };
     Ok(dt.size_bytes())
+}
+
+/// Create a GpuTensor from a NumPy ndarray (float32, C-contiguous).
+/// Data is copied; mutations to the original array do not affect the tensor.
+#[pyfunction]
+#[pyo3(signature = (arr))]
+fn from_numpy(_py: Python<'_>, arr: &Bound<'_, pyo3::types::PyAny>) -> PyResult<GpuTensor> {
+    // Try to downcast to f32 array; give a clear error for other dtypes
+    let arr: PyReadonlyArrayDyn<'_, f32> = arr.extract()
+        .map_err(|_| PyTypeError::new_err(
+            "from_numpy requires a float32 ndarray. Use arr.astype(np.float32)."
+        ))?;
+
+    // as_slice returns Err if not C-contiguous
+    let data: Vec<f32> = arr.as_slice()
+        .map_err(|_| PyValueError::new_err(
+            "Array must be C-contiguous. Use np.ascontiguousarray()."
+        ))?
+        .to_vec();
+
+    let shape: Vec<usize> = arr.shape().to_vec();
+
+    let runtime = get_device_runtime()?;
+    let t = Tensor::from_f32(&runtime.device, shape, &data)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let id = t.meta.id;
+    RUNTIME_LAZY.lock().unwrap().insert_tensor(t)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(GpuTensor { id, destroyed: Cell::new(false) })
 }
 
 /// Create a tensor from data. Returns a GpuTensor object.
@@ -491,6 +554,7 @@ fn applegpu_runtime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(init_backend, m)?)?;
     m.add_function(wrap_pyfunction!(device_name, m)?)?;
     m.add_function(wrap_pyfunction!(dtype_size, m)?)?;
+    m.add_function(wrap_pyfunction!(from_numpy, m)?)?;
     m.add_function(wrap_pyfunction!(tensor, m)?)?;
     m.add_function(wrap_pyfunction!(eval, m)?)?;
     m.add_function(wrap_pyfunction!(to_list, m)?)?;
