@@ -119,3 +119,69 @@ func runUnaryOp(source: String, functionName: String, input: [Float]) -> [Float]
     #expect(outPtr[2] == 43)
     #expect(outPtr[3] == 50)
 }
+
+@Test func softmax2x3() {
+    let devicePtr = gpuBridgeCreateDevice()
+    guard let devicePtr = devicePtr else { return }
+    defer { gpuBridgeDestroyDevice(devicePtr) }
+
+    let computePtr = MetalKernels.softmax.withCString { src in
+        "softmax_f32".withCString { name in
+            gpuBridgeCreateCompute(devicePtr, src, name)
+        }
+    }
+    guard let computePtr = computePtr else { return }
+    defer { gpuBridgeDestroyCompute(computePtr) }
+
+    let input: [Float] = [1, 2, 3, 1, 1, 1]
+    let sizeBytes = UInt64(input.count * MemoryLayout<Float>.size)
+
+    let bufIn = input.withUnsafeBytes { gpuBridgeCreateBufferWithData(devicePtr, $0.baseAddress, sizeBytes) }
+    let bufOut = gpuBridgeCreateBuffer(devicePtr, sizeBytes)
+    guard let bufIn = bufIn, let bufOut = bufOut else { return }
+    defer { gpuBridgeDestroyBuffer(bufIn); gpuBridgeDestroyBuffer(bufOut) }
+
+    let result = gpuBridgeComputeSoftmax(computePtr, bufIn, bufOut, 2, 3)
+    #expect(result == 0)
+
+    let outPtr = gpuBridgeBufferContents(bufOut)!.bindMemory(to: Float.self, capacity: 6)
+    #expect(abs(outPtr[0] - 0.0900) < 0.001)
+    #expect(abs(outPtr[1] - 0.2447) < 0.001)
+    #expect(abs(outPtr[2] - 0.6652) < 0.001)
+    #expect(abs(outPtr[3] - 0.3333) < 0.001)
+    #expect(abs(outPtr[4] - 0.3333) < 0.001)
+    #expect(abs(outPtr[5] - 0.3333) < 0.001)
+}
+
+@Test func transpose2x3() {
+    let devicePtr = gpuBridgeCreateDevice()
+    guard let devicePtr = devicePtr else { return }
+    defer { gpuBridgeDestroyDevice(devicePtr) }
+
+    let computePtr = MetalKernels.transpose.withCString { src in
+        "transpose_f32".withCString { name in
+            gpuBridgeCreateCompute(devicePtr, src, name)
+        }
+    }
+    guard let computePtr = computePtr else { return }
+    defer { gpuBridgeDestroyCompute(computePtr) }
+
+    let input: [Float] = [1, 2, 3, 4, 5, 6]
+    let sizeBytes = UInt64(6 * MemoryLayout<Float>.size)
+
+    let bufIn = input.withUnsafeBytes { gpuBridgeCreateBufferWithData(devicePtr, $0.baseAddress, sizeBytes) }
+    let bufOut = gpuBridgeCreateBuffer(devicePtr, sizeBytes)
+    guard let bufIn = bufIn, let bufOut = bufOut else { return }
+    defer { gpuBridgeDestroyBuffer(bufIn); gpuBridgeDestroyBuffer(bufOut) }
+
+    let result = gpuBridgeComputeTranspose(computePtr, bufIn, bufOut, 2, 3)
+    #expect(result == 0)
+
+    let outPtr = gpuBridgeBufferContents(bufOut)!.bindMemory(to: Float.self, capacity: 6)
+    #expect(outPtr[0] == 1)
+    #expect(outPtr[1] == 4)
+    #expect(outPtr[2] == 2)
+    #expect(outPtr[3] == 5)
+    #expect(outPtr[4] == 3)
+    #expect(outPtr[5] == 6)
+}
