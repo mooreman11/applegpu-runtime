@@ -96,10 +96,11 @@ v0.1.0. Current capabilities:
 - **NumPy interop** — `gpu.from_numpy(arr)` and `tensor.to_numpy()` for seamless data interchange with the Python ecosystem
 - **PyTorch interop** — `gpu.from_torch(tensor)` and `tensor.to_torch()` for bidirectional data exchange with PyTorch
 - **Float16 support** — native half-precision kernels at 2x throughput on Apple Silicon, f32 accumulation for matmul/softmax, dtype-aware fusion
+- **Command buffer batching** — non-blocking GPU dispatch with single wait per eval, eliminating per-op GPU stalls in chain evaluations
 - **Resource limits** — configurable max tensor size, total GPU memory, and tensor count via `gpu.set_limits()` or env vars, enforced per-container and globally
 - **Lazy execution** — ops build a DAG, computation deferred until materialization
 - 14 GPU operations (f32 + f16): add, sub, mul, div, neg, relu, exp, log, sqrt, matmul, softmax, transpose, scalar_mul, attention
-- 233 tests passing across all layers (140 Rust + 13 Swift + 93 Python)
+- 250 tests passing across all layers (144 Rust + 13 Swift + 93 Python)
 
 ### NumPy & PyTorch Interop
 

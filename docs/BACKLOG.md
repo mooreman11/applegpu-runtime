@@ -50,10 +50,10 @@ Tracks what needs to be built, ordered by priority. Derived from the original sp
 ### 2. Concurrency (phased)
 _Eliminate GPU idle time between ops, then enable true parallel execution._
 
-**Phase 2a: Command buffer batching** _(in progress)_
-- [ ] **Shared device-level command queue** — single MTLCommandQueue per device, not per pipeline
-- [ ] **Non-blocking dispatch** — remove waitUntilCompleted() from individual ops, wait once at end of eval
-- [ ] **Spec:** `docs/superpowers/specs/2026-03-14-command-buffer-batching-design.md`
+**Phase 2a: Command buffer batching** _(DONE)_
+- [x] **Shared device-level command queue** — single MTLCommandQueue per device, not per pipeline
+- [x] **Non-blocking dispatch** — remove waitUntilCompleted() from individual ops, wait once at end of eval
+- [x] **Spec:** `docs/superpowers/specs/2026-03-14-command-buffer-batching-design.md`
 
 **Phase 2b: Single command buffer** _(future)_
 - [ ] **Encode all ops into one MTLCommandBuffer** — reduce CB creation overhead
