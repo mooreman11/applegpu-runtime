@@ -3,67 +3,41 @@ use pyo3::exceptions::PyValueError;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+use applegpu_core::lazy::LazyRuntime;
 use applegpu_core::tensor::Tensor;
 
-/// Global tensor storage. Tensors are stored by ID and accessed by opaque handle.
-static TENSORS: once_cell::sync::Lazy<Mutex<HashMap<u64, Tensor>>> =
-    once_cell::sync::Lazy::new(|| Mutex::new(HashMap::new()));
+/// Global lazy runtime.
+static RUNTIME_LAZY: once_cell::sync::Lazy<Mutex<LazyRuntime>> =
+    once_cell::sync::Lazy::new(|| Mutex::new(LazyRuntime::new()));
 
-/// Helper: run a binary op on two tensor IDs.
-fn binary_op_py(a_id: u64, b_id: u64, op: fn(&applegpu_core::device::Device, &Tensor, &Tensor) -> applegpu_core::error::Result<Tensor>) -> PyResult<u64> {
-    let runtime = applegpu_core::backend::get_runtime()
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-
-    let out = {
-        let tensors = TENSORS.lock().unwrap();
-        let a = tensors.get(&a_id).ok_or_else(|| PyValueError::new_err(format!("Tensor {} not found", a_id)))?;
-        let b = tensors.get(&b_id).ok_or_else(|| PyValueError::new_err(format!("Tensor {} not found", b_id)))?;
-        op(&runtime.device, a, b).map_err(|e| PyValueError::new_err(e.to_string()))?
-    };
-
-    let id = out.meta.id;
-    TENSORS.lock().unwrap().insert(id, out);
-    Ok(id)
+/// Helper: run a binary op (records in graph, does not execute).
+fn binary_op_py(a_id: u64, b_id: u64, op: fn(&mut LazyRuntime, u64, u64) -> applegpu_core::error::Result<u64>) -> PyResult<u64> {
+    let mut rt = RUNTIME_LAZY.lock().unwrap();
+    op(&mut rt, a_id, b_id).map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
-/// Helper: run a unary op on a tensor ID.
-fn unary_op_py(input_id: u64, op: fn(&applegpu_core::device::Device, &Tensor) -> applegpu_core::error::Result<Tensor>) -> PyResult<u64> {
-    let runtime = applegpu_core::backend::get_runtime()
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-
-    let out = {
-        let tensors = TENSORS.lock().unwrap();
-        let input = tensors.get(&input_id).ok_or_else(|| PyValueError::new_err(format!("Tensor {} not found", input_id)))?;
-        op(&runtime.device, input).map_err(|e| PyValueError::new_err(e.to_string()))?
-    };
-
-    let id = out.meta.id;
-    TENSORS.lock().unwrap().insert(id, out);
-    Ok(id)
+/// Helper: run a unary op (records in graph, does not execute).
+fn unary_op_py(input_id: u64, op: fn(&mut LazyRuntime, u64) -> applegpu_core::error::Result<u64>) -> PyResult<u64> {
+    let mut rt = RUNTIME_LAZY.lock().unwrap();
+    op(&mut rt, input_id).map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
-/// Returns the library version.
 #[pyfunction]
 fn version() -> &'static str {
     applegpu_core::version()
 }
 
-/// Initialize the GPU backend. Returns dict with backend info.
 #[pyfunction]
 fn init_backend() -> PyResult<HashMap<String, String>> {
     let runtime = applegpu_core::backend::init_backend()
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let mut info = HashMap::new();
-    info.insert(
-        "backend".to_string(),
-        format!("{:?}", runtime.backend).to_lowercase(),
-    );
+    info.insert("backend".to_string(), format!("{:?}", runtime.backend).to_lowercase());
     info.insert("device".to_string(), runtime.device.name());
     Ok(info)
 }
 
-/// Get the Metal GPU device name. Requires init_backend() first.
 #[pyfunction]
 fn device_name() -> PyResult<String> {
     let runtime = applegpu_core::backend::get_runtime()
@@ -71,7 +45,6 @@ fn device_name() -> PyResult<String> {
     Ok(runtime.device.name())
 }
 
-/// Get the size in bytes of a dtype by name.
 #[pyfunction]
 fn dtype_size(name: &str) -> PyResult<usize> {
     use applegpu_core::tensor::DType;
@@ -92,7 +65,7 @@ fn dtype_size(name: &str) -> PyResult<usize> {
     Ok(dt.size_bytes())
 }
 
-/// Create a tensor from a list of f32 values and a shape.
+/// Create a tensor from data (immediately materialized — this is input data).
 #[pyfunction]
 fn tensor(data: Vec<f32>, shape: Vec<usize>) -> PyResult<u64> {
     let runtime = applegpu_core::backend::get_runtime()
@@ -100,63 +73,78 @@ fn tensor(data: Vec<f32>, shape: Vec<usize>) -> PyResult<u64> {
     let t = Tensor::from_f32(&runtime.device, shape, &data)
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let id = t.meta.id;
-    TENSORS.lock().unwrap().insert(id, t);
+    RUNTIME_LAZY.lock().unwrap().insert_tensor(t);
     Ok(id)
 }
 
-/// Read tensor data as a flat list of f32 values.
+/// Explicitly evaluate a lazy tensor, materializing its result on the GPU.
+#[pyfunction]
+fn eval(tensor_id: u64) -> PyResult<()> {
+    let runtime = applegpu_core::backend::get_runtime()
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let mut rt = RUNTIME_LAZY.lock().unwrap();
+    rt.eval(&runtime.device, tensor_id)
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
+/// Read tensor data. Auto-evaluates if the tensor is lazy.
 #[pyfunction]
 fn to_list(tensor_id: u64) -> PyResult<Vec<f32>> {
-    let tensors = TENSORS.lock().unwrap();
-    let t = tensors
-        .get(&tensor_id)
-        .ok_or_else(|| PyValueError::new_err(format!("Tensor {} not found", tensor_id)))?;
-    Ok(t.as_f32_slice().to_vec())
+    let runtime = applegpu_core::backend::get_runtime()
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let mut rt = RUNTIME_LAZY.lock().unwrap();
+
+    // Auto-eval if pending
+    if rt.is_pending(tensor_id) {
+        rt.eval(&runtime.device, tensor_id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    }
+
+    rt.read_f32(tensor_id)
+        .map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
-/// Get the shape of a tensor as a list.
+/// Get shape (works on both materialized and lazy tensors).
 #[pyfunction]
 fn shape(tensor_id: u64) -> PyResult<Vec<usize>> {
-    let tensors = TENSORS.lock().unwrap();
-    let t = tensors
-        .get(&tensor_id)
-        .ok_or_else(|| PyValueError::new_err(format!("Tensor {} not found", tensor_id)))?;
-    Ok(t.meta.shape.dims().to_vec())
+    let rt = RUNTIME_LAZY.lock().unwrap();
+    rt.shape(tensor_id)
+        .map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
-// Binary ops
+/// Destroy a tensor, freeing its GPU buffer.
+/// Errors if pending graph ops depend on this tensor.
+#[pyfunction]
+fn destroy(tensor_id: u64) -> PyResult<()> {
+    let mut rt = RUNTIME_LAZY.lock().unwrap();
+    rt.destroy(tensor_id)
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
+// Binary ops (lazy — just record in graph)
 #[pyfunction]
 fn add(a_id: u64, b_id: u64) -> PyResult<u64> { binary_op_py(a_id, b_id, applegpu_core::ops::add) }
-
 #[pyfunction]
 fn sub(a_id: u64, b_id: u64) -> PyResult<u64> { binary_op_py(a_id, b_id, applegpu_core::ops::sub) }
-
 #[pyfunction]
 fn mul(a_id: u64, b_id: u64) -> PyResult<u64> { binary_op_py(a_id, b_id, applegpu_core::ops::mul) }
-
 #[pyfunction]
 fn div(a_id: u64, b_id: u64) -> PyResult<u64> { binary_op_py(a_id, b_id, applegpu_core::ops::div) }
-
 #[pyfunction]
 fn matmul(a_id: u64, b_id: u64) -> PyResult<u64> { binary_op_py(a_id, b_id, applegpu_core::ops::matmul) }
 
-// Unary ops
+// Unary ops (lazy)
 #[pyfunction]
 fn neg(input_id: u64) -> PyResult<u64> { unary_op_py(input_id, applegpu_core::ops::neg) }
-
 #[pyfunction]
 fn relu(input_id: u64) -> PyResult<u64> { unary_op_py(input_id, applegpu_core::ops::relu) }
-
 #[pyfunction]
 fn exp(input_id: u64) -> PyResult<u64> { unary_op_py(input_id, applegpu_core::ops::exp) }
-
 #[pyfunction]
 fn log(input_id: u64) -> PyResult<u64> { unary_op_py(input_id, applegpu_core::ops::log) }
-
 #[pyfunction]
 fn sqrt(input_id: u64) -> PyResult<u64> { unary_op_py(input_id, applegpu_core::ops::sqrt) }
 
-/// The Python module definition.
 #[pymodule]
 fn applegpu_runtime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(version, m)?)?;
@@ -164,8 +152,10 @@ fn applegpu_runtime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(device_name, m)?)?;
     m.add_function(wrap_pyfunction!(dtype_size, m)?)?;
     m.add_function(wrap_pyfunction!(tensor, m)?)?;
+    m.add_function(wrap_pyfunction!(eval, m)?)?;
     m.add_function(wrap_pyfunction!(to_list, m)?)?;
     m.add_function(wrap_pyfunction!(shape, m)?)?;
+    m.add_function(wrap_pyfunction!(destroy, m)?)?;
     m.add_function(wrap_pyfunction!(add, m)?)?;
     m.add_function(wrap_pyfunction!(sub, m)?)?;
     m.add_function(wrap_pyfunction!(mul, m)?)?;
