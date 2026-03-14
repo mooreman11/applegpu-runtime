@@ -15,7 +15,10 @@ build-rust: build-swift
 build-python: build-rust
 	uv run maturin develop
 
-build: build-swift build-rust build-python
+build-service: build-rust
+	cargo build -p applegpu-service
+
+build: build-swift build-rust build-python build-service
 
 test-rust: build-swift
 	cargo test -p applegpu-core
