@@ -12,6 +12,9 @@ Tracks what needs to be built, ordered by priority. Derived from the original sp
 - [x] **Compute Pipeline** — Command queue, MSL kernel compilation, element-wise dispatch
 - [x] **First GPU Operation** — `gpu.add(a, b)` end-to-end from Python through Metal
 - [x] **Buffer-backed Tensors** — Tensor with from_f32, to_list, shape
+- [x] **Element-wise ops** — sub, mul, div, neg, relu, exp, log, sqrt via KernelRegistry
+- [x] **Matrix multiply (matmul)** — 2D Metal kernel with shape validation
+- [x] **Ops module** — High-level tensor ops API with global kernel caching
 
 ## In Progress
 
@@ -19,9 +22,7 @@ _(nothing currently)_
 
 ## Up Next
 
-### Phase 3: Core GPU Operations
-- [ ] **Element-wise ops** — sub, mul, div, neg, relu, exp, log, sqrt
-- [ ] **Matrix multiply (matmul)** — 2D Metal kernel, tiled for performance
+### Phase 3b: Additional Operations
 - [ ] **Attention** — fused attention kernel (Q, K, V → output)
 
 ### Phase 4: Lazy Execution & Graph Capture
