@@ -4,6 +4,7 @@ use crate::compute::KernelRegistry;
 use crate::device::Device;
 use crate::error::{GpuError, Result};
 use crate::graph::{Graph, OpNode};
+use crate::limits::{MemoryTracker, ResourceLimits};
 use crate::tensor::Tensor;
 
 use once_cell::sync::Lazy;
@@ -16,6 +17,10 @@ pub struct LazyRuntime {
     tensors: HashMap<u64, Tensor>,
     /// Pending computation graph.
     graph: Graph,
+    /// Resource limits.
+    pub limits: ResourceLimits,
+    /// Memory usage tracker.
+    pub tracker: MemoryTracker,
 }
 
 impl LazyRuntime {
@@ -23,12 +28,19 @@ impl LazyRuntime {
         LazyRuntime {
             tensors: HashMap::new(),
             graph: Graph::new(),
+            limits: ResourceLimits::from_env(),
+            tracker: MemoryTracker::new(),
         }
     }
 
     /// Store a materialized tensor (e.g., from user data).
-    pub fn insert_tensor(&mut self, tensor: Tensor) {
+    /// Checks resource limits before inserting.
+    pub fn insert_tensor(&mut self, tensor: Tensor) -> Result<()> {
+        let size = tensor.buffer.len();
+        self.tracker.check_allocation(size, &self.limits)?;
+        self.tracker.track_alloc(size);
         self.tensors.insert(tensor.meta.id, tensor);
+        Ok(())
     }
 
     /// Record a lazy operation. Returns the output node ID.
@@ -94,6 +106,9 @@ impl LazyRuntime {
             })?;
 
             let result = self.execute_node(device, &node)?;
+            let size = result.buffer.len();
+            self.tracker.check_allocation(size, &self.limits)?;
+            self.tracker.track_alloc(size);
             self.tensors.insert(node_id, result);
         }
 
@@ -254,7 +269,9 @@ impl LazyRuntime {
         match response {
             crate::serial::EvalResponse::Ok { tensor_id, shape, data } => {
                 let buffer = crate::buffer::Buffer::from_bytes(device, &data)?;
+                let size = buffer.len();
                 let tensor = Tensor::from_raw(tensor_id, shape, buffer);
+                self.tracker.track_alloc(size);
                 self.tensors.insert(tensor_id, tensor);
 
                 // Remove evaluated nodes from graph
@@ -281,9 +298,23 @@ impl LazyRuntime {
                 )));
             }
         }
-        self.tensors.remove(&id);
+        if let Some(tensor) = self.tensors.remove(&id) {
+            self.tracker.track_free(tensor.buffer.len());
+        }
         self.graph.remove_node(id);
         Ok(())
+    }
+
+    pub fn memory_usage(&self) -> usize {
+        self.tracker.memory_usage()
+    }
+
+    pub fn live_tensor_count(&self) -> usize {
+        self.tracker.tensor_count()
+    }
+
+    pub fn set_limits(&mut self, limits: ResourceLimits) {
+        self.limits = limits;
     }
 }
 
@@ -303,7 +334,7 @@ mod tests {
         let mut rt = LazyRuntime::new();
         let t = Tensor::from_f32(&device, vec![4], &[1.0, 2.0, 3.0, 4.0]).unwrap();
         let id = t.meta.id;
-        rt.insert_tensor(t);
+        rt.insert_tensor(t).unwrap();
         assert!(rt.is_materialized(id));
         assert!(!rt.is_pending(id));
     }
@@ -317,8 +348,8 @@ mod tests {
         let b = Tensor::from_f32(&device, vec![4], &[10.0, 20.0, 30.0, 40.0]).unwrap();
         let a_id = a.meta.id;
         let b_id = b.meta.id;
-        rt.insert_tensor(a);
-        rt.insert_tensor(b);
+        rt.insert_tensor(a).unwrap();
+        rt.insert_tensor(b).unwrap();
 
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(500_000);
@@ -349,7 +380,7 @@ mod tests {
 
         let a = Tensor::from_f32(&device, vec![4], &[1.0, -2.0, 3.0, -4.0]).unwrap();
         let a_id = a.meta.id;
-        rt.insert_tensor(a);
+        rt.insert_tensor(a).unwrap();
 
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(600_000);
@@ -389,7 +420,7 @@ mod tests {
         let mut rt = LazyRuntime::new();
         let t = Tensor::from_f32(&device, vec![4], &[1.0, 2.0, 3.0, 4.0]).unwrap();
         let id = t.meta.id;
-        rt.insert_tensor(t);
+        rt.insert_tensor(t).unwrap();
         assert!(rt.exists(id));
         rt.destroy(id).unwrap();
         assert!(!rt.exists(id));

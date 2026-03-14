@@ -24,8 +24,8 @@ fn serialize_and_execute_remotely_in_process() {
     let a_bytes: Vec<u8> = a.as_f32_slice().iter().flat_map(|f| f.to_le_bytes()).collect();
     let b_bytes: Vec<u8> = b.as_f32_slice().iter().flat_map(|f| f.to_le_bytes()).collect();
 
-    client_rt.insert_tensor(a);
-    client_rt.insert_tensor(b);
+    client_rt.insert_tensor(a).unwrap();
+    client_rt.insert_tensor(b).unwrap();
 
     let sum_id = ops::add(&mut client_rt, a_id, b_id).unwrap();
     let relu_id = ops::relu(&mut client_rt, sum_id).unwrap();
@@ -54,7 +54,7 @@ fn serialize_and_execute_remotely_in_process() {
     for td in &received.tensors {
         let buffer = Buffer::from_bytes(&device, &td.data).unwrap();
         let tensor = Tensor::from_raw(td.id, td.shape.clone(), buffer);
-        server_rt.insert_tensor(tensor);
+        server_rt.insert_tensor(tensor).unwrap();
     }
     for node in &received.nodes {
         let _ = server_rt.record_op(node.clone());
@@ -83,8 +83,8 @@ fn serialize_matmul_remotely() {
     let a_bytes: Vec<u8> = a.as_f32_slice().iter().flat_map(|f| f.to_le_bytes()).collect();
     let b_bytes: Vec<u8> = b.as_f32_slice().iter().flat_map(|f| f.to_le_bytes()).collect();
 
-    client_rt.insert_tensor(a);
-    client_rt.insert_tensor(b);
+    client_rt.insert_tensor(a).unwrap();
+    client_rt.insert_tensor(b).unwrap();
 
     let c_id = ops::matmul(&mut client_rt, a_id, b_id).unwrap();
 
@@ -109,7 +109,7 @@ fn serialize_matmul_remotely() {
     for td in &received.tensors {
         let buffer = Buffer::from_bytes(&device, &td.data).unwrap();
         let tensor = Tensor::from_raw(td.id, td.shape.clone(), buffer);
-        server_rt.insert_tensor(tensor);
+        server_rt.insert_tensor(tensor).unwrap();
     }
     for node in &received.nodes {
         let _ = server_rt.record_op(node.clone());

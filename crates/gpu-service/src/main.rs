@@ -15,7 +15,9 @@ fn handle_request(device: &Device, request: &EvalRequest) -> EvalResponse {
         match Buffer::from_bytes(device, &td.data) {
             Ok(buffer) => {
                 let tensor = Tensor::from_raw(td.id, td.shape.clone(), buffer);
-                rt.insert_tensor(tensor);
+                if let Err(e) = rt.insert_tensor(tensor) {
+                    return EvalResponse::Err(format!("Insert tensor failed: {}", e));
+                }
             }
             Err(e) => return EvalResponse::Err(format!("Buffer allocation failed: {}", e)),
         }

@@ -15,8 +15,8 @@ fn fused_add_relu() {
     let b = Tensor::from_f32(&device, vec![4], &[10.0, 20.0, 30.0, 40.0]).unwrap();
     let a_id = a.meta.id;
     let b_id = b.meta.id;
-    rt.insert_tensor(a);
-    rt.insert_tensor(b);
+    rt.insert_tensor(a).unwrap();
+    rt.insert_tensor(b).unwrap();
 
     // add -> relu should be fused into a single kernel
     let sum_id = ops::add(&mut rt, a_id, b_id).unwrap();
@@ -37,7 +37,7 @@ fn fused_chain_of_three() {
 
     let a = Tensor::from_f32(&device, vec![4], &[1.0, 4.0, 9.0, 16.0]).unwrap();
     let a_id = a.meta.id;
-    rt.insert_tensor(a);
+    rt.insert_tensor(a).unwrap();
 
     // sqrt -> neg -> relu should be fused
     let sqrt_id = ops::sqrt(&mut rt, a_id).unwrap();
@@ -63,8 +63,8 @@ fn unfused_matmul_not_affected() {
     let b = Tensor::from_f32(&device, vec![2, 2], &[5.0, 6.0, 7.0, 8.0]).unwrap();
     let a_id = a.meta.id;
     let b_id = b.meta.id;
-    rt.insert_tensor(a);
-    rt.insert_tensor(b);
+    rt.insert_tensor(a).unwrap();
+    rt.insert_tensor(b).unwrap();
 
     // matmul can't be fused but should still work
     let c_id = ops::matmul(&mut rt, a_id, b_id).unwrap();

@@ -231,8 +231,8 @@ mod tests {
         let b = Tensor::from_f32(&device, vec![4], &[10.0, 20.0, 30.0, 40.0]).unwrap();
         let a_id = a.meta.id;
         let b_id = b.meta.id;
-        rt.insert_tensor(a);
-        rt.insert_tensor(b);
+        rt.insert_tensor(a).unwrap();
+        rt.insert_tensor(b).unwrap();
 
         let c_id = add(&mut rt, a_id, b_id).unwrap();
         assert!(rt.is_pending(c_id));
@@ -250,8 +250,8 @@ mod tests {
         let b = Tensor::from_f32(&device, vec![4], &[10.0, 20.0, 30.0, 40.0]).unwrap();
         let a_id = a.meta.id;
         let b_id = b.meta.id;
-        rt.insert_tensor(a);
-        rt.insert_tensor(b);
+        rt.insert_tensor(a).unwrap();
+        rt.insert_tensor(b).unwrap();
 
         let sum_id = add(&mut rt, a_id, b_id).unwrap();
         let prod_id = mul(&mut rt, sum_id, a_id).unwrap();
@@ -269,8 +269,8 @@ mod tests {
         let b = Tensor::from_f32(&device, vec![2, 2], &[5.0, 6.0, 7.0, 8.0]).unwrap();
         let a_id = a.meta.id;
         let b_id = b.meta.id;
-        rt.insert_tensor(a);
-        rt.insert_tensor(b);
+        rt.insert_tensor(a).unwrap();
+        rt.insert_tensor(b).unwrap();
 
         let c_id = matmul(&mut rt, a_id, b_id).unwrap();
         rt.eval(&device, c_id).unwrap();
@@ -287,8 +287,8 @@ mod tests {
         let b = Tensor::from_f32(&device, vec![3], &[1.0, 2.0, 3.0]).unwrap();
         let a_id = a.meta.id;
         let b_id = b.meta.id;
-        rt.insert_tensor(a);
-        rt.insert_tensor(b);
+        rt.insert_tensor(a).unwrap();
+        rt.insert_tensor(b).unwrap();
 
         let result = add(&mut rt, a_id, b_id);
         assert!(result.is_err());
@@ -301,7 +301,7 @@ mod tests {
 
         let a = Tensor::from_f32(&device, vec![2, 3], &[1.0, 2.0, 3.0, 1.0, 1.0, 1.0]).unwrap();
         let a_id = a.meta.id;
-        rt.insert_tensor(a);
+        rt.insert_tensor(a).unwrap();
 
         let s_id = softmax(&mut rt, a_id).unwrap();
         rt.eval(&device, s_id).unwrap();
@@ -320,7 +320,7 @@ mod tests {
 
         let a = Tensor::from_f32(&device, vec![2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
         let a_id = a.meta.id;
-        rt.insert_tensor(a);
+        rt.insert_tensor(a).unwrap();
 
         let t_id = transpose(&mut rt, a_id).unwrap();
         assert_eq!(rt.shape(t_id).unwrap(), vec![3, 2]);
@@ -341,9 +341,9 @@ mod tests {
         let q_id = q.meta.id;
         let k_id = k.meta.id;
         let v_id = v.meta.id;
-        rt.insert_tensor(q);
-        rt.insert_tensor(k);
-        rt.insert_tensor(v);
+        rt.insert_tensor(q).unwrap();
+        rt.insert_tensor(k).unwrap();
+        rt.insert_tensor(v).unwrap();
 
         let out_id = attention(&mut rt, q_id, k_id, v_id).unwrap();
         assert_eq!(rt.shape(out_id).unwrap(), vec![2, 2]);
