@@ -31,28 +31,25 @@ Tracks what needs to be built, ordered by priority. Derived from the original sp
 - [x] **ScalarMul** — element-wise scalar multiplication (carries scale in graph node)
 - [x] **Attention** — scaled dot-product attention: `softmax(Q @ K^T / sqrt(d_k)) @ V`
 - [x] **Resource limits** — max tensor size, max GPU memory, max tensor count with MemoryTracker
+- [x] **Multi-container scheduler** — priority-based fair queuing, per-container quotas, starvation prevention, pause/resume, job lifecycle
+- [x] **Memory pools** — power-of-two bucketed BufferPool with watermark eviction
+- [x] **NumPy adapter** — `gpu.from_numpy(arr)` and `tensor.to_numpy()`, copy-based, f32 only
 
-### Phase 6: Multi-Container Scheduler
-- [ ] **Priority queues** — per-container/VM scheduling
-- [ ] **Dynamic batching** — batch ops across containers for better GPU utilization
-- [ ] **Fairness enforcement** — memory limits and fair execution
+## In Progress
 
-### Phase 7b: AVF VM Integration
-- [ ] **AVF VM creation** — Apple Virtualization Framework VM lifecycle management
-- [ ] **VM isolation** — snapshots, DDP, multi-node simulation
+_(nothing currently)_
 
-### Graph Optimizations
-- [ ] **Persistent memory pools** — reduce GPU allocation overhead via buffer reuse
+## Up Next
 
-### Phase 5b: Resource Limits
-- [ ] **Resource limits** — max tensor size, max GPU memory, per-container rate limits
-
-### Phase 6: Multi-Container Scheduler
-- [ ] **Priority queues** — per-container/VM scheduling
-- [ ] **Dynamic batching** — batch ops across containers for better GPU utilization
-- [ ] **Fairness enforcement** — memory limits and fair execution
-
-### Phase 8: Framework Adapters (Optional)
-- [ ] **NumPy adapter** — map NumPy ops to gpu ops
-- [ ] **PyTorch adapter** — custom device backend
+### Phase 8: Framework Adapters (continued)
+- [ ] **PyTorch adapter** — `gpu.from_torch(tensor)`, `tensor.to_torch()`, copy-based
 - [ ] **Transformers adapter** — drop-in acceleration for HuggingFace models
+
+### Multi-dtype Support
+- [ ] **Multi-dtype adapters** — extend from_numpy/to_numpy to support float16, float64, int8, int32 (adapter layer only, ~1-2 hours)
+- [ ] **Multi-dtype compute kernels** — MSL kernel variants for float16/float64/int types (larger lift, touches all kernels + dispatch)
+
+### Post-Ship
+- [ ] **Phase 7b: AVF VM integration** — VZVirtualMachine lifecycle, virtio-vsock transport (Metal GPU can't pass through to guest VMs)
+- [ ] **Zero-copy from_numpy** — Metal bytesNoCopy FFI, page alignment, GC pinning
+- [ ] **Dynamic container lifecycle** — work stealing, multi-node, distributed graph
