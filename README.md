@@ -86,10 +86,40 @@ Active development. Current capabilities:
 - **Kernel fusion** — auto-detects element-wise chains, generates fused MSL kernels at runtime
 - **GpuTensor class** with Python operators (`+`, `-`, `*`, `/`, `@`, unary `-`) and auto-cleanup
 - **Scaled dot-product attention** — `gpu.attention(Q, K, V)` with proper 1/sqrt(d_k) scaling
-- **Resource limits** — configurable max tensor size, total GPU memory, and tensor count via `gpu.set_limits()` or env vars
+- **Multi-container scheduler** — priority-based fair queuing with per-container resource quotas, deficit-based scheduling, starvation prevention, and pause/resume support
+- **Resource limits** — configurable max tensor size, total GPU memory, and tensor count via `gpu.set_limits()` or env vars, enforced per-container and globally
 - **Lazy execution** — ops build a DAG, computation deferred until materialization
 - 14 GPU operations: add, sub, mul, div, neg, relu, exp, log, sqrt, matmul, softmax, transpose, scalar_mul, attention
-- 134 tests passing across all layers (64 Rust + 13 Swift + 57 Python)
+- 166 tests passing across all layers (101 Rust + 13 Swift + 65 Python)
+
+### Multi-Container Scheduler
+
+```python
+import applegpu_runtime as gpu
+gpu.init_backend()
+
+# Register containers with resource quotas and priorities
+high = gpu.register_container(priority="high", max_memory_mb=256, max_tensors=500, max_pending=50)
+low = gpu.register_container(priority="low", max_memory_mb=128, max_tensors=200, max_pending=20)
+
+# Create lazy tensors and submit jobs to containers
+a = gpu.tensor([1.0, 2.0, 3.0], shape=[3])
+b = gpu.tensor([4.0, 5.0, 6.0], shape=[3])
+c = a + b  # lazy
+
+job_id = gpu.submit_job(high, c)        # submit to high-priority container
+gpu.run_next()                          # executes highest-priority job
+print(gpu.job_status(job_id))           # "completed"
+print(gpu.container_usage(high))        # (bytes_used, tensor_count)
+
+# Pause/resume containers
+gpu.pause_container(low)                # paused container's jobs are skipped
+gpu.resume_container(low)
+
+# Cleanup
+gpu.deregister_container(high)
+gpu.deregister_container(low)
+```
 
 ### VM Backend Usage
 

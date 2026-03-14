@@ -28,7 +28,7 @@ def test_tensor_size_limit():
         t = gpu.tensor([1.0] * 300000, shape=[300000])
         assert False, "Should have raised"
     except ValueError as e:
-        assert "Resource limit exceeded" in str(e)
+        assert "limit" in str(e).lower() or "quota" in str(e).lower()
     # Reset to unlimited
     gpu.set_limits(max_tensor_size_mb=0, max_memory_mb=0, max_tensors=0)
 
@@ -43,7 +43,7 @@ def test_tensor_count_limit():
             created.append(gpu.tensor([float(i)], shape=[1]))
         assert False, "Should have raised"
     except ValueError as e:
-        assert "Resource limit exceeded" in str(e)
+        assert "limit" in str(e).lower() or "quota" in str(e).lower()
     # Reset
     gpu.set_limits(max_tensor_size_mb=0, max_memory_mb=0, max_tensors=0)
 
