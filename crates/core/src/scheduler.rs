@@ -353,6 +353,246 @@ impl Scheduler {
         container.paused = false;
         Ok(())
     }
+
+    // ── Task 7: Resource tracking ──────────────────────────────────────
+
+    /// Atomically check limits and register a tensor for a container.
+    pub fn allocate_tensor(&mut self, container_id: ContainerId, tensor_id: u64, size_bytes: usize) -> Result<()> {
+        let container = self.containers.get(&container_id)
+            .ok_or_else(|| GpuError::ContainerNotFound(container_id.to_string()))?;
+
+        // Check per-container limits
+        container.tracker.check_allocation(size_bytes, &container.limits)
+            .map_err(|_| GpuError::ContainerQuotaExceeded(format!(
+                "{}: would exceed container memory/tensor limits", container_id
+            )))?;
+
+        // Check global limits
+        self.global_tracker.check_allocation(size_bytes, &self.global_limits)?;
+
+        // Both checks passed — update both trackers
+        let container = self.containers.get_mut(&container_id).unwrap();
+        container.tracker.track_alloc(size_bytes);
+        container.tensor_ids.insert(tensor_id);
+        self.global_tracker.track_alloc(size_bytes);
+        self.tensor_owners.insert(tensor_id, container_id);
+
+        Ok(())
+    }
+
+    /// Free a tensor. Looks up the owning container. No-op if tensor is unknown.
+    pub fn free_tensor(&mut self, tensor_id: u64, size_bytes: usize) {
+        if let Some(container_id) = self.tensor_owners.remove(&tensor_id) {
+            if let Some(container) = self.containers.get_mut(&container_id) {
+                container.tracker.track_free(size_bytes);
+                container.tensor_ids.remove(&tensor_id);
+            }
+            self.global_tracker.track_free(size_bytes);
+        }
+    }
+
+    /// Look up which container owns a tensor.
+    pub fn tensor_owner(&self, tensor_id: u64) -> Option<ContainerId> {
+        self.tensor_owners.get(&tensor_id).copied()
+    }
+
+    // ── Task 8: Job submission ─────────────────────────────────────────
+
+    pub fn submit(&mut self, container_id: ContainerId, target_tensor_id: u64) -> Result<JobId> {
+        let container = self.containers.get(&container_id)
+            .ok_or_else(|| GpuError::ContainerNotFound(container_id.to_string()))?;
+
+        if container.paused {
+            return Err(GpuError::ContainerPaused(container_id.to_string()));
+        }
+
+        if container.pending_jobs >= container.config.max_pending_jobs {
+            return Err(GpuError::AdmissionRejected(format!(
+                "{}: pending jobs {} >= max {}",
+                container_id, container.pending_jobs, container.config.max_pending_jobs
+            )));
+        }
+
+        let job_id = JobId(self.next_job_id);
+        self.next_job_id += 1;
+
+        let priority = container.config.priority;
+        let job = Job {
+            id: job_id,
+            container_id,
+            target_tensor_id,
+            submitted_at: Instant::now(),
+            priority,
+        };
+
+        let tier = priority as usize;
+        self.queues[tier]
+            .entry(container_id)
+            .or_insert_with(VecDeque::new)
+            .push_back(job);
+
+        self.jobs.insert(job_id, (container_id, JobStatus::Queued));
+        self.containers.get_mut(&container_id).unwrap().pending_jobs += 1;
+
+        Ok(job_id)
+    }
+
+    pub fn job_status(&self, job_id: JobId) -> Option<&(ContainerId, JobStatus)> {
+        self.jobs.get(&job_id)
+    }
+
+    // ── Task 9: Job scheduling with fairness ───────────────────────────
+
+    pub fn next_job(&mut self) -> Option<Job> {
+        // Starvation prevention: promote starved lower-tier jobs
+        self.promote_starved_jobs();
+
+        // Scan tiers High -> Normal -> Low
+        for tier_idx in 0..3 {
+            if self.queues[tier_idx].is_empty() {
+                continue;
+            }
+
+            // Find the non-paused container with the lowest cumulative_exec_time_ns
+            let mut best_container: Option<ContainerId> = None;
+            let mut best_time = u64::MAX;
+
+            for (&cid, queue) in self.queues[tier_idx].iter() {
+                if queue.is_empty() {
+                    continue;
+                }
+                if let Some(container) = self.containers.get(&cid) {
+                    if container.paused {
+                        continue;
+                    }
+                    if container.cumulative_exec_time_ns < best_time {
+                        best_time = container.cumulative_exec_time_ns;
+                        best_container = Some(cid);
+                    }
+                }
+            }
+
+            if let Some(cid) = best_container {
+                let queue = self.queues[tier_idx].get_mut(&cid).unwrap();
+                if let Some(job) = queue.pop_front() {
+                    if queue.is_empty() {
+                        self.queues[tier_idx].remove(&cid);
+                    }
+
+                    let job_id = job.id;
+                    self.jobs.insert(job_id, (cid, JobStatus::Running {
+                        started_at: Instant::now(),
+                    }));
+
+                    if let Some(container) = self.containers.get_mut(&cid) {
+                        container.last_scheduled_at = Some(Instant::now());
+                    }
+
+                    return Some(job);
+                }
+            }
+        }
+
+        None
+    }
+
+    fn promote_starved_jobs(&mut self) {
+        let now = Instant::now();
+        let threshold = self.starvation_threshold_ns;
+
+        // Check tiers Low (2) and Normal (1) for starvation
+        for tier_idx in (1..=2).rev() {
+            let mut to_promote: Vec<ContainerId> = Vec::new();
+
+            for (&cid, queue) in &self.queues[tier_idx] {
+                if queue.is_empty() {
+                    continue;
+                }
+                if let Some(container) = self.containers.get(&cid) {
+                    if container.paused {
+                        continue;
+                    }
+                    let reference_time = container.last_scheduled_at
+                        .unwrap_or(container.created_at);
+                    let elapsed = now.duration_since(reference_time).as_nanos() as u64;
+                    let starved = elapsed > threshold;
+                    if starved {
+                        to_promote.push(cid);
+                    }
+                }
+            }
+
+            // Promote oldest job from each starved container
+            for cid in to_promote {
+                if let Some(queue) = self.queues[tier_idx].get_mut(&cid) {
+                    if let Some(mut job) = queue.pop_front() {
+                        if queue.is_empty() {
+                            self.queues[tier_idx].remove(&cid);
+                        }
+                        let target_tier = tier_idx - 1;
+                        job.priority = match target_tier {
+                            0 => Priority::High,
+                            1 => Priority::Normal,
+                            _ => Priority::Low,
+                        };
+                        self.queues[target_tier]
+                            .entry(cid)
+                            .or_insert_with(VecDeque::new)
+                            .push_back(job);
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Task 10: Job completion and failure ─────────────────────────────
+
+    pub fn complete_job(&mut self, job_id: JobId, exec_time_ns: u64) -> Result<()> {
+        let (container_id, status) = self.jobs.get(&job_id)
+            .ok_or_else(|| GpuError::JobNotFound(job_id.to_string()))?;
+
+        if !matches!(status, JobStatus::Running { .. }) {
+            return Err(GpuError::JobNotFound(format!(
+                "{} is not in Running state", job_id
+            )));
+        }
+
+        let container_id = *container_id;
+
+        self.jobs.insert(job_id, (container_id, JobStatus::Completed {
+            tensor_id: 0,
+            exec_time_ns,
+        }));
+
+        if let Some(container) = self.containers.get_mut(&container_id) {
+            container.cumulative_exec_time_ns += exec_time_ns;
+            container.total_jobs_completed += 1;
+            container.pending_jobs = container.pending_jobs.saturating_sub(1);
+        }
+
+        Ok(())
+    }
+
+    pub fn fail_job(&mut self, job_id: JobId, error: String) -> Result<()> {
+        let (container_id, status) = self.jobs.get(&job_id)
+            .ok_or_else(|| GpuError::JobNotFound(job_id.to_string()))?;
+
+        if !matches!(status, JobStatus::Running { .. }) {
+            return Err(GpuError::JobNotFound(format!(
+                "{} is not in Running state", job_id
+            )));
+        }
+
+        let container_id = *container_id;
+
+        self.jobs.insert(job_id, (container_id, JobStatus::Failed { error }));
+
+        if let Some(container) = self.containers.get_mut(&container_id) {
+            container.pending_jobs = container.pending_jobs.saturating_sub(1);
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -462,5 +702,274 @@ mod tests {
     fn test_pause_unknown_container() {
         let mut sched = Scheduler::new(test_limits());
         assert!(sched.pause_container(ContainerId(99)).is_err());
+    }
+
+    // Task 7 tests
+    #[test]
+    fn test_allocate_tensor_per_container() {
+        let mut sched = Scheduler::new(test_limits());
+        let id = sched.register_container(test_config()).unwrap();
+        sched.allocate_tensor(id, 1, 1024).unwrap();
+        assert_eq!(sched.container_usage(id), Some((1024, 1)));
+        assert_eq!(sched.global_usage(), (1024, 1));
+    }
+
+    #[test]
+    fn test_allocate_tensor_exceeds_container_quota() {
+        let limits = ResourceLimits {
+            max_tensor_size_bytes: 0,
+            max_total_memory_bytes: 10_000,
+            max_tensor_count: 100,
+        };
+        let mut sched = Scheduler::new(limits);
+        let config = ContainerConfig {
+            priority: Priority::Normal,
+            max_memory_bytes: 500,
+            max_tensor_count: 10,
+            max_tensor_size_bytes: 0,
+            max_pending_jobs: 10,
+        };
+        let id = sched.register_container(config).unwrap();
+        sched.allocate_tensor(id, 1, 400).unwrap();
+        assert!(sched.allocate_tensor(id, 2, 200).is_err());
+    }
+
+    #[test]
+    fn test_free_tensor() {
+        let mut sched = Scheduler::new(test_limits());
+        sched.allocate_tensor(ContainerId::DEFAULT, 1, 1024).unwrap();
+        assert_eq!(sched.global_usage(), (1024, 1));
+        sched.free_tensor(1, 1024);
+        assert_eq!(sched.global_usage(), (0, 0));
+    }
+
+    #[test]
+    fn test_free_unknown_tensor() {
+        let mut sched = Scheduler::new(test_limits());
+        sched.free_tensor(999, 1024);
+        assert_eq!(sched.global_usage(), (0, 0));
+    }
+
+    #[test]
+    fn test_container_isolation() {
+        let limits = ResourceLimits {
+            max_tensor_size_bytes: 0,
+            max_total_memory_bytes: 10_000,
+            max_tensor_count: 100,
+        };
+        let mut sched = Scheduler::new(limits);
+        let config_a = ContainerConfig {
+            priority: Priority::Normal,
+            max_memory_bytes: 500,
+            max_tensor_count: 10,
+            max_tensor_size_bytes: 0,
+            max_pending_jobs: 10,
+        };
+        let config_b = ContainerConfig {
+            priority: Priority::Normal,
+            max_memory_bytes: 500,
+            max_tensor_count: 10,
+            max_tensor_size_bytes: 0,
+            max_pending_jobs: 10,
+        };
+        let a = sched.register_container(config_a).unwrap();
+        let b = sched.register_container(config_b).unwrap();
+        sched.allocate_tensor(a, 1, 500).unwrap();
+        assert!(sched.allocate_tensor(a, 2, 100).is_err());
+        assert!(sched.allocate_tensor(b, 3, 400).is_ok());
+    }
+
+    #[test]
+    fn test_register_tensor_ownership() {
+        let mut sched = Scheduler::new(test_limits());
+        let id = sched.register_container(test_config()).unwrap();
+        sched.allocate_tensor(id, 42, 256).unwrap();
+        assert!(sched.containers.get(&id).unwrap().tensor_ids.contains(&42));
+        assert_eq!(sched.tensor_owner(42), Some(id));
+    }
+
+    // Task 8 tests
+    #[test]
+    fn test_submit_job() {
+        let mut sched = Scheduler::new(test_limits());
+        let job_id = sched.submit(ContainerId::DEFAULT, 42).unwrap();
+        assert_eq!(sched.queue_depth(), 1);
+        assert!(matches!(sched.job_status(job_id), Some(&(_, JobStatus::Queued))));
+    }
+
+    #[test]
+    fn test_submit_rejects_paused() {
+        let mut sched = Scheduler::new(test_limits());
+        let id = sched.register_container(test_config()).unwrap();
+        sched.pause_container(id).unwrap();
+        assert!(sched.submit(id, 42).is_err());
+    }
+
+    #[test]
+    fn test_submit_admission_control() {
+        let mut sched = Scheduler::new(test_limits());
+        let config = ContainerConfig {
+            priority: Priority::Normal,
+            max_memory_bytes: 2 * 1024 * 1024,
+            max_tensor_count: 20,
+            max_tensor_size_bytes: 0,
+            max_pending_jobs: 2,
+        };
+        let id = sched.register_container(config).unwrap();
+        sched.submit(id, 1).unwrap();
+        sched.submit(id, 2).unwrap();
+        assert!(sched.submit(id, 3).is_err());
+    }
+
+    // Task 9 tests
+    #[test]
+    fn test_priority_ordering() {
+        let mut sched = Scheduler::new(test_limits());
+        let high_config = ContainerConfig {
+            priority: Priority::High, max_memory_bytes: 1024*1024,
+            max_tensor_count: 10, max_tensor_size_bytes: 0, max_pending_jobs: 10,
+        };
+        let low_config = ContainerConfig {
+            priority: Priority::Low, max_memory_bytes: 1024*1024,
+            max_tensor_count: 10, max_tensor_size_bytes: 0, max_pending_jobs: 10,
+        };
+        let low_id = sched.register_container(low_config).unwrap();
+        let high_id = sched.register_container(high_config).unwrap();
+        sched.submit(low_id, 1).unwrap();
+        sched.submit(high_id, 2).unwrap();
+        let job = sched.next_job().unwrap();
+        assert_eq!(job.container_id, high_id);
+    }
+
+    #[test]
+    fn test_fairness_within_tier() {
+        let mut sched = Scheduler::new(test_limits());
+        let config_a = ContainerConfig {
+            priority: Priority::Normal, max_memory_bytes: 1024*1024,
+            max_tensor_count: 10, max_tensor_size_bytes: 0, max_pending_jobs: 10,
+        };
+        let config_b = ContainerConfig {
+            priority: Priority::Normal, max_memory_bytes: 1024*1024,
+            max_tensor_count: 10, max_tensor_size_bytes: 0, max_pending_jobs: 10,
+        };
+        let a = sched.register_container(config_a).unwrap();
+        let b = sched.register_container(config_b).unwrap();
+        sched.containers.get_mut(&a).unwrap().cumulative_exec_time_ns = 1000;
+        sched.containers.get_mut(&b).unwrap().cumulative_exec_time_ns = 100;
+        sched.submit(a, 1).unwrap();
+        sched.submit(b, 2).unwrap();
+        let job = sched.next_job().unwrap();
+        assert_eq!(job.container_id, b);
+    }
+
+    #[test]
+    fn test_pause_skips_container() {
+        let mut sched = Scheduler::new(test_limits());
+        let id = sched.register_container(test_config()).unwrap();
+        sched.submit(id, 1).unwrap();
+        sched.pause_container(id).unwrap();
+        assert!(sched.next_job().is_none());
+    }
+
+    #[test]
+    fn test_next_job_empty_queue() {
+        let mut sched = Scheduler::new(test_limits());
+        assert!(sched.next_job().is_none());
+    }
+
+    #[test]
+    fn test_starvation_prevention() {
+        use std::time::Duration;
+
+        let limits = test_limits();
+        // Use a large default threshold so normal scheduling isn't affected
+        let mut sched = Scheduler::new(limits);
+        let high_config = ContainerConfig {
+            priority: Priority::High, max_memory_bytes: 1024*1024,
+            max_tensor_count: 10, max_tensor_size_bytes: 0, max_pending_jobs: 10,
+        };
+        let low_config = ContainerConfig {
+            priority: Priority::Low, max_memory_bytes: 1024*1024,
+            max_tensor_count: 10, max_tensor_size_bytes: 0, max_pending_jobs: 10,
+        };
+        let high_id = sched.register_container(high_config).unwrap();
+        let low_id = sched.register_container(low_config).unwrap();
+        sched.submit(low_id, 1).unwrap();
+        sched.submit(high_id, 2).unwrap();
+
+        // High priority job runs first (no starvation yet, threshold is 10s)
+        let job1 = sched.next_job().unwrap();
+        assert_eq!(job1.container_id, high_id);
+        sched.complete_job(job1.id, 1000).unwrap();
+
+        // Submit another high-priority job
+        sched.submit(high_id, 3).unwrap();
+
+        // Now simulate starvation: set the low container's created_at far in the past
+        // and lower the threshold so the low container is detected as starved.
+        sched.starvation_threshold_ns = 1; // 1 nanosecond threshold
+        sched.containers.get_mut(&low_id).unwrap().created_at =
+            Instant::now() - Duration::from_millis(100);
+
+        // Low-priority job should get promoted and win by fairness (exec_time 0 < 1000)
+        let job2 = sched.next_job().unwrap();
+        assert_eq!(job2.container_id, low_id);
+    }
+
+    // Task 10 tests
+    #[test]
+    fn test_job_status_transitions() {
+        let mut sched = Scheduler::new(test_limits());
+        let job_id = sched.submit(ContainerId::DEFAULT, 42).unwrap();
+        assert!(matches!(sched.job_status(job_id), Some(&(_, JobStatus::Queued))));
+        let _job = sched.next_job().unwrap();
+        assert!(matches!(sched.job_status(job_id), Some(&(_, JobStatus::Running { .. }))));
+        sched.complete_job(job_id, 5000).unwrap();
+        assert!(matches!(sched.job_status(job_id), Some(&(_, JobStatus::Completed { .. }))));
+    }
+
+    #[test]
+    fn test_complete_job_not_running() {
+        let mut sched = Scheduler::new(test_limits());
+        let job_id = sched.submit(ContainerId::DEFAULT, 42).unwrap();
+        assert!(sched.complete_job(job_id, 5000).is_err());
+    }
+
+    #[test]
+    fn test_complete_already_completed() {
+        let mut sched = Scheduler::new(test_limits());
+        let job_id = sched.submit(ContainerId::DEFAULT, 42).unwrap();
+        let _job = sched.next_job().unwrap();
+        sched.complete_job(job_id, 5000).unwrap();
+        assert!(sched.complete_job(job_id, 5000).is_err());
+    }
+
+    #[test]
+    fn test_fail_job() {
+        let mut sched = Scheduler::new(test_limits());
+        let job_id = sched.submit(ContainerId::DEFAULT, 42).unwrap();
+        let _job = sched.next_job().unwrap();
+        sched.fail_job(job_id, "eval error".to_string()).unwrap();
+        assert!(matches!(sched.job_status(job_id), Some(&(_, JobStatus::Failed { .. }))));
+    }
+
+    #[test]
+    fn test_deregister_rejects_running_jobs() {
+        let mut sched = Scheduler::new(test_limits());
+        let id = sched.register_container(test_config()).unwrap();
+        sched.submit(id, 42).unwrap();
+        let _job = sched.next_job().unwrap();
+        assert!(sched.deregister_container(id).is_err());
+    }
+
+    #[test]
+    fn test_deregister_drains_queued_jobs() {
+        let mut sched = Scheduler::new(test_limits());
+        let id = sched.register_container(test_config()).unwrap();
+        sched.submit(id, 1).unwrap();
+        sched.submit(id, 2).unwrap();
+        assert_eq!(sched.queue_depth(), 2);
+        sched.deregister_container(id).unwrap();
+        assert_eq!(sched.queue_depth(), 0);
     }
 }
