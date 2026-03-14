@@ -21,9 +21,9 @@ Swift Compat Layer ←  Metal, AVF, Apple frameworks via @_cdecl C ABI
    Metal GPU
 ```
 
-- **Rust ↔ Swift bridge**: Swift exports C ABI functions via `@_cdecl`, Rust calls them via `extern "C"` in `crates/core/src/ffi.rs`. The C header is at `swift/Sources/AppleGPUBridge/include/bridge.h`.
+- **Rust ↔ Swift bridge**: Swift exports C ABI functions via `@_cdecl`, Rust calls them via `extern "C"` in `crates/core/src/ffi.rs`. The C header is at `swift/Sources/AppleGPUBridge/include/bridge.h`. `build.rs` compiles the Swift static library and links it automatically.
 - **Rust ↔ Python bridge**: PyO3 cdylib in `crates/python/`, maturin builds it. The Python package is in `python/applegpu_runtime/`.
-- The three layers are currently independent (FFI not yet linked). Phase 2 will wire them via `build.rs`.
+- **Important**: The PyO3 cdylib cannot be built via `cargo build --workspace` (missing Python symbols). Use `cargo build -p applegpu-core` for Rust-only builds, and `uv run maturin develop` for the Python extension.
 
 ## Build & Test Commands
 
@@ -35,7 +35,7 @@ make setup            # or: uv sync
 make test
 
 # Run individual test suites
-make test-rust        # cargo test --workspace
+make test-rust        # cargo test -p applegpu-core
 make test-swift       # cd swift && swift test
 make test-python      # uv run pytest -v
 
@@ -51,7 +51,12 @@ make check
 
 ## Key Files
 
-- `crates/core/src/ffi.rs` — Rust-Swift FFI boundary (extern "C" declarations matching bridge.h)
+- `crates/core/src/ffi.rs` — Rust-Swift FFI boundary (extern "C" declarations + safe wrappers)
+- `crates/core/src/device.rs` — RAII Device wrapper with Drop-based cleanup
+- `crates/core/src/backend.rs` — Backend enum, Runtime, init_backend() with OnceCell
+- `crates/core/src/tensor.rs` — DType, Shape, TensorMeta, TensorLocation types
+- `crates/core/src/error.rs` — GpuError enum and Result alias
+- `crates/core/build.rs` — Compiles Swift static lib and links it into Rust
 - `swift/Sources/AppleGPUBridge/bridge.swift` — Swift side of C ABI bridge (@_cdecl exports)
 - `swift/Sources/AppleGPUBridge/include/bridge.h` — shared C header for the FFI contract
 - `crates/python/src/lib.rs` — PyO3 module definition (Python-facing API surface)
