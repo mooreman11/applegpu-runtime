@@ -18,11 +18,16 @@ pub enum OpKind {
     Sqrt,
     // Matrix multiply
     Matmul,
+    /// A fused chain of element-wise ops. Contains runtime-generated MSL.
+    FusedElementwise {
+        kernel_source: String,
+        function_name: String,
+    },
 }
 
 impl OpKind {
     /// Map to the MSL kernel function name.
-    pub fn kernel_name(&self) -> &'static str {
+    pub fn kernel_name(&self) -> &str {
         match self {
             OpKind::Add => "elementwise_add",
             OpKind::Sub => "elementwise_sub",
@@ -34,6 +39,7 @@ impl OpKind {
             OpKind::Log => "elementwise_log",
             OpKind::Sqrt => "elementwise_sqrt",
             OpKind::Matmul => "matmul_f32",
+            OpKind::FusedElementwise { ref function_name, .. } => function_name.as_str(),
         }
     }
 
@@ -43,6 +49,15 @@ impl OpKind {
 
     pub fn is_matmul(&self) -> bool {
         matches!(self, OpKind::Matmul)
+    }
+
+    pub fn is_fused(&self) -> bool {
+        matches!(self, OpKind::FusedElementwise { .. })
+    }
+
+    pub fn is_elementwise(&self) -> bool {
+        matches!(self, OpKind::Add | OpKind::Sub | OpKind::Mul | OpKind::Div |
+                       OpKind::Neg | OpKind::Relu | OpKind::Exp | OpKind::Log | OpKind::Sqrt)
     }
 }
 
@@ -140,6 +155,13 @@ impl Graph {
         }
         // If not in graph, it's a materialized tensor — skip
         Ok(())
+    }
+
+    /// Count how many nodes in the graph consume a given node's output.
+    pub fn ref_count(&self, id: u64) -> usize {
+        self.nodes.values()
+            .filter(|node| node.inputs.contains(&id))
+            .count()
     }
 
     /// Number of pending nodes.
