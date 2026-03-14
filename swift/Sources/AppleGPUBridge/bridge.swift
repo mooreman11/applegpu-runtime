@@ -42,3 +42,9 @@ public func gpuBridgeDeviceName(_ ptr: UnsafeRawPointer?) -> UnsafePointer<CChar
     let device = Unmanaged<GPUDevice>.fromOpaque(ptr).takeUnretainedValue()
     return device.namePtr
 }
+
+/// Internal helper: extract GPUDevice from opaque handle.
+/// Used by buffer.swift and compute.swift.
+func getGPUDevice(from ptr: UnsafeRawPointer) -> GPUDevice {
+    Unmanaged<GPUDevice>.fromOpaque(ptr).takeUnretainedValue()
+}
