@@ -1,6 +1,7 @@
 """Apple GPU Runtime - Unified API for GPU operations on Apple Silicon."""
 
 from applegpu_runtime.applegpu_runtime import (
+    GpuTensor,
     version,
     init_backend,
     device_name,
@@ -24,6 +25,7 @@ from applegpu_runtime.applegpu_runtime import (
 
 __version__ = version()
 __all__ = [
+    "GpuTensor",
     "version",
     "init_backend",
     "device_name",
