@@ -222,4 +222,13 @@ void* gpu_bridge_compute_embedding_nb(
     uint32_t embed_dim
 );
 
+// Non-blocking blit copy: returns command buffer handle.
+void* gpu_bridge_blit_copy_nb(
+    GPUDeviceHandle* device,
+    void* queue,
+    GPUBufferHandle* src_buf,
+    GPUBufferHandle* dst_buf,
+    uint64_t size_bytes
+);
+
 #endif

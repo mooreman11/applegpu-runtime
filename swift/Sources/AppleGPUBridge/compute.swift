@@ -961,6 +961,28 @@ public func gpuBridgeComputeLayerNormNB(
     return Unmanaged.passRetained(commandBuffer as AnyObject).toOpaque()
 }
 
+@_cdecl("gpu_bridge_blit_copy_nb")
+public func gpuBridgeBlitCopyNonBlocking(
+    _ deviceHandle: UnsafeMutableRawPointer,
+    _ queueHandle: UnsafeMutableRawPointer,
+    _ srcBuf: UnsafeMutableRawPointer,
+    _ dstBuf: UnsafeMutableRawPointer,
+    _ sizeBytes: UInt64
+) -> UnsafeMutableRawPointer? {
+    let queue = Unmanaged<MTLCommandQueue>.fromOpaque(queueHandle).takeUnretainedValue()
+    let src = Unmanaged<GPUBuffer>.fromOpaque(srcBuf).takeUnretainedValue()
+    let dst = Unmanaged<GPUBuffer>.fromOpaque(dstBuf).takeUnretainedValue()
+
+    guard let commandBuffer = queue.makeCommandBuffer(),
+          let blitEncoder = commandBuffer.makeBlitCommandEncoder() else { return nil }
+
+    blitEncoder.copy(from: src.buffer, sourceOffset: 0, to: dst.buffer, destinationOffset: 0, size: Int(sizeBytes))
+    blitEncoder.endEncoding()
+    commandBuffer.commit()
+
+    return Unmanaged.passRetained(commandBuffer as AnyObject).toOpaque()
+}
+
 @_cdecl("gpu_bridge_compute_embedding_nb")
 public func gpuBridgeComputeEmbeddingNB(
     _ computePtr: UnsafeMutableRawPointer?,

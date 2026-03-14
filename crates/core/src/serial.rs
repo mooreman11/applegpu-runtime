@@ -72,6 +72,7 @@ fn op_to_discriminant(op: &OpKind) -> u32 {
         OpKind::Gelu => 14,
         OpKind::LayerNorm { .. } => 15,
         OpKind::Embedding => 16,
+        OpKind::Reshape { .. } => 17,
     }
 }
 
@@ -116,6 +117,14 @@ fn discriminant_to_op(d: u32, r: &mut impl Read) -> io::Result<OpKind> {
             Ok(OpKind::LayerNorm { eps: f32::from_le_bytes(eps_bytes) })
         }
         16 => Ok(OpKind::Embedding),
+        17 => {
+            let ndims = read_u32(r)? as usize;
+            let mut new_shape = Vec::with_capacity(ndims);
+            for _ in 0..ndims {
+                new_shape.push(read_u64(r)? as usize);
+            }
+            Ok(OpKind::Reshape { new_shape })
+        }
         _ => Err(io::Error::new(io::ErrorKind::InvalidData, format!("Unknown op type: {}", d))),
     }
 }
@@ -165,6 +174,12 @@ impl EvalRequest {
             }
             if let OpKind::LayerNorm { eps } = node.op {
                 buf.write_all(&eps.to_le_bytes()).unwrap();
+            }
+            if let OpKind::Reshape { ref new_shape } = node.op {
+                write_u32(&mut buf, new_shape.len() as u32).unwrap();
+                for &d in new_shape {
+                    write_u64(&mut buf, d as u64).unwrap();
+                }
             }
         }
 

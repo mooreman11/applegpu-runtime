@@ -246,6 +246,14 @@ extern "C" {
         embed_dim: u32,
     ) -> *mut std::ffi::c_void;
 
+    pub fn gpu_bridge_blit_copy_nb(
+        device: *mut GPUDeviceHandle,
+        queue: *mut std::ffi::c_void,
+        src: *mut GPUBufferHandle,
+        dst: *mut GPUBufferHandle,
+        size_bytes: u64,
+    ) -> *mut std::ffi::c_void;
+
     pub fn gpu_bridge_compute_fused_nb(
         compute: *mut GPUComputeHandle,
         queue: *mut std::ffi::c_void,

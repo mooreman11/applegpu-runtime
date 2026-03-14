@@ -306,6 +306,22 @@ impl GpuTensor {
         Ok(GpuTensor { id, destroyed: Cell::new(false) })
     }
 
+    #[pyo3(signature = (scale))]
+    fn scalar_mul(&self, scale: f32) -> PyResult<GpuTensor> {
+        let mut rt = RUNTIME_LAZY.lock().unwrap();
+        let id = applegpu_core::ops::scalar_mul(&mut rt, self.id, scale)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(GpuTensor { id, destroyed: Cell::new(false) })
+    }
+
+    #[pyo3(signature = (new_shape))]
+    fn reshape(&self, new_shape: Vec<usize>) -> PyResult<GpuTensor> {
+        let mut rt = RUNTIME_LAZY.lock().unwrap();
+        let id = applegpu_core::ops::reshape(&mut rt, self.id, new_shape)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(GpuTensor { id, destroyed: Cell::new(false) })
+    }
+
     // Binary ops
 
     fn add(&self, other: &GpuTensor) -> PyResult<GpuTensor> {
@@ -582,6 +598,10 @@ fn log(t: &GpuTensor) -> PyResult<GpuTensor> { t.log() }
 #[pyfunction]
 fn sqrt(t: &GpuTensor) -> PyResult<GpuTensor> { t.sqrt() }
 #[pyfunction]
+fn scalar_mul(t: &GpuTensor, scale: f32) -> PyResult<GpuTensor> { t.scalar_mul(scale) }
+#[pyfunction]
+fn reshape(t: &GpuTensor, new_shape: Vec<usize>) -> PyResult<GpuTensor> { t.reshape(new_shape) }
+#[pyfunction]
 fn softmax(t: &GpuTensor) -> PyResult<GpuTensor> { t.softmax() }
 #[pyfunction]
 fn transpose(t: &GpuTensor) -> PyResult<GpuTensor> { t.transpose() }
@@ -766,6 +786,8 @@ fn applegpu_runtime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(exp, m)?)?;
     m.add_function(wrap_pyfunction!(log, m)?)?;
     m.add_function(wrap_pyfunction!(sqrt, m)?)?;
+    m.add_function(wrap_pyfunction!(scalar_mul, m)?)?;
+    m.add_function(wrap_pyfunction!(reshape, m)?)?;
     m.add_function(wrap_pyfunction!(softmax, m)?)?;
     m.add_function(wrap_pyfunction!(transpose, m)?)?;
     m.add_function(wrap_pyfunction!(gelu, m)?)?;

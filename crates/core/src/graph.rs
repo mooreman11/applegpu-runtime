@@ -34,6 +34,8 @@ pub enum OpKind {
     Gelu,
     LayerNorm { eps: f32 },
     Embedding,
+    // Shape ops (data copy, no compute kernel)
+    Reshape { new_shape: Vec<usize> },
 }
 
 impl OpKind {
@@ -57,6 +59,7 @@ impl OpKind {
             OpKind::Gelu => "gelu_f32",
             OpKind::LayerNorm { .. } => "layer_norm_f32",
             OpKind::Embedding => "embedding_f32",
+            OpKind::Reshape { .. } => "reshape",
         }
     }
 
@@ -99,6 +102,10 @@ impl OpKind {
 
     pub fn is_embedding(&self) -> bool {
         matches!(self, OpKind::Embedding)
+    }
+
+    pub fn is_reshape(&self) -> bool {
+        matches!(self, OpKind::Reshape { .. })
     }
 }
 

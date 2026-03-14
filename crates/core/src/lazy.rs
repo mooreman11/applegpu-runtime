@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use crate::compute::KernelRegistry;
 use crate::device::Device;
 use crate::error::{GpuError, Result};
+use crate::ffi;
 use crate::graph::{Graph, OpNode};
 use crate::limits::ResourceLimits;
 use crate::pool::BufferPool;
@@ -250,6 +251,28 @@ impl LazyRuntime {
             return Ok(out);
         }
 
+        if node.op.is_reshape() {
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+            let input = self.get_tensor(node.inputs[0])?;
+            let size_bytes = input.meta.size_bytes();
+            let queue = crate::compute::get_shared_queue(device);
+            let cb = unsafe {
+                ffi::gpu_bridge_blit_copy_nb(
+                    device.raw_handle() as *mut _,
+                    queue,
+                    input.buffer.raw_handle(),
+                    out.buffer.raw_handle(),
+                    size_bytes as u64,
+                )
+            };
+            if cb.is_null() {
+                return Err(GpuError::ComputeFailed("Blit copy failed".to_string()));
+            }
+            crate::compute::wait_command_buffer(cb);
+            return Ok(out);
+        }
+
         if node.op.is_unary() {
             let out_buf = self.pool.acquire(device, out_size)?;
             let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
@@ -364,6 +387,24 @@ impl LazyRuntime {
             let seq_len = indices.meta.shape.dims()[0];
             let embed_dim = weights.meta.shape.dims()[1];
             return REGISTRY.dispatch_embedding_typed_nb(device, dtype, queue, &weights.buffer, &indices.buffer, &out.buffer, seq_len, embed_dim);
+        }
+
+        if node.op.is_reshape() {
+            let input = self.get_tensor(node.inputs[0])?;
+            let size_bytes = input.meta.size_bytes();
+            let cb = unsafe {
+                ffi::gpu_bridge_blit_copy_nb(
+                    device.raw_handle() as *mut _,
+                    queue,
+                    input.buffer.raw_handle(),
+                    out.buffer.raw_handle(),
+                    size_bytes as u64,
+                )
+            };
+            if cb.is_null() {
+                return Err(GpuError::ComputeFailed("Blit copy failed".to_string()));
+            }
+            return Ok(cb);
         }
 
         if node.op.is_unary() {

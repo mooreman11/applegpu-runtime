@@ -217,6 +217,30 @@ pub fn scalar_mul(rt: &mut LazyRuntime, input_id: u64, scale: f32) -> Result<u64
     Ok(out_id)
 }
 
+/// Reshape a tensor without changing its data. Validates element count matches.
+pub fn reshape(rt: &mut LazyRuntime, input_id: u64, new_shape: Vec<usize>) -> Result<u64> {
+    let old_shape = rt.shape(input_id)?;
+    let old_numel: usize = old_shape.iter().product();
+    let new_numel: usize = new_shape.iter().product();
+    if old_numel != new_numel {
+        return Err(GpuError::InvalidTensor(format!(
+            "Cannot reshape: old shape {:?} has {} elements, new shape {:?} has {}",
+            old_shape, old_numel, new_shape, new_numel
+        )));
+    }
+    let dtype = rt.dtype(input_id)?;
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op: OpKind::Reshape { new_shape: new_shape.clone() },
+        inputs: vec![input_id],
+        out_shape: Shape::new(new_shape),
+        out_dtype: dtype,
+        container_id: ContainerId::DEFAULT,
+    });
+    Ok(out_id)
+}
+
 pub fn gelu(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
     lazy_unary_op(rt, input_id, OpKind::Gelu)
 }
@@ -805,6 +829,61 @@ mod tests {
 
         let result = layer_norm(&mut rt, i_id, g_id, b_id, 1e-5);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_reshape_preserves_data() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        let t = Tensor::from_f32(&device, vec![6], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
+        let id = t.meta.id;
+        rt.insert_tensor(t).unwrap();
+        let reshaped_id = crate::ops::reshape(&mut rt, id, vec![2, 3]).unwrap();
+        rt.eval(&device, reshaped_id).unwrap();
+        assert_eq!(rt.shape(reshaped_id).unwrap(), vec![2, 3]);
+        assert_eq!(rt.read_f32(reshaped_id).unwrap(), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn test_reshape_validates_numel() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        let t = Tensor::from_f32(&device, vec![6], &[1.0; 6]).unwrap();
+        let id = t.meta.id;
+        rt.insert_tensor(t).unwrap();
+        assert!(crate::ops::reshape(&mut rt, id, vec![2, 2]).is_err());
+    }
+
+    #[test]
+    fn test_reshape_f16() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        use half::f16;
+        let data: Vec<u16> = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0].iter().map(|&x| f16::from_f32(x).to_bits()).collect();
+        let t = Tensor::from_f16(&device, vec![6], &data).unwrap();
+        let id = t.meta.id;
+        rt.insert_tensor(t).unwrap();
+        let reshaped_id = crate::ops::reshape(&mut rt, id, vec![3, 2]).unwrap();
+        rt.eval(&device, reshaped_id).unwrap();
+        assert_eq!(rt.shape(reshaped_id).unwrap(), vec![3, 2]);
+        let result = rt.read_f16(reshaped_id).unwrap();
+        let result_f32: Vec<f32> = result.iter().map(|&b| f16::from_bits(b).to_f32()).collect();
+        assert_eq!(result_f32, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn test_reshape_chain_with_op() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        let t = Tensor::from_f32(&device, vec![6], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
+        let id = t.meta.id;
+        rt.insert_tensor(t).unwrap();
+        // reshape [6] -> [2, 3], then negate
+        let reshaped_id = crate::ops::reshape(&mut rt, id, vec![2, 3]).unwrap();
+        let neg_id = crate::ops::neg(&mut rt, reshaped_id).unwrap();
+        rt.eval(&device, neg_id).unwrap();
+        assert_eq!(rt.shape(neg_id).unwrap(), vec![2, 3]);
+        assert_eq!(rt.read_f32(neg_id).unwrap(), &[-1.0, -2.0, -3.0, -4.0, -5.0, -6.0]);
     }
 
     #[test]
