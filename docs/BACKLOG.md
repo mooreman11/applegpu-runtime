@@ -21,6 +21,7 @@ Tracks what needs to be built, ordered by priority. Derived from the original sp
 - [x] **Tensor cleanup** — `gpu.destroy()` with dependency validation
 - [x] **Explicit eval** — `gpu.eval()` for manual materialization
 - [x] **GpuTensor class** — PyO3 class with operators (+,-,*,/,@), methods, auto-cleanup via Drop
+- [x] **Kernel fusion** — auto-detect element-wise chains, generate fused MSL kernels at runtime
 
 ## In Progress
 
@@ -28,8 +29,7 @@ _(nothing currently)_
 
 ## Up Next
 
-### Phase 4b: Graph Optimizations
-- [ ] **Kernel fusion** — combine compatible ops into single Metal kernels (e.g. matmul+add+relu)
+### Graph Optimizations
 - [ ] **Persistent memory pools** — reduce GPU allocation overhead via buffer reuse
 
 ### Phase 3b: Additional Operations

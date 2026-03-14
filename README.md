@@ -81,10 +81,10 @@ make test-python   # uv run pytest -v
 
 Active development. Current capabilities:
 
+- **Kernel fusion** — auto-detects chains of element-wise ops and generates fused MSL kernels at runtime (e.g., `(a + b).relu()` becomes a single `out[id] = max(a[id] + b[id], 0.0f)` dispatch)
 - **GpuTensor class** with Python operators (`+`, `-`, `*`, `/`, `@`, unary `-`) and auto-cleanup
 - **Lazy execution** — ops build a DAG, computation deferred until materialization
-- Topological sort with cycle detection for graph evaluation
 - 10 GPU operations: add, sub, mul, div, neg, relu, exp, log, sqrt, matmul
 - KernelRegistry with Arc-based pipeline caching (lock-free GPU dispatch)
 - Metal buffer management with zero-copy shared memory (`storageModeShared`)
-- 93 tests passing across all layers (39 Rust + 11 Swift + 43 Python)
+- 105 tests passing across all layers (48 Rust + 11 Swift + 46 Python)
