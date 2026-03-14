@@ -30,6 +30,8 @@ static RUNTIME: OnceCell<Runtime> = OnceCell::new();
 pub struct Runtime {
     pub backend: Backend,
     pub device: Device,
+    /// Socket path for VM backend IPC (None for MLX backend).
+    pub socket_path: Option<String>,
 }
 
 /// Initialize the GPU backend. Reads `APPLEGPU_BACKEND` env var,
@@ -41,9 +43,16 @@ pub fn init_backend() -> Result<&'static Runtime> {
             .and_then(|s| s.parse().ok())
             .unwrap_or(Backend::Mlx);
 
+        let socket_path = if backend == Backend::Vm {
+            Some(std::env::var("APPLEGPU_SOCKET")
+                .unwrap_or_else(|_| crate::ipc::default_socket_path()))
+        } else {
+            None
+        };
+
         let device = Device::new()?;
 
-        Ok(Runtime { backend, device })
+        Ok(Runtime { backend, device, socket_path })
     })
 }
 

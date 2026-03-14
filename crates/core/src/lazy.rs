@@ -177,6 +177,74 @@ impl LazyRuntime {
         Ok(t.as_f32_slice().to_vec())
     }
 
+    /// Evaluate a tensor via the remote GPU service (VM backend).
+    /// Serializes the graph + input tensors, sends over IPC, receives result.
+    pub fn eval_remote(&mut self, device: &Device, id: u64, socket_path: &str) -> Result<()> {
+        if self.is_materialized(id) {
+            return Ok(());
+        }
+
+        let order = self.graph.topo_sort(id)?;
+        if order.is_empty() {
+            return Err(GpuError::GraphError(format!("Tensor {} not found", id)));
+        }
+
+        // Collect input tensors needed by the graph
+        let mut tensor_data = Vec::new();
+        let mut needed_tensors = std::collections::HashSet::new();
+        for &node_id in &order {
+            if let Some(node) = self.graph.get_node(node_id) {
+                for &input_id in &node.inputs {
+                    if !self.graph.has_node(input_id) && !needed_tensors.contains(&input_id) {
+                        needed_tensors.insert(input_id);
+                        if let Some(t) = self.tensors.get(&input_id) {
+                            let data = t.as_f32_slice();
+                            let bytes: Vec<u8> = data.iter().flat_map(|f| f.to_le_bytes()).collect();
+                            tensor_data.push(crate::serial::TensorData {
+                                id: input_id,
+                                shape: t.meta.shape.dims().to_vec(),
+                                dtype: t.meta.dtype,
+                                data: bytes,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // Collect graph nodes (unfused — fusion runs server-side)
+        let nodes: Vec<crate::graph::OpNode> = order.iter()
+            .filter_map(|&nid| self.graph.get_node(nid).cloned())
+            .collect();
+
+        let request = crate::serial::EvalRequest {
+            target_id: id,
+            tensors: tensor_data,
+            nodes,
+        };
+
+        // Send to GPU service
+        let response = crate::ipc::eval_remote(socket_path, &request)?;
+
+        match response {
+            crate::serial::EvalResponse::Ok { tensor_id, shape, data } => {
+                let buffer = crate::buffer::Buffer::from_bytes(device, &data)?;
+                let tensor = Tensor::from_raw(tensor_id, shape, buffer);
+                self.tensors.insert(tensor_id, tensor);
+
+                // Remove evaluated nodes from graph
+                for &nid in &order {
+                    self.graph.remove_node(nid);
+                }
+
+                Ok(())
+            }
+            crate::serial::EvalResponse::Err(msg) => {
+                Err(GpuError::ComputeFailed(format!("Remote eval failed: {}", msg)))
+            }
+        }
+    }
+
     /// Destroy a tensor, freeing its GPU buffer.
     /// Errors if any pending graph node depends on this tensor.
     pub fn destroy(&mut self, id: u64) -> Result<()> {
