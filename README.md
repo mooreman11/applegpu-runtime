@@ -81,10 +81,26 @@ make test-python   # uv run pytest -v
 
 Active development. Current capabilities:
 
-- **Kernel fusion** — auto-detects chains of element-wise ops and generates fused MSL kernels at runtime (e.g., `(a + b).relu()` becomes a single `out[id] = max(a[id] + b[id], 0.0f)` dispatch)
+- **Two backends** — MLX-native (direct Metal) and VM (IPC to GPU service process)
+- **VM backend** — graph serialization over Unix sockets to a standalone `gpu-service` binary
+- **Kernel fusion** — auto-detects element-wise chains, generates fused MSL kernels at runtime
 - **GpuTensor class** with Python operators (`+`, `-`, `*`, `/`, `@`, unary `-`) and auto-cleanup
 - **Lazy execution** — ops build a DAG, computation deferred until materialization
 - 10 GPU operations: add, sub, mul, div, neg, relu, exp, log, sqrt, matmul
-- KernelRegistry with Arc-based pipeline caching (lock-free GPU dispatch)
-- Metal buffer management with zero-copy shared memory (`storageModeShared`)
-- 105 tests passing across all layers (48 Rust + 11 Swift + 46 Python)
+- 112 tests passing across all layers (55 Rust + 11 Swift + 46 Python)
+
+### VM Backend Usage
+
+```bash
+# Terminal 1: Start GPU service
+cargo run -p applegpu-service
+
+# Terminal 2: Use VM backend
+APPLEGPU_BACKEND=vm python3 -c "
+import applegpu_runtime as gpu
+gpu.init_backend()
+a = gpu.tensor([1.0, 2.0, 3.0], shape=[3])
+b = gpu.tensor([10.0, 20.0, 30.0], shape=[3])
+print((a + b).to_list())  # [11.0, 22.0, 33.0] — executed on GPU service
+"
+```
