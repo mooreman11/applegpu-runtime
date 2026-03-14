@@ -4,7 +4,8 @@ use crate::compute::KernelRegistry;
 use crate::device::Device;
 use crate::error::{GpuError, Result};
 use crate::graph::{Graph, OpNode};
-use crate::limits::{MemoryTracker, ResourceLimits};
+use crate::limits::ResourceLimits;
+use crate::scheduler::{ContainerId, Scheduler};
 use crate::tensor::Tensor;
 
 use once_cell::sync::Lazy;
@@ -17,10 +18,8 @@ pub struct LazyRuntime {
     tensors: HashMap<u64, Tensor>,
     /// Pending computation graph.
     graph: Graph,
-    /// Resource limits.
-    pub limits: ResourceLimits,
-    /// Memory usage tracker.
-    pub tracker: MemoryTracker,
+    /// Multi-container scheduler (single resource authority).
+    pub scheduler: Scheduler,
 }
 
 impl LazyRuntime {
@@ -28,18 +27,26 @@ impl LazyRuntime {
         LazyRuntime {
             tensors: HashMap::new(),
             graph: Graph::new(),
-            limits: ResourceLimits::from_env(),
-            tracker: MemoryTracker::new(),
+            scheduler: Scheduler::new(ResourceLimits::from_env()),
         }
     }
 
     /// Store a materialized tensor (e.g., from user data).
-    /// Checks resource limits before inserting.
+    /// Checks resource limits before inserting. Uses default container.
     pub fn insert_tensor(&mut self, tensor: Tensor) -> Result<()> {
         let size = tensor.buffer.len();
-        self.tracker.check_allocation(size, &self.limits)?;
-        self.tracker.track_alloc(size);
-        self.tensors.insert(tensor.meta.id, tensor);
+        let id = tensor.meta.id;
+        self.scheduler.allocate_tensor(ContainerId::DEFAULT, id, size)?;
+        self.tensors.insert(id, tensor);
+        Ok(())
+    }
+
+    /// Insert a tensor attributed to a specific container.
+    pub fn insert_tensor_for(&mut self, tensor: Tensor, container_id: ContainerId) -> Result<()> {
+        let size = tensor.buffer.len();
+        let id = tensor.meta.id;
+        self.scheduler.allocate_tensor(container_id, id, size)?;
+        self.tensors.insert(id, tensor);
         Ok(())
     }
 
@@ -88,6 +95,8 @@ impl LazyRuntime {
             return Ok(()); // already done
         }
 
+        let container_id = self.resolve_container(id);
+
         let mut order = self.graph.topo_sort(id)?;
         if order.is_empty() {
             return Err(GpuError::GraphError(format!("Tensor {} not found", id)));
@@ -107,12 +116,22 @@ impl LazyRuntime {
 
             let result = self.execute_node(device, &node)?;
             let size = result.buffer.len();
-            self.tracker.check_allocation(size, &self.limits)?;
-            self.tracker.track_alloc(size);
+            self.scheduler.allocate_tensor(container_id, node_id, size)?;
             self.tensors.insert(node_id, result);
         }
 
         Ok(())
+    }
+
+    /// Resolve the container that owns (or will own) a tensor.
+    fn resolve_container(&self, id: u64) -> ContainerId {
+        if let Some(cid) = self.scheduler.tensor_owner(id) {
+            return cid;
+        }
+        if let Some(node) = self.graph.get_node(id) {
+            return node.container_id;
+        }
+        ContainerId::DEFAULT
     }
 
     /// Execute a single graph node, producing a materialized Tensor.
@@ -271,7 +290,8 @@ impl LazyRuntime {
                 let buffer = crate::buffer::Buffer::from_bytes(device, &data)?;
                 let size = buffer.len();
                 let tensor = Tensor::from_raw(tensor_id, shape, buffer);
-                self.tracker.track_alloc(size);
+                let container_id = self.resolve_container(id);
+                self.scheduler.allocate_tensor(container_id, tensor_id, size)?;
                 self.tensors.insert(tensor_id, tensor);
 
                 // Remove evaluated nodes from graph
@@ -299,22 +319,52 @@ impl LazyRuntime {
             }
         }
         if let Some(tensor) = self.tensors.remove(&id) {
-            self.tracker.track_free(tensor.buffer.len());
+            self.scheduler.free_tensor(id, tensor.buffer.len());
         }
         self.graph.remove_node(id);
         Ok(())
     }
 
     pub fn memory_usage(&self) -> usize {
-        self.tracker.memory_usage()
+        self.scheduler.global_usage().0
     }
 
     pub fn live_tensor_count(&self) -> usize {
-        self.tracker.tensor_count()
+        self.scheduler.global_usage().1
     }
 
     pub fn set_limits(&mut self, limits: ResourceLimits) {
-        self.limits = limits;
+        self.scheduler.update_global_limits(limits);
+    }
+
+    /// Remove a tensor without scheduler tracking (for deregister cleanup).
+    pub fn remove_tensor_raw(&mut self, id: u64) {
+        self.tensors.remove(&id);
+        self.graph.remove_node(id);
+    }
+
+    /// Dequeue the next scheduled job, evaluate it, and complete it.
+    pub fn run_next(&mut self, device: &Device) -> Result<Option<crate::scheduler::JobId>> {
+        let job = match self.scheduler.next_job() {
+            Some(j) => j,
+            None => return Ok(None),
+        };
+
+        let job_id = job.id;
+        let target_id = job.target_tensor_id;
+        let start = std::time::Instant::now();
+
+        match self.eval(device, target_id) {
+            Ok(()) => {
+                let elapsed = start.elapsed().as_nanos() as u64;
+                self.scheduler.complete_job(job_id, elapsed)?;
+                Ok(Some(job_id))
+            }
+            Err(e) => {
+                self.scheduler.fail_job(job_id, e.to_string())?;
+                Err(e)
+            }
+        }
     }
 }
 
@@ -428,5 +478,29 @@ mod tests {
         assert!(rt.exists(id));
         rt.destroy(id).unwrap();
         assert!(!rt.exists(id));
+    }
+
+    #[test]
+    fn test_run_next_dequeue_eval_complete() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        let a = Tensor::from_f32(&device, vec![4], &[1.0, 2.0, 3.0, 4.0]).unwrap();
+        let b = Tensor::from_f32(&device, vec![4], &[10.0, 20.0, 30.0, 40.0]).unwrap();
+        let a_id = a.meta.id;
+        let b_id = b.meta.id;
+        rt.insert_tensor(a).unwrap();
+        rt.insert_tensor(b).unwrap();
+
+        let c_id = crate::ops::add(&mut rt, a_id, b_id).unwrap();
+
+        let job_id = rt.scheduler.submit(ContainerId::DEFAULT, c_id).unwrap();
+        assert_eq!(rt.scheduler.queue_depth(), 1);
+
+        let result = rt.run_next(&device).unwrap();
+        assert_eq!(result, Some(job_id));
+        assert!(rt.is_materialized(c_id));
+        assert_eq!(rt.read_f32(c_id).unwrap(), &[11.0, 22.0, 33.0, 44.0]);
+        assert_eq!(rt.scheduler.queue_depth(), 0);
     }
 }
