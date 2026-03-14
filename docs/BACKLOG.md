@@ -75,10 +75,18 @@ _Eliminate GPU idle time between ops, then enable true parallel execution._
 - [ ] **Conv1d** — used in some transformer variants and audio models
 
 ### 4. Transformers adapter → v0.2.0
-_Proves the stack works end-to-end on real models. If missing ops are discovered, add them._
-- [ ] **Transformers adapter** — HuggingFace weight loading + custom inference (GPT-2 as first target)
-- [ ] **Gather/scatter** — add if needed during adapter development
-- [ ] **Tag v0.2.0** — ship with transformer inference capability
+_Full pipeline: load model, tokenize, run forward pass, generate text. GPT-2 as first target._
+- [ ] **Weight loader** — download HuggingFace weights, convert to GpuTensors
+- [ ] **GPT-2 forward pass** — Python implementation using our ops (matmul, attention, gelu, layer_norm, embedding)
+- [ ] **Text generation** — tokenize → forward → argmax (CPU) → decode loop
+- [ ] **`gpu.run_model("gpt2", "Hello world")`** — end-to-end API
+- [ ] **Tag v0.2.0** — ship with transformer inference
+
+### Post-v0.2.0 inference optimizations
+- [ ] **Argmax GPU kernel** — reduction op, avoids CPU roundtrip during generation
+- [ ] **KV cache** — reuse past key/value computations for autoregressive generation (major speedup)
+- [ ] **Top-k / top-p sampling** — temperature-based sampling for non-greedy generation
+- [ ] **Batch inference** — multiple sequences in parallel
 
 ## Further Backlog
 
