@@ -36,18 +36,34 @@ Tracks what needs to be built, ordered by priority. Derived from the original sp
 - [x] **NumPy adapter** — `gpu.from_numpy(arr)` and `tensor.to_numpy()`, copy-based, f32 only
 - [x] **PyTorch adapter** — `gpu.from_torch(tensor)` and `tensor.to_torch()`, routes through NumPy bridge
 
-## In Progress
+## v0.1.0 shipped
 
-_(nothing currently)_
+## Up Next (priority order)
 
-## Up Next
+### 1. Multi-dtype compute kernels (float16 priority)
+_Apple Silicon has native f16 ALUs at 2x f32 throughput. This doubles performance for every existing op with no algorithmic changes. Every future op gets f16 for free._
+- [ ] **Multi-dtype dispatch layer** — DType-aware kernel selection in KernelRegistry
+- [ ] **Float16 MSL kernels** — f16 variants of all 14 ops
+- [ ] **Multi-dtype adapters** — extend from_numpy/to_numpy/from_torch/to_torch for float16
 
-### Ship v0.1.0
-- [ ] **Release prep** — final test pass, documentation polish, packaging
+### 2. Multiple Metal command queues
+_Biggest architectural unlock. Independent graph branches execute in parallel on the same GPU. Foundation for async eval and fine-grained locking._
+- [ ] **Concurrent command queue dispatch** — identify independent subgraphs, dispatch to separate Metal command queues
+- [ ] **Async eval** — `gpu.eval_async(tensor)` returns a future/handle, non-blocking Python
+- [ ] **Fine-grained locking** — split `Mutex<LazyRuntime>` into per-component locks (graph, tensor store, scheduler, pool)
 
-## Post-Ship Backlog
+### 3. New ops for transformer inference
+_Unlocks the workload everyone cares about. Without these, it's a fast linear algebra engine. With them, it's a model runtime._
+- [ ] **LayerNorm** — critical for every transformer architecture
+- [ ] **Embedding lookup** — token → vector mapping
+- [ ] **GELU activation** — standard transformer nonlinearity
+- [ ] **Gather/scatter** — index-based tensor operations
+- [ ] **Conv1d** — used in some transformer variants and audio models
+- [ ] **Transformers adapter** — HuggingFace weight loading + custom inference
 
-### Transformer Support (requires new ops first)
+## Further Backlog
+
+### Framework Improvements
 - [ ] **New ops: layernorm, embedding, gather, GELU, conv1d** — prerequisite kernels for transformer models
 - [ ] **Transformers adapter** — HuggingFace weight loading + custom inference, depends on new ops
 - [ ] **Full model inference** — end-to-end transformer forward pass on applegpu_runtime
