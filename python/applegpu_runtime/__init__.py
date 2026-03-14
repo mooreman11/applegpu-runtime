@@ -20,6 +20,9 @@ from applegpu_runtime.applegpu_runtime import (
     exp,
     log,
     sqrt,
+    softmax,
+    transpose,
+    attention,
     matmul,
 )
 
@@ -44,5 +47,8 @@ __all__ = [
     "exp",
     "log",
     "sqrt",
+    "softmax",
+    "transpose",
+    "attention",
     "matmul",
 ]

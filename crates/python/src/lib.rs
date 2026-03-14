@@ -112,6 +112,20 @@ impl GpuTensor {
         Ok(GpuTensor { id, destroyed: Cell::new(false) })
     }
 
+    fn softmax(&self) -> PyResult<GpuTensor> {
+        let mut rt = RUNTIME_LAZY.lock().unwrap();
+        let id = applegpu_core::ops::softmax(&mut rt, self.id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(GpuTensor { id, destroyed: Cell::new(false) })
+    }
+
+    fn transpose(&self) -> PyResult<GpuTensor> {
+        let mut rt = RUNTIME_LAZY.lock().unwrap();
+        let id = applegpu_core::ops::transpose(&mut rt, self.id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(GpuTensor { id, destroyed: Cell::new(false) })
+    }
+
     fn sqrt(&self) -> PyResult<GpuTensor> {
         let mut rt = RUNTIME_LAZY.lock().unwrap();
         let id = applegpu_core::ops::sqrt(&mut rt, self.id)
@@ -300,6 +314,18 @@ fn exp(t: &GpuTensor) -> PyResult<GpuTensor> { t.exp() }
 fn log(t: &GpuTensor) -> PyResult<GpuTensor> { t.log() }
 #[pyfunction]
 fn sqrt(t: &GpuTensor) -> PyResult<GpuTensor> { t.sqrt() }
+#[pyfunction]
+fn softmax(t: &GpuTensor) -> PyResult<GpuTensor> { t.softmax() }
+#[pyfunction]
+fn transpose(t: &GpuTensor) -> PyResult<GpuTensor> { t.transpose() }
+
+#[pyfunction]
+fn attention(q: &GpuTensor, k: &GpuTensor, v: &GpuTensor) -> PyResult<GpuTensor> {
+    let mut rt = RUNTIME_LAZY.lock().unwrap();
+    let id = applegpu_core::ops::attention(&mut rt, q.id, k.id, v.id)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(GpuTensor { id, destroyed: Cell::new(false) })
+}
 
 #[pymodule]
 fn applegpu_runtime(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -322,6 +348,9 @@ fn applegpu_runtime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(exp, m)?)?;
     m.add_function(wrap_pyfunction!(log, m)?)?;
     m.add_function(wrap_pyfunction!(sqrt, m)?)?;
+    m.add_function(wrap_pyfunction!(softmax, m)?)?;
+    m.add_function(wrap_pyfunction!(transpose, m)?)?;
+    m.add_function(wrap_pyfunction!(attention, m)?)?;
     m.add_function(wrap_pyfunction!(matmul, m)?)?;
     Ok(())
 }
