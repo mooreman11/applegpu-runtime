@@ -86,9 +86,10 @@ Active development. Current capabilities:
 - **Kernel fusion** — auto-detects element-wise chains, generates fused MSL kernels at runtime
 - **GpuTensor class** with Python operators (`+`, `-`, `*`, `/`, `@`, unary `-`) and auto-cleanup
 - **Scaled dot-product attention** — `gpu.attention(Q, K, V)` with proper 1/sqrt(d_k) scaling
+- **Resource limits** — configurable max tensor size, total GPU memory, and tensor count via `gpu.set_limits()` or env vars
 - **Lazy execution** — ops build a DAG, computation deferred until materialization
 - 14 GPU operations: add, sub, mul, div, neg, relu, exp, log, sqrt, matmul, softmax, transpose, scalar_mul, attention
-- 123 tests passing across all layers (58 Rust + 13 Swift + 52 Python)
+- 134 tests passing across all layers (64 Rust + 13 Swift + 57 Python)
 
 ### VM Backend Usage
 

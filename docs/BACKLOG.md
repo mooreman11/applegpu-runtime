@@ -30,15 +30,7 @@ Tracks what needs to be built, ordered by priority. Derived from the original sp
 - [x] **Transpose** — 2D matrix transpose kernel
 - [x] **ScalarMul** — element-wise scalar multiplication (carries scale in graph node)
 - [x] **Attention** — scaled dot-product attention: `softmax(Q @ K^T / sqrt(d_k)) @ V`
-
-## In Progress
-
-_(nothing currently)_
-
-## Up Next
-
-### Phase 5b: Resource Limits
-- [ ] **Resource limits** — max tensor size, max GPU memory, per-container rate limits
+- [x] **Resource limits** — max tensor size, max GPU memory, max tensor count with MemoryTracker
 
 ### Phase 6: Multi-Container Scheduler
 - [ ] **Priority queues** — per-container/VM scheduling
