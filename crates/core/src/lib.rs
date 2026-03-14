@@ -9,6 +9,7 @@ pub mod graph;
 pub mod lazy;
 pub mod ops;
 pub mod scheduler;
+pub mod serial;
 pub mod tensor;
 
 pub fn version() -> &'static str {
