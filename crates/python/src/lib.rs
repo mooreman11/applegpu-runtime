@@ -55,8 +55,15 @@ impl GpuTensor {
         let runtime = get_device_runtime()?;
         let mut rt = RUNTIME_LAZY.lock().unwrap();
         if rt.is_pending(self.id) {
-            rt.eval(&runtime.device, self.id)
-                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            if let Some(ref socket_path) = runtime.socket_path {
+                // VM backend: send over IPC
+                rt.eval_remote(&runtime.device, self.id, socket_path)
+                    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            } else {
+                // MLX backend: execute locally
+                rt.eval(&runtime.device, self.id)
+                    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            }
         }
         rt.read_f32(self.id)
             .map_err(|e| PyValueError::new_err(e.to_string()))
@@ -66,8 +73,13 @@ impl GpuTensor {
     fn eval(&self) -> PyResult<()> {
         let runtime = get_device_runtime()?;
         let mut rt = RUNTIME_LAZY.lock().unwrap();
-        rt.eval(&runtime.device, self.id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        if let Some(ref socket_path) = runtime.socket_path {
+            rt.eval_remote(&runtime.device, self.id, socket_path)
+                .map_err(|e| PyValueError::new_err(e.to_string()))
+        } else {
+            rt.eval(&runtime.device, self.id)
+                .map_err(|e| PyValueError::new_err(e.to_string()))
+        }
     }
 
     // Unary ops
