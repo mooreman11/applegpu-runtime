@@ -88,7 +88,7 @@ static TENSOR_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 /// A tensor backed by a Metal GPU buffer.
 pub struct Tensor {
     pub meta: TensorMeta,
-    pub(crate) buffer: Buffer,
+    pub buffer: Buffer,
 }
 
 impl Tensor {
