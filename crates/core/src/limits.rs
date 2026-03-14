@@ -109,8 +109,8 @@ impl MemoryTracker {
     }
 
     pub fn track_free(&mut self, size_bytes: usize) {
-        self.current_bytes -= size_bytes;
-        self.current_count -= 1;
+        self.current_bytes = self.current_bytes.saturating_sub(size_bytes);
+        self.current_count = self.current_count.saturating_sub(1);
     }
 
     pub fn memory_usage(&self) -> usize {
@@ -191,5 +191,15 @@ mod tests {
         tracker.track_free(1024);
         assert_eq!(tracker.memory_usage(), 2048);
         assert_eq!(tracker.tensor_count(), 1);
+    }
+
+    #[test]
+    fn track_free_underflow_does_not_panic() {
+        let mut tracker = MemoryTracker::new();
+        tracker.track_alloc(100);
+        // Free more than allocated — should not panic
+        tracker.track_free(200);
+        assert_eq!(tracker.memory_usage(), 0);
+        assert_eq!(tracker.tensor_count(), 0);
     }
 }
