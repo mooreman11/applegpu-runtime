@@ -3,6 +3,7 @@ pub mod device;
 pub mod error;
 pub mod ffi;
 pub mod scheduler;
+pub mod tensor;
 
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
