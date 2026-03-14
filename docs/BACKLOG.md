@@ -67,21 +67,20 @@ _Eliminate GPU idle time between ops, then enable true parallel execution._
 - [ ] **Async eval** — `gpu.eval_async(tensor)` returns a future/handle, non-blocking Python
 - [ ] **Fine-grained locking** — split `Mutex<LazyRuntime>` into per-component locks (graph, tensor store, scheduler, pool)
 
-### 3. New ops for transformer inference
-_Unlocks the workload everyone cares about. Without these, it's a fast linear algebra engine. With them, it's a model runtime._
-- [ ] **LayerNorm** — critical for every transformer architecture
-- [ ] **Embedding lookup** — token → vector mapping
-- [ ] **GELU activation** — standard transformer nonlinearity
+### ~~3. New ops for transformer inference~~ PARTIALLY DONE
+- [x] **LayerNorm** — f32 + f16 kernels, blocking + non-blocking dispatch
+- [x] **Embedding lookup** — f32 + f16 kernels, Int32 index support
+- [x] **GELU activation** — f32 + f16 kernels
 - [ ] **Gather/scatter** — index-based tensor operations
 - [ ] **Conv1d** — used in some transformer variants and audio models
-- [ ] **Transformers adapter** — HuggingFace weight loading + custom inference
+
+### 4. Transformers adapter → v0.2.0
+_Proves the stack works end-to-end on real models. If missing ops are discovered, add them._
+- [ ] **Transformers adapter** — HuggingFace weight loading + custom inference (GPT-2 as first target)
+- [ ] **Gather/scatter** — add if needed during adapter development
+- [ ] **Tag v0.2.0** — ship with transformer inference capability
 
 ## Further Backlog
-
-### Framework Improvements
-- [ ] **New ops: layernorm, embedding, gather, GELU, conv1d** — prerequisite kernels for transformer models
-- [ ] **Transformers adapter** — HuggingFace weight loading + custom inference, depends on new ops
-- [ ] **Full model inference** — end-to-end transformer forward pass on applegpu_runtime
 
 ### Framework Improvements
 - [ ] **Zero-copy from_numpy** — Metal `makeBuffer(bytesNoCopy:)` Swift FFI, page alignment, GC pinning, three-layer work
