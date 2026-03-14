@@ -9,6 +9,9 @@ requires-python = ">=3.10"
 description = "GPU runtime for Apple Silicon with MLX and AVF backends"
 dependencies = ["numpy"]
 
+[project.optional-dependencies]
+torch = ["torch>=2.0"]
+
 [dependency-groups]
 dev = ["pytest>=8.0"]
 

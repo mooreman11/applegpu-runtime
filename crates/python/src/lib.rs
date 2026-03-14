@@ -214,6 +214,23 @@ impl GpuTensor {
     fn __matmul__(&self, other: &GpuTensor) -> PyResult<GpuTensor> { self.matmul(other) }
     fn __neg__(&self) -> PyResult<GpuTensor> { self.neg() }
 
+    /// Convert to a PyTorch tensor. Auto-evaluates if lazy.
+    /// Returns an independent copy (clone) so mutations don't affect GPU data.
+    fn to_torch<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        // Get numpy array via existing to_numpy
+        let np_array = self.to_numpy(py)?;
+
+        // Lazy import torch
+        let torch = py.import_bound("torch")?;
+
+        // torch.from_numpy(arr).clone() — from_numpy is zero-copy, clone makes independent
+        let torch_tensor = torch
+            .call_method1("from_numpy", (&np_array,))?
+            .call_method0("clone")?;
+
+        Ok(torch_tensor)
+    }
+
     fn __repr__(&self) -> PyResult<String> {
         if self.destroyed.get() {
             return Ok(format!("GpuTensor(id={}, destroyed)", self.id));
@@ -319,6 +336,35 @@ fn from_numpy(_py: Python<'_>, arr: &Bound<'_, pyo3::types::PyAny>) -> PyResult<
     RUNTIME_LAZY.lock().unwrap().insert_tensor(t)
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(GpuTensor { id, destroyed: Cell::new(false) })
+}
+
+/// Create a GpuTensor from a PyTorch tensor (float32).
+/// Internally converts via NumPy: detach -> cpu -> contiguous -> numpy -> from_numpy.
+/// Data is copied; mutations to the original tensor do not affect the GPU tensor.
+#[pyfunction]
+fn from_torch(py: Python<'_>, tensor: &Bound<'_, pyo3::types::PyAny>) -> PyResult<GpuTensor> {
+    // Lazy import torch for dtype check
+    let torch = py.import_bound("torch")?;
+    let float32 = torch.getattr("float32")?;
+    let tensor_dtype = tensor.getattr("dtype")?;
+    if !tensor_dtype.eq(&float32)? {
+        return Err(PyValueError::new_err(format!(
+            "Expected float32 tensor, got {}. Use tensor.float().",
+            tensor_dtype
+        )));
+    }
+
+    // Prepare: detach from autograd, move to CPU, make contiguous
+    let prepared = tensor
+        .call_method0("detach")?
+        .call_method0("cpu")?
+        .call_method0("contiguous")?;
+
+    // Convert to numpy (zero-copy for contiguous CPU float32)
+    let np_array = prepared.call_method0("numpy")?;
+
+    // Delegate to existing from_numpy
+    from_numpy(py, &np_array)
 }
 
 /// Create a tensor from data. Returns a GpuTensor object.
@@ -555,6 +601,7 @@ fn applegpu_runtime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(device_name, m)?)?;
     m.add_function(wrap_pyfunction!(dtype_size, m)?)?;
     m.add_function(wrap_pyfunction!(from_numpy, m)?)?;
+    m.add_function(wrap_pyfunction!(from_torch, m)?)?;
     m.add_function(wrap_pyfunction!(tensor, m)?)?;
     m.add_function(wrap_pyfunction!(eval, m)?)?;
     m.add_function(wrap_pyfunction!(to_list, m)?)?;
