@@ -4,6 +4,7 @@ pub mod compute;
 pub mod device;
 pub mod error;
 pub mod ffi;
+pub mod fusion;
 pub mod graph;
 pub mod lazy;
 pub mod ops;
