@@ -91,6 +91,23 @@ extern "C" {
         buf_out: *mut GPUBufferHandle,
         element_count: u64,
     ) -> i32;
+
+    pub fn gpu_bridge_compute_unary(
+        compute: *mut GPUComputeHandle,
+        buf_input: *const GPUBufferHandle,
+        buf_out: *mut GPUBufferHandle,
+        element_count: u64,
+    ) -> i32;
+
+    pub fn gpu_bridge_compute_matmul(
+        compute: *mut GPUComputeHandle,
+        buf_a: *const GPUBufferHandle,
+        buf_b: *const GPUBufferHandle,
+        buf_c: *mut GPUBufferHandle,
+        m: u32,
+        n: u32,
+        k: u32,
+    ) -> i32;
 }
 
 #[cfg(test)]
