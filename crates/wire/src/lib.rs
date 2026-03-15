@@ -682,6 +682,134 @@ impl EvalResponse {
     }
 }
 
+// ---------------------------------------------------------------------------
+// ReadTensor constants
+// ---------------------------------------------------------------------------
+
+pub const MAGIC_READ_REQ: &[u8; 4] = b"AGRD";
+pub const MAGIC_READ_RESP: &[u8; 4] = b"AGRR";
+pub const READ_TENSOR_VERSION: u32 = 1;
+
+// ---------------------------------------------------------------------------
+// ReadTensorRequest
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReadTensorRequest {
+    pub tensor_id: u64,
+}
+
+impl ReadTensorRequest {
+    pub fn serialize(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.write_all(MAGIC_READ_REQ).unwrap();
+        write_u32(&mut buf, READ_TENSOR_VERSION).unwrap();
+        write_u64(&mut buf, self.tensor_id).unwrap();
+        buf
+    }
+
+    pub fn deserialize(data: &[u8]) -> io::Result<Self> {
+        let mut r = Cursor::new(data);
+        let mut magic = [0u8; 4];
+        r.read_exact(&mut magic)?;
+        if &magic != MAGIC_READ_REQ {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "Bad ReadTensorRequest magic"));
+        }
+        let version = read_u32(&mut r)?;
+        if version != READ_TENSOR_VERSION {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "Bad ReadTensorRequest version"));
+        }
+        let tensor_id = read_u64(&mut r)?;
+        Ok(ReadTensorRequest { tensor_id })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ReadTensorResponse
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ReadTensorResponse {
+    Ok {
+        tensor_id: u64,
+        shape: Vec<usize>,
+        dtype: u32,
+        data: Vec<u8>,
+    },
+    NotFound {
+        tensor_id: u64,
+    },
+}
+
+impl ReadTensorResponse {
+    pub fn serialize(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.write_all(MAGIC_READ_RESP).unwrap();
+        match self {
+            ReadTensorResponse::Ok { tensor_id, shape, dtype, data } => {
+                write_u32(&mut buf, 0).unwrap(); // status: ok
+                write_u64(&mut buf, *tensor_id).unwrap();
+                write_u32(&mut buf, shape.len() as u32).unwrap();
+                for &d in shape {
+                    write_u64(&mut buf, d as u64).unwrap();
+                }
+                write_u32(&mut buf, *dtype).unwrap();
+                write_u32(&mut buf, data.len() as u32).unwrap();
+                buf.write_all(data).unwrap();
+            }
+            ReadTensorResponse::NotFound { tensor_id } => {
+                write_u32(&mut buf, 1).unwrap(); // status: not found
+                write_u64(&mut buf, *tensor_id).unwrap();
+            }
+        }
+        buf
+    }
+
+    pub fn deserialize(data: &[u8]) -> io::Result<Self> {
+        let mut r = Cursor::new(data);
+        let mut magic = [0u8; 4];
+        r.read_exact(&mut magic)?;
+        if &magic != MAGIC_READ_RESP {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "Bad ReadTensorResponse magic"));
+        }
+        let status = read_u32(&mut r)?;
+        if status == 0 {
+            let tensor_id = read_u64(&mut r)?;
+            let num_dims = read_u32(&mut r)? as usize;
+            let mut shape = Vec::with_capacity(num_dims);
+            for _ in 0..num_dims {
+                shape.push(read_u64(&mut r)? as usize);
+            }
+            let dtype = read_u32(&mut r)?;
+            let data_len = read_u32(&mut r)? as usize;
+            let mut data = vec![0u8; data_len];
+            r.read_exact(&mut data)?;
+            Ok(ReadTensorResponse::Ok { tensor_id, shape, dtype, data })
+        } else {
+            let tensor_id = read_u64(&mut r)?;
+            Ok(ReadTensorResponse::NotFound { tensor_id })
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// peek_magic — peek at the first 4 bytes of a message to determine its type
+// ---------------------------------------------------------------------------
+
+/// Peek at the first 4 bytes of a message buffer to determine the message type.
+/// Returns the 4-byte magic, or an error if the buffer is too short.
+pub fn peek_magic(data: &[u8]) -> io::Result<[u8; 4]> {
+    if data.len() < 4 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Message too short to contain magic bytes",
+        ));
+    }
+    let mut magic = [0u8; 4];
+    magic.copy_from_slice(&data[..4]);
+    Ok(magic)
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================
@@ -823,5 +951,75 @@ mod tests {
         let serialized = resp.serialize();
         let got = EvalResponse::deserialize(&serialized).unwrap();
         assert_eq!(resp, got);
+    }
+
+    // --- ReadTensor tests ---
+
+    #[test]
+    fn read_tensor_request_roundtrip() {
+        let req = ReadTensorRequest { tensor_id: 99 };
+        let bytes = req.serialize();
+        let got = ReadTensorRequest::deserialize(&bytes).unwrap();
+        assert_eq!(req, got);
+    }
+
+    #[test]
+    fn read_tensor_request_bad_magic() {
+        let mut bytes = ReadTensorRequest { tensor_id: 1 }.serialize();
+        bytes[0] = b'X'; // corrupt magic
+        assert!(ReadTensorRequest::deserialize(&bytes).is_err());
+    }
+
+    #[test]
+    fn read_tensor_response_ok_roundtrip() {
+        let resp = ReadTensorResponse::Ok {
+            tensor_id: 42,
+            shape: vec![2, 3],
+            dtype: 0,
+            data: vec![1, 2, 3, 4, 5, 6],
+        };
+        let bytes = resp.serialize();
+        let got = ReadTensorResponse::deserialize(&bytes).unwrap();
+        assert_eq!(resp, got);
+    }
+
+    #[test]
+    fn read_tensor_response_not_found_roundtrip() {
+        let resp = ReadTensorResponse::NotFound { tensor_id: 77 };
+        let bytes = resp.serialize();
+        let got = ReadTensorResponse::deserialize(&bytes).unwrap();
+        assert_eq!(resp, got);
+    }
+
+    #[test]
+    fn read_tensor_response_bad_magic() {
+        let mut bytes = ReadTensorResponse::NotFound { tensor_id: 1 }.serialize();
+        bytes[0] = b'Z';
+        assert!(ReadTensorResponse::deserialize(&bytes).is_err());
+    }
+
+    #[test]
+    fn peek_magic_works() {
+        let req = ReadTensorRequest { tensor_id: 1 };
+        let bytes = req.serialize();
+        let magic = peek_magic(&bytes).unwrap();
+        assert_eq!(&magic, MAGIC_READ_REQ);
+    }
+
+    #[test]
+    fn peek_magic_eval_request() {
+        let req = EvalRequest {
+            target_id: 1,
+            tensors: vec![],
+            nodes: vec![],
+        };
+        let bytes = req.serialize();
+        let magic = peek_magic(&bytes).unwrap();
+        assert_eq!(&magic, MAGIC_REQUEST);
+    }
+
+    #[test]
+    fn peek_magic_too_short() {
+        assert!(peek_magic(&[0u8; 3]).is_err());
     }
 }

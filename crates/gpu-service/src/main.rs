@@ -13,7 +13,9 @@ use applegpu_core::tensor::{DType, Tensor};
 use applegpu_wire::{
     self as wire,
     EvalRequest, EvalResponse, HandshakeRequest, HandshakeResponse,
+    ReadTensorRequest, ReadTensorResponse,
     HANDSHAKE_OK, HANDSHAKE_REJECTED_QUOTA, PROTOCOL_VERSION, MAX_MESSAGE_SIZE,
+    MAGIC_REQUEST, MAGIC_READ_REQ,
 };
 
 /// Convert a wire protocol dtype discriminant to a core DType.
@@ -33,6 +35,23 @@ fn wire_dtype_to_core(d: u32) -> io::Result<DType> {
             io::ErrorKind::InvalidData,
             format!("Unknown dtype: {}", d),
         )),
+    }
+}
+
+/// Convert a core DType back to the wire protocol discriminant.
+fn core_dtype_to_wire(d: DType) -> u32 {
+    match d {
+        DType::Float32 => 0,
+        DType::Float16 => 1,
+        DType::Float64 => 2,
+        DType::Int8 => 3,
+        DType::Int16 => 4,
+        DType::Int32 => 5,
+        DType::Int64 => 6,
+        DType::UInt8 => 7,
+        DType::UInt32 => 8,
+        DType::Bool => 9,
+        DType::BFloat16 => 10,
     }
 }
 
@@ -180,6 +199,34 @@ fn handle_eval(
     }
 }
 
+fn handle_read_tensor(
+    shared: &SharedState,
+    _container_id: ContainerId,
+    request: &ReadTensorRequest,
+) -> ReadTensorResponse {
+    let rt = shared.runtime.lock().unwrap();
+
+    let shape = match rt.shape(request.tensor_id) {
+        Ok(s) => s,
+        Err(_) => return ReadTensorResponse::NotFound { tensor_id: request.tensor_id },
+    };
+
+    let dtype = match rt.dtype(request.tensor_id) {
+        Ok(d) => core_dtype_to_wire(d),
+        Err(_) => return ReadTensorResponse::NotFound { tensor_id: request.tensor_id },
+    };
+
+    match rt.read_bytes(request.tensor_id) {
+        Ok(data) => ReadTensorResponse::Ok {
+            tensor_id: request.tensor_id,
+            shape,
+            dtype,
+            data,
+        },
+        Err(_) => ReadTensorResponse::NotFound { tensor_id: request.tensor_id },
+    }
+}
+
 fn handle_connection(shared: Arc<SharedState>, mut stream: UnixStream) {
     let container_id = match handle_handshake(&shared, &mut stream) {
         Some(cid) => cid,
@@ -192,12 +239,33 @@ fn handle_connection(shared: Arc<SharedState>, mut stream: UnixStream) {
             Err(_) => break,
         };
 
-        let response = match EvalRequest::deserialize(&msg) {
-            Ok(request) => handle_eval(&shared, container_id, &request),
-            Err(e) => EvalResponse::Err(format!("Deserialization failed: {}", e)),
+        let magic = match wire::peek_magic(&msg) {
+            Ok(m) => m,
+            Err(_) => break,
         };
 
-        if wire::write_message(&mut stream, &response.serialize()).is_err() {
+        let response_bytes = match &magic {
+            MAGIC_REQUEST => {
+                let response = match EvalRequest::deserialize(&msg) {
+                    Ok(request) => handle_eval(&shared, container_id, &request),
+                    Err(e) => EvalResponse::Err(format!("Deserialization failed: {}", e)),
+                };
+                response.serialize()
+            }
+            MAGIC_READ_REQ => {
+                let response = match ReadTensorRequest::deserialize(&msg) {
+                    Ok(request) => handle_read_tensor(&shared, container_id, &request),
+                    Err(_) => ReadTensorResponse::NotFound { tensor_id: 0 },
+                };
+                response.serialize()
+            }
+            _ => {
+                let response = EvalResponse::Err("Unknown message type".to_string());
+                response.serialize()
+            }
+        };
+
+        if wire::write_message(&mut stream, &response_bytes).is_err() {
             break;
         }
     }
@@ -243,7 +311,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use applegpu_wire::{WireOpKind, WireOpNode, WireTensorData};
+    use applegpu_wire::{WireOpKind, WireOpNode, WireTensorData, ReadTensorResponse};
 
     fn make_shared() -> SharedState {
         SharedState {
@@ -454,6 +522,101 @@ mod tests {
                 );
             }
             EvalResponse::Ok { .. } => { /* success */ }
+        }
+    }
+
+    #[test]
+    fn read_tensor_not_found() {
+        let shared = make_shared();
+        let cid = {
+            let mut rt = shared.runtime.lock().unwrap();
+            let config = ContainerConfig {
+                priority: Priority::Normal,
+                max_memory_bytes: 1024 * 1024,
+                max_tensor_count: 64,
+                max_tensor_size_bytes: 0,
+                max_pending_jobs: 64,
+            };
+            rt.scheduler.register_container(config).unwrap()
+        };
+
+        let req = ReadTensorRequest { tensor_id: 9999 };
+        let resp = handle_read_tensor(&shared, cid, &req);
+        match resp {
+            ReadTensorResponse::NotFound { tensor_id } => assert_eq!(tensor_id, 9999),
+            _ => panic!("Expected NotFound for non-existent tensor"),
+        }
+    }
+
+    #[test]
+    fn read_tensor_after_eval() {
+        let shared = make_shared();
+        let cid = {
+            let mut rt = shared.runtime.lock().unwrap();
+            let config = ContainerConfig {
+                priority: Priority::Normal,
+                max_memory_bytes: 1024 * 1024,
+                max_tensor_count: 64,
+                max_tensor_size_bytes: 0,
+                max_pending_jobs: 64,
+            };
+            rt.scheduler.register_container(config).unwrap()
+        };
+
+        let data: Vec<u8> = vec![1.0f32, 2.0, 3.0, 4.0]
+            .iter()
+            .flat_map(|f| f.to_le_bytes())
+            .collect();
+
+        let eval_req = EvalRequest {
+            target_id: 42,
+            tensors: vec![WireTensorData {
+                id: 1,
+                shape: vec![4],
+                dtype: 0,
+                data: data.clone(),
+            }],
+            nodes: vec![WireOpNode {
+                id: 42,
+                op: WireOpKind::Neg,
+                inputs: vec![1],
+                out_shape: vec![4],
+                out_dtype: 0,
+            }],
+        };
+
+        // Eval first
+        let eval_resp = handle_eval(&shared, cid, &eval_req);
+        assert!(matches!(eval_resp, EvalResponse::Ok { .. }));
+
+        // Now read the result tensor back
+        let read_req = ReadTensorRequest { tensor_id: 42 };
+        let read_resp = handle_read_tensor(&shared, cid, &read_req);
+        match read_resp {
+            ReadTensorResponse::Ok { tensor_id, shape, dtype, data } => {
+                assert_eq!(tensor_id, 42);
+                assert_eq!(shape, vec![4]);
+                assert_eq!(dtype, 0); // Float32
+                assert_eq!(data.len(), 16); // 4 * f32
+                let floats: Vec<f32> = data
+                    .chunks_exact(4)
+                    .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+                    .collect();
+                assert_eq!(floats, vec![-1.0, -2.0, -3.0, -4.0]);
+            }
+            ReadTensorResponse::NotFound { .. } => {
+                panic!("Expected Ok after eval, got NotFound");
+            }
+        }
+    }
+
+    #[test]
+    fn core_dtype_to_wire_roundtrip() {
+        // Verify that wire_dtype_to_core and core_dtype_to_wire are inverses
+        for wire_val in 0u32..=9 {
+            let core = wire_dtype_to_core(wire_val).unwrap();
+            let back = core_dtype_to_wire(core);
+            assert_eq!(back, wire_val, "Roundtrip failed for wire dtype {}", wire_val);
         }
     }
 }
