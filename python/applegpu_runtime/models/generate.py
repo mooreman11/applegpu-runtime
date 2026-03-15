@@ -31,13 +31,14 @@ def decode(model_name, token_ids):
     return tokenizer.decode(token_ids)
 
 
-def generate(model, input_ids, max_tokens=50):
-    """Autoregressive text generation.
+def generate(model, input_ids, max_tokens=50, use_cache=True):
+    """Autoregressive text generation with optional KV cache.
 
     Args:
         model: dict from load_gpt2_weights()
         input_ids: list of int token IDs (prompt)
         max_tokens: number of tokens to generate
+        use_cache: if True, use KV cache for faster generation
 
     Returns:
         list of int token IDs (prompt + generated)
@@ -46,19 +47,21 @@ def generate(model, input_ids, max_tokens=50):
     from .gpt2 import gpt2_forward
 
     ids = list(input_ids)
+    kv_cache = None
 
-    for _ in range(max_tokens):
-        # Forward pass
-        logits = gpt2_forward(model, ids)
+    for step in range(max_tokens):
+        if use_cache:
+            logits, kv_cache = gpt2_forward(model, ids, kv_cache=kv_cache)
+        else:
+            logits, _ = gpt2_forward(model, ids, kv_cache=None)
 
-        # Get logits for last position
-        last_logits = gpu.argmax(logits)  # [seq_len] Int32
-        last_idx = last_logits.to_list()[-1]  # argmax of last row
+        # Argmax of last position
+        last_logits = gpu.argmax(logits)
+        last_idx = last_logits.to_list()[-1]
 
-        # Wait -- argmax gives the index of max per ROW, but we want
-        # the argmax of the LAST ROW only. The above is correct:
-        # logits is [seq_len, vocab_size], argmax gives [seq_len] indices,
-        # we take the last one.
+        # Clean up forward pass outputs to free memory
+        gpu.destroy(logits)
+        gpu.destroy(last_logits)
 
         ids.append(int(last_idx))
 

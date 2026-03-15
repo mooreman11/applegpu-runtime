@@ -19,8 +19,8 @@ def load_gpt2_weights(model_name="gpt2"):
 
     gpu.init_backend()
 
-    # GPT-2 has ~148 weight tensors totaling ~500MB; raise resource limits
-    gpu.set_limits(max_tensor_size_mb=512, max_memory_mb=4096, max_tensors=50000)
+    # GPT-2 has ~148 weight tensors + many intermediates during generation
+    gpu.set_limits(max_tensor_size_mb=1024, max_memory_mb=8192, max_tensors=0)
 
     hf_model = GPT2LMHeadModel.from_pretrained(model_name)
     config = hf_model.config
@@ -43,15 +43,17 @@ def load_gpt2_weights(model_name="gpt2"):
     }
 
 
-def gpt2_forward(model, input_ids):
-    """Run GPT-2 forward pass.
+def gpt2_forward(model, input_ids, kv_cache=None):
+    """Run GPT-2 forward pass with optional KV cache.
 
     Args:
         model: dict from load_gpt2_weights()
-        input_ids: list of int token IDs
+        input_ids: list of int token IDs (full sequence if no cache, single token if cached)
+        kv_cache: optional list of (k, v) tuples per layer per head, from previous forward pass
 
     Returns:
-        logits GpuTensor of shape [seq_len, vocab_size]
+        (logits, new_kv_cache) where logits is [seq_len, vocab_size] (or [1, vocab_size] with cache)
+        and new_kv_cache is the updated cache for the next call.
     """
     import applegpu_runtime as gpu
 
@@ -61,15 +63,28 @@ def gpt2_forward(model, input_ids):
     n_head = cfg["n_head"]
     n_embd = cfg["n_embd"]
     d_head = n_embd // n_head
-    seq_len = len(input_ids)
+
+    use_cache = kv_cache is not None
+
+    if use_cache:
+        # Incremental: only process the last token
+        token_ids = [input_ids[-1]]
+        pos_offset = len(input_ids) - 1
+    else:
+        token_ids = input_ids
+        pos_offset = 0
+
+    seq_len = len(token_ids)
 
     # Token + position embeddings
-    indices = gpu.from_numpy(np.array(input_ids, dtype=np.int32))
-    pos_indices = gpu.from_numpy(np.array(list(range(seq_len)), dtype=np.int32))
+    indices = gpu.from_numpy(np.array(token_ids, dtype=np.int32))
+    pos_indices = gpu.from_numpy(np.array(list(range(pos_offset, pos_offset + seq_len)), dtype=np.int32))
 
-    tok_emb = gpu.embedding(w["transformer.wte.weight"], indices)      # [seq, n_embd]
-    pos_emb = gpu.embedding(w["transformer.wpe.weight"], pos_indices)  # [seq, n_embd]
-    x = tok_emb + pos_emb  # [seq, n_embd]
+    tok_emb = gpu.embedding(w["transformer.wte.weight"], indices)
+    pos_emb = gpu.embedding(w["transformer.wpe.weight"], pos_indices)
+    x = tok_emb + pos_emb
+
+    new_kv_cache = []
 
     # Transformer blocks
     for i in range(n_layer):
@@ -80,26 +95,45 @@ def gpt2_forward(model, input_ids):
         ln1_b = w[f"{prefix}.ln_1.bias"]
         x_norm = gpu.layer_norm(x, ln1_g, ln1_b)
 
-        # Self-attention
-        # QKV projection: [seq, n_embd] @ [n_embd, 3*n_embd] + bias
+        # QKV projection
         attn_w = w[f"{prefix}.attn.c_attn.weight"]
         attn_b = w[f"{prefix}.attn.c_attn.bias"]
-        qkv = x_norm @ attn_w  # [seq, 3*n_embd]
+        qkv = x_norm @ attn_w
         qkv = gpu.add_bias(qkv, attn_b)
 
         # Split into Q, K, V
         q_all = gpu.slice(qkv, dim=1, start=0, end=n_embd)
-        k_all = gpu.slice(qkv, dim=1, start=n_embd, end=2*n_embd)
-        v_all = gpu.slice(qkv, dim=1, start=2*n_embd, end=3*n_embd)
+        k_new = gpu.slice(qkv, dim=1, start=n_embd, end=2*n_embd)
+        v_new = gpu.slice(qkv, dim=1, start=2*n_embd, end=3*n_embd)
 
-        # Multi-head attention
+        # Multi-head attention with KV cache
+        layer_kv = []
         head_outputs = []
         for h in range(n_head):
             q_h = gpu.slice(q_all, dim=1, start=h*d_head, end=(h+1)*d_head)
-            k_h = gpu.slice(k_all, dim=1, start=h*d_head, end=(h+1)*d_head)
-            v_h = gpu.slice(v_all, dim=1, start=h*d_head, end=(h+1)*d_head)
-            out_h = gpu.attention_causal(q_h, k_h, v_h)
+            k_h = gpu.slice(k_new, dim=1, start=h*d_head, end=(h+1)*d_head)
+            v_h = gpu.slice(v_new, dim=1, start=h*d_head, end=(h+1)*d_head)
+
+            if use_cache:
+                # Concat new K/V with cached K/V
+                cached_k, cached_v = kv_cache[i][h]
+                k_h = gpu.concat(cached_k, k_h, dim=0)  # [past+1, d_head]
+                v_h = gpu.concat(cached_v, v_h, dim=0)  # [past+1, d_head]
+
+            layer_kv.append((k_h, v_h))
+
+            # Attention: Q is [seq, d_head], K/V are [total_seq, d_head]
+            # For cached: Q is [1, d_head], K/V are [past+1, d_head]
+            # Use regular attention (not causal) for single-token with cache,
+            # since the new token can attend to all past positions
+            if use_cache:
+                out_h = gpu.attention(q_h, k_h, v_h)
+            else:
+                out_h = gpu.attention_causal(q_h, k_h, v_h)
+
             head_outputs.append(out_h)
+
+        new_kv_cache.append(layer_kv)
 
         # Concat heads
         attn_out = head_outputs[0]
@@ -140,9 +174,8 @@ def gpt2_forward(model, input_ids):
     ln_f_b = w["transformer.ln_f.bias"]
     x = gpu.layer_norm(x, ln_f_g, ln_f_b)
 
-    # LM head: project to vocabulary
-    # GPT-2 ties weights: lm_head weight = wte weight transposed
-    lm_head_w = gpu.transpose(w["transformer.wte.weight"])  # [n_embd, vocab_size]
-    logits = x @ lm_head_w  # [seq_len, vocab_size]
+    # LM head
+    lm_head_w = gpu.transpose(w["transformer.wte.weight"])
+    logits = x @ lm_head_w
 
-    return logits
+    return logits, new_kv_cache
