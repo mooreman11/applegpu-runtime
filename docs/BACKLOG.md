@@ -160,7 +160,7 @@ _Training support: PyTorch autograd works natively on Metal GPU for MLP training
 - [x] **Backward ops for conv2d** — transposed convolution kernel for grad_input on Metal, CPU for grad_weight
 - [x] **Backward ops for embedding** — atomic scatter-add for grad_weight on Metal
 - [x] **Backward ops for batch_norm** — inference-mode grad_input on Metal, CPU for grad_weight/bias
-- [ ] **Backward for max_pool2d** — forward returns dummy indices, backward crashes. Need real indices from forward pass for gradient routing. Blocks ResNet training.
+- [x] **Backward for max_pool2d** — forward now returns real indices (CPU), backward routes gradients correctly. ResNet training unblocked.
 - [ ] **Int64 compute kernels** — currently Int64 ops (e.g., batch_norm's num_batches_tracked += 1) fall back to CPU. Need Int64 add/mul MSL kernels for full GPU execution.
 - [ ] **Gradient accumulation** — in-place parameter updates for large batch training
 - [ ] **Adam optimizer** — may work via dispatch, needs verification
@@ -178,7 +178,7 @@ _Scale training to real models. Verify all backward ops. Optimize dispatch overh
 - [x] **Embedding backward on Metal** — atomic scatter-add
 - [x] **Transformer training** — 3-layer GELU+LayerNorm model trains on Metal (loss decreases over 10 steps)
 - [ ] **GPT-2 fine-tuning** — backward through full GPT-2 (needs log_softmax / cross-entropy kernel)
-- [ ] **ResNet training** — blocked by max_pool2d backward (needs real indices from forward)
+- [x] **ResNet training** — ResNet-18 trains on Metal GPU (loss 1.11 → 0.73 over 3 steps)
 - [ ] **Adam optimizer** — verify adaptive learning rate works
 - [ ] **Gradient clipping** — prevent exploding gradients
 
