@@ -102,14 +102,51 @@ def _squeeze_shape(t, dim):
 
 
 def _unwrap(t):
-    """Get the GpuTensor from an ApplegpuTensor, or convert CPU tensor/scalar."""
+    """Get the GpuTensor from an ApplegpuTensor, or convert CPU tensor/scalar.
+
+    If a GpuTensor's Rust-side tensor was freed by the lazy runtime,
+    recreate it from the CPU backing data.
+    """
+    global _in_fallback
     if isinstance(t, ApplegpuTensor):
-        return t._gpu
+        gt = t._gpu
+        if gt is not None:
+            # Check if the tensor is still alive on the Rust side
+            try:
+                _ = gt.shape  # will raise if destroyed
+                return gt
+            except (ValueError, RuntimeError):
+                # Tensor was freed by lazy runtime -- recreate from CPU backing
+                was_in_fallback = _in_fallback
+                _in_fallback = True
+                try:
+                    cpu_data = t.detach().clone()
+                finally:
+                    _in_fallback = was_in_fallback
+                new_gt = gpu.from_torch(cpu_data)
+                t._gpu_tensor = new_gt
+                _gpu_tensor_registry[t.data_ptr()] = new_gt
+                return new_gt
+        # No GPU tensor at all -- create from backing
+        was_in_fallback = _in_fallback
+        _in_fallback = True
+        try:
+            cpu_data = t.detach().clone()
+        finally:
+            _in_fallback = was_in_fallback
+        new_gt = gpu.from_torch(cpu_data)
+        t._gpu_tensor = new_gt
+        _gpu_tensor_registry[t.data_ptr()] = new_gt
+        return new_gt
     if isinstance(t, torch.Tensor):
         # Check registry in case this is an ApplegpuTensor that lost its type
         gt = _gpu_tensor_registry.get(t.data_ptr())
         if gt is not None:
-            return gt
+            try:
+                _ = gt.shape
+                return gt
+            except (ValueError, RuntimeError):
+                pass
         return gpu.from_torch(t)
     return t
 
@@ -121,9 +158,41 @@ def _unwrap_scalar(t):
     return _unwrap(t)
 
 
-def _wrap(gpu_t, torch_dtype=None):
+_eager_mode = False
+
+
+def set_eager_mode(enabled=True):
+    """Enable or disable eager evaluation mode.
+
+    When enabled, all GPU operations are immediately materialized, which is
+    needed for autograd training (backward pass requires live tensor data).
+    When disabled (default), lazy evaluation with kernel fusion is used.
+    """
+    global _eager_mode
+    _eager_mode = enabled
+
+
+def _wrap(gpu_t, torch_dtype=None, requires_grad=False):
     """Wrap a GpuTensor in an ApplegpuTensor."""
-    return ApplegpuTensor(gpu_t, torch_dtype=torch_dtype)
+    if _eager_mode:
+        gpu.eval(gpu_t)
+    result = ApplegpuTensor(gpu_t, torch_dtype=torch_dtype, requires_grad=requires_grad)
+    if _eager_mode:
+        # Sync CPU backing so _unwrap can reconstruct if needed
+        try:
+            cpu_data = gpu_t.to_torch()
+            global _in_fallback
+            was = _in_fallback
+            _in_fallback = True
+            try:
+                backing = result.data
+                if backing.shape == cpu_data.shape:
+                    backing.copy_(cpu_data)
+            finally:
+                _in_fallback = was
+        except Exception:
+            pass
+    return result
 
 
 # ============================================================
@@ -244,6 +313,127 @@ def _op_clamp(a, min=None, max=None):
     return _wrap(gpu.clamp(_unwrap(a), min_val, max_val))
 
 
+# ============================================================
+# Backward / autograd ops
+# ============================================================
+
+@register_op(torch.ops.aten.threshold_backward.default)
+def _op_threshold_backward(grad_output, self_tensor, threshold):
+    """Backward for relu: grad * (self > threshold)."""
+    self_cpu = self_tensor.to_torch_cpu() if isinstance(self_tensor, ApplegpuTensor) else self_tensor
+    grad_cpu = grad_output.to_torch_cpu() if isinstance(grad_output, ApplegpuTensor) else grad_output
+    mask = (self_cpu > threshold).float()
+    result = grad_cpu * mask
+    return ApplegpuTensor.from_torch(result)
+
+
+@register_op(torch.ops.aten.gelu_backward.default)
+def _op_gelu_backward(grad_output, self_tensor, approximate="none"):
+    """Backward for gelu."""
+    import math
+    x_cpu = self_tensor.to_torch_cpu() if isinstance(self_tensor, ApplegpuTensor) else self_tensor
+    grad_cpu = grad_output.to_torch_cpu() if isinstance(grad_output, ApplegpuTensor) else grad_output
+    # GELU derivative using tanh approximation
+    sqrt_2_pi = math.sqrt(2.0 / math.pi)
+    a = sqrt_2_pi * (x_cpu + 0.044715 * x_cpu ** 3)
+    a = a.clamp(-10, 10)
+    tanh_a = torch.tanh(a)
+    da = sqrt_2_pi * (1 + 3 * 0.044715 * x_cpu ** 2)
+    gelu_grad = 0.5 * (1 + tanh_a) + 0.5 * x_cpu * (1 - tanh_a ** 2) * da
+    result = grad_cpu * gelu_grad
+    return ApplegpuTensor.from_torch(result)
+
+
+@register_op(torch.ops.aten.tanh_backward.default)
+def _op_tanh_backward(grad_output, output):
+    """Backward for tanh: grad * (1 - output^2)."""
+    out_cpu = output.to_torch_cpu() if isinstance(output, ApplegpuTensor) else output
+    grad_cpu = grad_output.to_torch_cpu() if isinstance(grad_output, ApplegpuTensor) else grad_output
+    result = grad_cpu * (1 - out_cpu ** 2)
+    return ApplegpuTensor.from_torch(result)
+
+
+@register_op(torch.ops.aten.mul.Scalar)
+def _op_mul_scalar(a, scalar):
+    """Multiply tensor by a scalar."""
+    return _wrap(gpu.scalar_mul(_unwrap(a), float(scalar)))
+
+
+@register_op(torch.ops.aten.div.Scalar)
+def _op_div_scalar(a, scalar):
+    """Divide tensor by a scalar."""
+    return _wrap(gpu.scalar_mul(_unwrap(a), 1.0 / float(scalar)))
+
+
+@register_op(torch.ops.aten.sum.default)
+def _op_sum_default(a, dtype=None):
+    """Sum all elements (no dim specified)."""
+    gpu_a = _unwrap(a)
+    # Reduce all dimensions by repeated sum on last dim + reshape
+    current = gpu_a
+    shape = list(current.shape)
+    while len(shape) > 1:
+        current = gpu.sum(current)
+        shape = shape[:-1]
+        current = gpu.reshape(current, shape)
+    # Final reduction
+    current = gpu.sum(current)
+    return _wrap(gpu.reshape(current, [1]))
+
+
+@register_op(torch.ops.aten.mean.default)
+def _op_mean_default(a, dtype=None):
+    """Mean of all elements."""
+    gpu_a = _unwrap(a)
+    total_elems = 1
+    for s in gpu_a.shape:
+        total_elems *= s
+    sum_result = _op_sum_default(a, dtype)
+    return _wrap(gpu.scalar_mul(_unwrap(sum_result), 1.0 / total_elems))
+
+
+@register_op(torch.ops.aten.fill_.Scalar)
+def _op_fill_scalar(a, value):
+    """Fill tensor in-place with a scalar value."""
+    gpu_a = _unwrap(a)
+    n_elems = 1
+    for s in gpu_a.shape:
+        n_elems *= s
+    new_gpu = gpu.tensor([float(value)] * n_elems, shape=list(gpu_a.shape))
+    if isinstance(a, ApplegpuTensor):
+        _gpu_tensor_registry[a.data_ptr()] = new_gpu
+        a._gpu_tensor = new_gpu
+    return _wrap(new_gpu)
+
+
+@register_op(torch.ops.aten.zero_.default)
+def _op_zero_(a):
+    """Zero a tensor in-place."""
+    return _op_fill_scalar(a, 0.0)
+
+
+@register_op(torch.ops.aten.ones_like.default)
+def _op_ones_like(a, dtype=None, layout=None, device=None, pin_memory=None, memory_format=None):
+    gpu_a = _unwrap(a)
+    n_elems = 1
+    for s in gpu_a.shape:
+        n_elems *= s
+    gpu_t = gpu.tensor([1.0] * max(n_elems, 1), shape=list(gpu_a.shape))
+    torch_dtype = dtype if dtype is not None else (a.dtype if isinstance(a, torch.Tensor) else torch.float32)
+    return _wrap(gpu_t, torch_dtype=torch_dtype)
+
+
+@register_op(torch.ops.aten.zeros_like.default)
+def _op_zeros_like(a, dtype=None, layout=None, device=None, pin_memory=None, memory_format=None):
+    gpu_a = _unwrap(a)
+    n_elems = 1
+    for s in gpu_a.shape:
+        n_elems *= s
+    gpu_t = gpu.tensor([0.0] * max(n_elems, 1), shape=list(gpu_a.shape))
+    torch_dtype = dtype if dtype is not None else (a.dtype if isinstance(a, torch.Tensor) else torch.float32)
+    return _wrap(gpu_t, torch_dtype=torch_dtype)
+
+
 @register_op(torch.ops.aten.where.self)
 def _op_where(condition, x, y):
     cond_gpu = _unwrap(condition)
@@ -338,17 +528,61 @@ def _op_argmax(a, dim=None, keepdim=False):
 
 @register_op(torch.ops.aten.sum.dim_IntList)
 def _op_sum(a, dim, keepdim=False, dtype=None):
-    ndim = len(_unwrap(a).shape)
+    gpu_a = _unwrap(a)
+    shape = list(gpu_a.shape)
+    ndim = len(shape)
     # Normalize dim list
-    dims = [d if d >= 0 else d + ndim for d in dim]
-    if dims != [ndim - 1]:
-        return NotImplemented
-    result = _wrap(gpu.sum(_unwrap(a)))
+    dims = sorted([d if d >= 0 else d + ndim for d in dim])
+
+    if dims == [ndim - 1]:
+        # Simple last-dim reduction
+        result = _wrap(gpu.sum(gpu_a))
+        if keepdim:
+            new_shape = shape[:]
+            new_shape[-1] = 1
+            result = _wrap(gpu.reshape(_unwrap(result), new_shape))
+        return result
+
+    # Multi-dim or non-last-dim reduction: reduce dims from highest to lowest
+    # to avoid shape index invalidation
+    current = gpu_a
+    current_shape = shape[:]
+
+    # Reduce all requested dims; must handle non-last dims via transpose trick
+    for d in reversed(dims):
+        cs = list(current.shape)
+        cur_ndim = len(cs)
+        if d == cur_ndim - 1:
+            # Last dim: reduce directly
+            current = gpu.sum(current)
+            cs.pop()
+            if len(cs) == 0:
+                cs = [1]
+            current = gpu.reshape(current, cs)
+        elif cur_ndim == 2:
+            # 2D, reducing dim 0: transpose, sum last, reshape
+            current = gpu.transpose(current)
+            current = gpu.sum(current)
+            new_len = cs[1]
+            current = gpu.reshape(current, [new_len])
+        else:
+            # General case: transpose target dim to last, reduce, transpose back
+            current = gpu.transpose_dims(current, d, cur_ndim - 1)
+            current = gpu.sum(current)
+            new_cs = list(current.shape)
+            if len(new_cs) == 0:
+                new_cs = [1]
+            current = gpu.reshape(current, new_cs)
+            # The shape after removing the last dim (which was originally dim d)
+            # No need to transpose back since the dim is gone
+
     if keepdim:
-        new_shape = list(_unwrap(a).shape)
-        new_shape[-1] = 1
-        result = _wrap(gpu.reshape(_unwrap(result), new_shape))
-    return result
+        result_shape = shape[:]
+        for d in dims:
+            result_shape[d] = 1
+        current = gpu.reshape(current, result_shape)
+
+    return _wrap(current)
 
 
 @register_op(torch.ops.aten.mean.dim)
@@ -899,14 +1133,14 @@ class ApplegpuTensor(torch.Tensor):
     """
 
     @staticmethod
-    def __new__(cls, gpu_tensor, torch_dtype=None):
+    def __new__(cls, gpu_tensor, torch_dtype=None, requires_grad=False):
         shape = tuple(gpu_tensor.shape)
         if torch_dtype is None:
             torch_dtype = _GPU_TO_TORCH_DTYPE.get(gpu_tensor.dtype, torch.float32)
 
         # Create a real CPU tensor as backing storage (prevents segfaults in repr)
         backing = torch.zeros(shape, dtype=torch_dtype)
-        r = torch.Tensor._make_subclass(cls, backing)
+        r = torch.Tensor._make_subclass(cls, backing, require_grad=requires_grad)
         # Store directly on the instance (works for direct access)
         r._gpu_tensor = gpu_tensor
         # Also store in the global registry (survives Parameter.data round-trip)
@@ -939,12 +1173,11 @@ class ApplegpuTensor(torch.Tensor):
 
     @classmethod
     def __torch_function__(cls, func, types, args=(), kwargs=None):
-        """Intercept torch functions to prevent unsafe operations on our tensors."""
+        """Intercept torch functions — pass through to __torch_dispatch__ with autograd."""
         kwargs = kwargs or {}
 
-        # For most operations, fall through to __torch_dispatch__
-        with torch.no_grad():
-            return super().__torch_function__(func, types, args, kwargs)
+        # Let autograd see all operations so gradients can be computed
+        return super().__torch_function__(func, types, args, kwargs)
 
     @classmethod
     def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
@@ -976,13 +1209,24 @@ class ApplegpuTensor(torch.Tensor):
     def from_torch(cls, tensor):
         """Convert a torch.Tensor to an ApplegpuTensor."""
         gpu_t = gpu.from_torch(tensor)
-        return cls(gpu_t, torch_dtype=tensor.dtype)
+        return cls(gpu_t, torch_dtype=tensor.dtype, requires_grad=tensor.requires_grad)
 
     def to_torch_cpu(self):
-        """Convert back to a CPU torch.Tensor."""
+        """Convert back to a CPU torch.Tensor.
+
+        Also syncs the CPU backing storage so that if the lazy runtime later
+        frees this tensor's ID, we can still reconstruct it.
+        """
         gt = self._gpu
         if gt is not None:
-            return _gpu_tensor_to_torch_cpu(gt)
+            cpu_t = _gpu_tensor_to_torch_cpu(gt)
+            # Sync backing storage (so _unwrap can recreate if Rust tensor freed)
+            try:
+                backing = torch.Tensor._make_subclass(torch.Tensor, self)
+                backing.copy_(cpu_t)
+            except Exception:
+                pass
+            return cpu_t
         raise RuntimeError("ApplegpuTensor has no associated GPU data")
 
 

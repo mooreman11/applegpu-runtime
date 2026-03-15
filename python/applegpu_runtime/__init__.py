@@ -162,6 +162,22 @@ def enable_torch_backend():
     enable()
 
 
+def enable_training():
+    """Enable training mode (eager evaluation + autograd support).
+
+    Must be called before training loops. Disables lazy kernel fusion to ensure
+    intermediate tensors survive for backward pass gradient computation.
+    """
+    from applegpu_runtime.torch_backend import set_eager_mode
+    set_eager_mode(True)
+
+
+def disable_training():
+    """Disable training mode, re-enabling lazy evaluation with kernel fusion."""
+    from applegpu_runtime.torch_backend import set_eager_mode
+    set_eager_mode(False)
+
+
 def to_applegpu(model_or_tensor):
     """Move a PyTorch model or tensor to applegpu Metal GPU.
 
@@ -250,6 +266,8 @@ __all__ = [
     "run_model",
     "generate_text",
     "enable_torch_backend",
+    "enable_training",
+    "disable_training",
     "to_applegpu",
     "conv1d",
     "conv2d",
