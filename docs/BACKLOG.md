@@ -129,17 +129,17 @@ _Almost everything on the roadmap is blocked by 2D-only tensors. This is the arc
 ### v0.4.0: Expand PyTorch device backend coverage
 _The device backend dispatches 25+ ops but real models need more. Add the missing ops that cause CPU fallbacks._
 
-**New GPU ops needed (Metal kernels):**
-- [ ] **sum / mean** — reduction ops, critical for loss computation and layer_norm decomposition
-- [ ] **where / masked_fill** — conditional ops for attention masking, dropout
-- [ ] **conv1d / conv2d** — convolution kernels for CNNs (ResNet, etc.)
-- [ ] **batch_norm** — normalization for CNN models
-- [ ] **max_pool2d / avg_pool2d** — pooling layers for CNNs
-- [ ] **linear (fused matmul + bias)** — single kernel instead of matmul + add_bias
-- [ ] **pow** — element-wise power (used in GELU decomposition)
-- [ ] **abs / sign / clamp** — element-wise math ops
-- [ ] **gather / scatter / index_select** — advanced indexing
-- [ ] **triu / tril** — triangular ops for causal masks
+**New GPU ops needed (Metal kernels):** ALL DONE
+- [x] **sum / mean** — reduction ops
+- [x] **where / masked_fill** — conditional ops
+- [x] **conv1d / conv2d** — convolution kernels
+- [x] **batch_norm** — inference-mode normalization
+- [x] **max_pool2d / avg_pool2d** — pooling layers
+- [x] **linear (fused matmul + bias)** — handled via aten.addmm dispatch
+- [x] **pow** — element-wise power
+- [x] **abs / sign / clamp** — element-wise math
+- [x] **gather / index_select** — advanced indexing (scatter deferred to CPU fallback)
+- [x] **triu / tril** — triangular ops
 
 **PyTorch device backend improvements:**
 - [ ] **model.to("applegpu")** — full nn.Module parameter migration (requires proper storage backend)
