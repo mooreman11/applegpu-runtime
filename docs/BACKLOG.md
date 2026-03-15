@@ -127,7 +127,7 @@ _Almost everything on the roadmap is blocked by 2D-only tensors. This is the arc
 
 ### Framework Improvements
 - [ ] **Zero-copy from_numpy** — Metal `makeBuffer(bytesNoCopy:)` Swift FFI, page alignment, GC pinning, three-layer work
-- [ ] **PyTorch custom device backend** — register `applegpu` via PyTorch PrivateUse1 device API
+- [x] **PyTorch custom device backend** — ApplegpuTensor with __torch_dispatch__, 25+ aten ops dispatched to Metal, CPU fallback with warnings
 - [ ] **PyTorch autograd integration** — `torch.autograd.Function` wrappers (requires backward ops)
 - [ ] **Direct from_torch via data_ptr()** — bypass NumPy bridge when Metal bytesNoCopy is available
 
