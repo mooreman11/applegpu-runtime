@@ -474,6 +474,29 @@ fn test_batched_softmax_causal_3d() {
 }
 
 #[test]
+fn test_single_cb_eval_chain() {
+    // Chain: a + b -> c, c * b -> d
+    let device = match get_device() { Some(d) => d, None => return };
+    let mut rt = LazyRuntime::new();
+
+    let a = Tensor::from_f32(&device, vec![5], &[1.0, 2.0, 3.0, 4.0, 5.0]).unwrap();
+    let b = Tensor::from_f32(&device, vec![5], &[10.0, 20.0, 30.0, 40.0, 50.0]).unwrap();
+    let a_id = a.meta.id;
+    let b_id = b.meta.id;
+    rt.insert_tensor(a).unwrap();
+    rt.insert_tensor(b).unwrap();
+
+    let c_id = ops::add(&mut rt, a_id, b_id).unwrap();
+    let d_id = ops::mul(&mut rt, c_id, b_id).unwrap();
+
+    rt.eval(&device, d_id).unwrap();
+
+    let result = rt.read_f32(d_id).unwrap();
+    // c = [11, 22, 33, 44, 55], d = c * b = [110, 440, 990, 1760, 2750]
+    assert_eq!(result, vec![110.0, 440.0, 990.0, 1760.0, 2750.0]);
+}
+
+#[test]
 fn test_batched_softmax_causal_2d_still_works() {
     // [3, 3] -> causal softmax (backward compat)
     let device = match get_device() { Some(d) => d, None => return };

@@ -96,10 +96,9 @@ impl LazyRuntime {
     /// Evaluate a tensor: execute all pending ops needed to materialize it.
     /// After evaluation, the tensor is in `self.tensors` and its graph nodes are removed.
     ///
-    /// Uses command buffer batching: all ops are submitted non-blocking to a
-    /// shared command queue, then we wait only on the last command buffer.
-    /// Metal guarantees in-order execution on the same queue, so all prior
-    /// command buffers complete before the last one.
+    /// Uses single command buffer encoding: all ops are encoded into one
+    /// MTLCommandBuffer via begin_batch/end_batch, then we wait once at the end.
+    /// Falls back to per-op command buffers (Phase 2a) if begin_batch fails.
     pub fn eval(&mut self, device: &Device, id: u64) -> Result<()> {
         if self.is_materialized(id) {
             return Ok(()); // already done
@@ -116,36 +115,51 @@ impl LazyRuntime {
         order = crate::fusion::optimize(&mut self.graph, &order);
 
         let queue = crate::compute::get_shared_queue(device);
+        let batch_cb = crate::compute::begin_batch(queue);
+        let use_batch = !batch_cb.is_null();
         let mut last_cb: Option<*mut std::ffi::c_void> = None;
 
-        for node_id in order {
-            if self.is_materialized(node_id) {
-                continue; // already evaluated (shared subexpression)
+        let loop_result: Result<()> = (|| {
+            for node_id in order {
+                if self.is_materialized(node_id) {
+                    continue;
+                }
+
+                let node = self.graph.remove_node(node_id).ok_or_else(|| {
+                    GpuError::GraphError(format!("Node {} not found in graph", node_id))
+                })?;
+
+                let out_size = node.out_shape.numel() * node.out_dtype.size_bytes();
+                let out_buf = self.pool.acquire(device, out_size)?;
+                let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+
+                let cb = self.execute_node_nb(device, queue, &node, &out)?;
+                if !use_batch {
+                    last_cb = Some(cb);
+                }
+
+                let size = node.out_shape.numel() * node.out_dtype.size_bytes();
+                self.scheduler.allocate_tensor(container_id, node_id, size)?;
+                self.tensors.insert(node_id, out);
             }
+            Ok(())
+        })();
 
-            let node = self.graph.remove_node(node_id).ok_or_else(|| {
-                GpuError::GraphError(format!("Node {} not found in graph", node_id))
-            })?;
-
-            let out_size = node.out_shape.numel() * node.out_dtype.size_bytes();
-            let out_buf = self.pool.acquire(device, out_size)?;
-            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
-
-            let cb = self.execute_node_nb(device, queue, &node, &out)?;
-            last_cb = Some(cb);
-
-            let size = node.out_shape.numel() * node.out_dtype.size_bytes();
-            self.scheduler.allocate_tensor(container_id, node_id, size)?;
-            self.tensors.insert(node_id, out);
-        }
-
-        // Wait only on the last command buffer — Metal in-order queue guarantees
-        // all prior submissions are complete when this one finishes.
-        if let Some(cb) = last_cb {
+        // Finalize: commit or abort the batch, then wait
+        if use_batch {
+            if loop_result.is_ok() {
+                let cb = crate::compute::end_batch();
+                if !cb.is_null() {
+                    crate::compute::wait_command_buffer(cb);
+                }
+            } else {
+                crate::compute::abort_batch();
+            }
+        } else if let Some(cb) = last_cb {
             crate::compute::wait_command_buffer(cb);
         }
 
-        Ok(())
+        loop_result
     }
 
     /// Resolve the container that owns (or will own) a tensor.
