@@ -107,6 +107,48 @@ pub fn sqrt(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
     lazy_unary_op(rt, input_id, OpKind::Sqrt)
 }
 
+pub fn abs(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
+    lazy_unary_op(rt, input_id, OpKind::Abs)
+}
+
+pub fn sign(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
+    lazy_unary_op(rt, input_id, OpKind::Sign)
+}
+
+/// Element-wise power by scalar exponent.
+pub fn pow(rt: &mut LazyRuntime, input_id: u64, exponent: f32) -> Result<u64> {
+    let dtype = rt.dtype(input_id)?;
+    validate_compute_dtype(dtype)?;
+    let shape = rt.shape(input_id)?;
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op: OpKind::Pow { exponent },
+        inputs: vec![input_id],
+        out_shape: Shape::new(shape)?,
+        out_dtype: dtype,
+        container_id: ContainerId::DEFAULT,
+    });
+    Ok(out_id)
+}
+
+/// Element-wise clamp to [min_val, max_val].
+pub fn clamp(rt: &mut LazyRuntime, input_id: u64, min_val: f32, max_val: f32) -> Result<u64> {
+    let dtype = rt.dtype(input_id)?;
+    validate_compute_dtype(dtype)?;
+    let shape = rt.shape(input_id)?;
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op: OpKind::Clamp { min_val, max_val },
+        inputs: vec![input_id],
+        out_shape: Shape::new(shape)?,
+        out_dtype: dtype,
+        container_id: ContainerId::DEFAULT,
+    });
+    Ok(out_id)
+}
+
 /// Record a matmul op. Validates 2D shapes and inner dimension match.
 pub fn matmul(rt: &mut LazyRuntime, a_id: u64, b_id: u64) -> Result<u64> {
     let a_dtype = rt.dtype(a_id)?;
@@ -2077,5 +2119,53 @@ mod tests {
         rt.insert_tensor(v).unwrap();
 
         assert!(attention(&mut rt, q_id, k_id, v_id).is_err());
+    }
+
+    #[test]
+    fn test_abs() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        let a = Tensor::from_f32(&device, vec![3], &[-1.0, 2.0, -3.0]).unwrap();
+        let a_id = a.meta.id;
+        rt.insert_tensor(a).unwrap();
+        let r_id = abs(&mut rt, a_id).unwrap();
+        rt.eval(&device, r_id).unwrap();
+        assert_eq!(rt.read_f32(r_id).unwrap(), &[1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn test_sign() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        let a = Tensor::from_f32(&device, vec![3], &[-5.0, 0.0, 3.0]).unwrap();
+        let a_id = a.meta.id;
+        rt.insert_tensor(a).unwrap();
+        let r_id = sign(&mut rt, a_id).unwrap();
+        rt.eval(&device, r_id).unwrap();
+        assert_eq!(rt.read_f32(r_id).unwrap(), &[-1.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn test_pow() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        let a = Tensor::from_f32(&device, vec![3], &[2.0, 3.0, 4.0]).unwrap();
+        let a_id = a.meta.id;
+        rt.insert_tensor(a).unwrap();
+        let r_id = pow(&mut rt, a_id, 2.0).unwrap();
+        rt.eval(&device, r_id).unwrap();
+        assert_eq!(rt.read_f32(r_id).unwrap(), &[4.0, 9.0, 16.0]);
+    }
+
+    #[test]
+    fn test_clamp() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        let a = Tensor::from_f32(&device, vec![3], &[1.0, 5.0, 10.0]).unwrap();
+        let a_id = a.meta.id;
+        rt.insert_tensor(a).unwrap();
+        let r_id = clamp(&mut rt, a_id, 2.0, 8.0).unwrap();
+        rt.eval(&device, r_id).unwrap();
+        assert_eq!(rt.read_f32(r_id).unwrap(), &[2.0, 5.0, 8.0]);
     }
 }

@@ -208,6 +208,34 @@ class TestElementwiseUnary:
         expected = torch.nn.functional.gelu(torch.tensor([-1.0, 0.0, 1.0, 2.0]))
         assert torch.allclose(c.to_torch_cpu(), expected, atol=2e-3)
 
+    def test_abs(self):
+        from applegpu_runtime.torch_backend import ApplegpuTensor
+        a = ApplegpuTensor.from_torch(torch.tensor([-1.0, 2.0, -3.0]))
+        c = torch.abs(a)
+        assert isinstance(c, ApplegpuTensor)
+        assert torch.allclose(c.to_torch_cpu(), torch.tensor([1.0, 2.0, 3.0]))
+
+    def test_sign(self):
+        from applegpu_runtime.torch_backend import ApplegpuTensor
+        a = ApplegpuTensor.from_torch(torch.tensor([-5.0, 0.0, 3.0]))
+        c = torch.sign(a)
+        assert isinstance(c, ApplegpuTensor)
+        assert torch.allclose(c.to_torch_cpu(), torch.tensor([-1.0, 0.0, 1.0]))
+
+    def test_pow(self):
+        from applegpu_runtime.torch_backend import ApplegpuTensor
+        a = ApplegpuTensor.from_torch(torch.tensor([2.0, 3.0, 4.0]))
+        c = torch.pow(a, 2.0)
+        assert isinstance(c, ApplegpuTensor)
+        assert torch.allclose(c.to_torch_cpu(), torch.tensor([4.0, 9.0, 16.0]))
+
+    def test_clamp(self):
+        from applegpu_runtime.torch_backend import ApplegpuTensor
+        a = ApplegpuTensor.from_torch(torch.tensor([1.0, 5.0, 10.0]))
+        c = torch.clamp(a, min=2.0, max=8.0)
+        assert isinstance(c, ApplegpuTensor)
+        assert torch.allclose(c.to_torch_cpu(), torch.tensor([2.0, 5.0, 8.0]))
+
 
 class TestMatrixOps:
     """Matrix multiplication ops dispatched to GPU."""

@@ -192,6 +192,28 @@ def _op_sqrt(a):
     return _wrap(gpu.sqrt(_unwrap(a)))
 
 
+@register_op(torch.ops.aten.abs.default)
+def _op_abs(a):
+    return _wrap(gpu.abs(_unwrap(a)))
+
+
+@register_op(torch.ops.aten.sign.default)
+def _op_sign(a):
+    return _wrap(gpu.sign(_unwrap(a)))
+
+
+@register_op(torch.ops.aten.pow.Tensor_Scalar)
+def _op_pow(a, exponent):
+    return _wrap(gpu.pow(_unwrap(a), float(exponent)))
+
+
+@register_op(torch.ops.aten.clamp.default)
+def _op_clamp(a, min=None, max=None):
+    min_val = float(min) if min is not None else -1e30
+    max_val = float(max) if max is not None else 1e30
+    return _wrap(gpu.clamp(_unwrap(a), min_val, max_val))
+
+
 # ============================================================
 # Matrix ops
 # ============================================================

@@ -507,6 +507,54 @@ extern "C" {
         ndim: u32,
         numel: u32,
     ) -> *mut std::ffi::c_void;
+
+    pub fn gpu_bridge_compute_pow_nd(
+        compute: *mut GPUComputeHandle,
+        buf_input: *const GPUBufferHandle,
+        buf_out: *mut GPUBufferHandle,
+        in_strides: *const u32,
+        out_shape: *const u32,
+        ndim: u32,
+        numel: u32,
+        exponent: f32,
+    ) -> i32;
+
+    pub fn gpu_bridge_compute_pow_nd_nb(
+        compute: *mut GPUComputeHandle,
+        queue: *mut std::ffi::c_void,
+        buf_input: *const GPUBufferHandle,
+        buf_out: *mut GPUBufferHandle,
+        in_strides: *const u32,
+        out_shape: *const u32,
+        ndim: u32,
+        numel: u32,
+        exponent: f32,
+    ) -> *mut std::ffi::c_void;
+
+    pub fn gpu_bridge_compute_clamp_nd(
+        compute: *mut GPUComputeHandle,
+        buf_input: *const GPUBufferHandle,
+        buf_out: *mut GPUBufferHandle,
+        in_strides: *const u32,
+        out_shape: *const u32,
+        ndim: u32,
+        numel: u32,
+        min_val: f32,
+        max_val: f32,
+    ) -> i32;
+
+    pub fn gpu_bridge_compute_clamp_nd_nb(
+        compute: *mut GPUComputeHandle,
+        queue: *mut std::ffi::c_void,
+        buf_input: *const GPUBufferHandle,
+        buf_out: *mut GPUBufferHandle,
+        in_strides: *const u32,
+        out_shape: *const u32,
+        ndim: u32,
+        numel: u32,
+        min_val: f32,
+        max_val: f32,
+    ) -> *mut std::ffi::c_void;
 }
 
 #[cfg(test)]

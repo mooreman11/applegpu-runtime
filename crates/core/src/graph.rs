@@ -50,6 +50,14 @@ pub enum OpKind {
     Sum,
     // Mean reduction along last dim
     Mean,
+    // Element-wise absolute value
+    Abs,
+    // Element-wise sign (-1, 0, 1)
+    Sign,
+    // Element-wise power by scalar exponent
+    Pow { exponent: f32 },
+    // Element-wise clamp to [min, max]
+    Clamp { min_val: f32, max_val: f32 },
 }
 
 impl OpKind {
@@ -81,11 +89,15 @@ impl OpKind {
             OpKind::Argmax => "argmax_f32",
             OpKind::Sum => "sum_f32",
             OpKind::Mean => "mean_f32",
+            OpKind::Abs => "elementwise_abs",
+            OpKind::Sign => "elementwise_sign",
+            OpKind::Pow { .. } => "pow_f32",
+            OpKind::Clamp { .. } => "clamp_f32",
         }
     }
 
     pub fn is_unary(&self) -> bool {
-        matches!(self, OpKind::Neg | OpKind::Relu | OpKind::Exp | OpKind::Log | OpKind::Sqrt | OpKind::Gelu)
+        matches!(self, OpKind::Neg | OpKind::Relu | OpKind::Exp | OpKind::Log | OpKind::Sqrt | OpKind::Gelu | OpKind::Abs | OpKind::Sign)
     }
 
     pub fn is_matmul(&self) -> bool {
@@ -98,7 +110,8 @@ impl OpKind {
 
     pub fn is_elementwise(&self) -> bool {
         matches!(self, OpKind::Add | OpKind::Sub | OpKind::Mul | OpKind::Div |
-                       OpKind::Neg | OpKind::Relu | OpKind::Exp | OpKind::Log | OpKind::Sqrt | OpKind::Gelu)
+                       OpKind::Neg | OpKind::Relu | OpKind::Exp | OpKind::Log | OpKind::Sqrt | OpKind::Gelu |
+                       OpKind::Abs | OpKind::Sign)
     }
 
     pub fn is_softmax(&self) -> bool {
@@ -155,6 +168,22 @@ impl OpKind {
 
     pub fn is_mean(&self) -> bool {
         matches!(self, OpKind::Mean)
+    }
+
+    pub fn is_abs(&self) -> bool {
+        matches!(self, OpKind::Abs)
+    }
+
+    pub fn is_sign(&self) -> bool {
+        matches!(self, OpKind::Sign)
+    }
+
+    pub fn is_pow(&self) -> bool {
+        matches!(self, OpKind::Pow { .. })
+    }
+
+    pub fn is_clamp(&self) -> bool {
+        matches!(self, OpKind::Clamp { .. })
     }
 }
 

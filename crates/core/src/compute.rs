@@ -89,6 +89,16 @@ kernel void elementwise_sqrt(device const float* input [[buffer(0)]], device flo
     uint in_off = nd_index_to_offset(id, out_shape, in_strides, ndim);
     out[id] = sqrt(input[in_off]);
 }
+kernel void elementwise_abs(device const float* input [[buffer(0)]], device float* out [[buffer(1)]], constant uint* in_strides [[buffer(2)]], constant uint* out_shape [[buffer(3)]], constant uint& ndim [[buffer(4)]], constant uint& numel [[buffer(5)]], uint id [[thread_position_in_grid]]) {
+    if (id >= numel) return;
+    uint in_off = nd_index_to_offset(id, out_shape, in_strides, ndim);
+    out[id] = abs(input[in_off]);
+}
+kernel void elementwise_sign(device const float* input [[buffer(0)]], device float* out [[buffer(1)]], constant uint* in_strides [[buffer(2)]], constant uint* out_shape [[buffer(3)]], constant uint& ndim [[buffer(4)]], constant uint& numel [[buffer(5)]], uint id [[thread_position_in_grid]]) {
+    if (id >= numel) return;
+    uint in_off = nd_index_to_offset(id, out_shape, in_strides, ndim);
+    out[id] = sign(input[in_off]);
+}
 "#
 );
 
@@ -219,6 +229,66 @@ kernel void scalar_mul_f32(
     if (id < count) { output[id] = input[id] * scale; }
 }
 "#;
+
+const POW_KERNEL_SOURCE: &str = const_format::concatcp!(
+    r#"
+#include <metal_stdlib>
+using namespace metal;
+"#,
+    ND_INDEX_HELPER,
+    r#"
+kernel void pow_f32(device const float* input [[buffer(0)]], device float* out [[buffer(1)]], constant uint* in_strides [[buffer(2)]], constant uint* out_shape [[buffer(3)]], constant uint& ndim [[buffer(4)]], constant uint& numel [[buffer(5)]], constant float& exponent [[buffer(6)]], uint id [[thread_position_in_grid]]) {
+    if (id >= numel) return;
+    uint in_off = nd_index_to_offset(id, out_shape, in_strides, ndim);
+    out[id] = pow(input[in_off], exponent);
+}
+"#
+);
+
+const POW_KERNEL_SOURCE_F16: &str = const_format::concatcp!(
+    r#"
+#include <metal_stdlib>
+using namespace metal;
+"#,
+    ND_INDEX_HELPER,
+    r#"
+kernel void pow_f16(device const half* input [[buffer(0)]], device half* out [[buffer(1)]], constant uint* in_strides [[buffer(2)]], constant uint* out_shape [[buffer(3)]], constant uint& ndim [[buffer(4)]], constant uint& numel [[buffer(5)]], constant float& exponent [[buffer(6)]], uint id [[thread_position_in_grid]]) {
+    if (id >= numel) return;
+    uint in_off = nd_index_to_offset(id, out_shape, in_strides, ndim);
+    out[id] = half(pow(float(input[in_off]), exponent));
+}
+"#
+);
+
+const CLAMP_KERNEL_SOURCE: &str = const_format::concatcp!(
+    r#"
+#include <metal_stdlib>
+using namespace metal;
+"#,
+    ND_INDEX_HELPER,
+    r#"
+kernel void clamp_f32(device const float* input [[buffer(0)]], device float* out [[buffer(1)]], constant uint* in_strides [[buffer(2)]], constant uint* out_shape [[buffer(3)]], constant uint& ndim [[buffer(4)]], constant uint& numel [[buffer(5)]], constant float& min_val [[buffer(6)]], constant float& max_val [[buffer(7)]], uint id [[thread_position_in_grid]]) {
+    if (id >= numel) return;
+    uint in_off = nd_index_to_offset(id, out_shape, in_strides, ndim);
+    out[id] = clamp(input[in_off], min_val, max_val);
+}
+"#
+);
+
+const CLAMP_KERNEL_SOURCE_F16: &str = const_format::concatcp!(
+    r#"
+#include <metal_stdlib>
+using namespace metal;
+"#,
+    ND_INDEX_HELPER,
+    r#"
+kernel void clamp_f16(device const half* input [[buffer(0)]], device half* out [[buffer(1)]], constant uint* in_strides [[buffer(2)]], constant uint* out_shape [[buffer(3)]], constant uint& ndim [[buffer(4)]], constant uint& numel [[buffer(5)]], constant float& min_val [[buffer(6)]], constant float& max_val [[buffer(7)]], uint id [[thread_position_in_grid]]) {
+    if (id >= numel) return;
+    uint in_off = nd_index_to_offset(id, out_shape, in_strides, ndim);
+    out[id] = half(clamp(float(input[in_off]), min_val, max_val));
+}
+"#
+);
 
 const GELU_KERNEL_SOURCE: &str = const_format::concatcp!(
     r#"
@@ -367,6 +437,16 @@ kernel void elementwise_sqrt_f16(device const half* input [[buffer(0)]], device 
     if (id >= numel) return;
     uint in_off = nd_index_to_offset(id, out_shape, in_strides, ndim);
     out[id] = sqrt(input[in_off]);
+}
+kernel void elementwise_abs_f16(device const half* input [[buffer(0)]], device half* out [[buffer(1)]], constant uint* in_strides [[buffer(2)]], constant uint* out_shape [[buffer(3)]], constant uint& ndim [[buffer(4)]], constant uint& numel [[buffer(5)]], uint id [[thread_position_in_grid]]) {
+    if (id >= numel) return;
+    uint in_off = nd_index_to_offset(id, out_shape, in_strides, ndim);
+    out[id] = abs(input[in_off]);
+}
+kernel void elementwise_sign_f16(device const half* input [[buffer(0)]], device half* out [[buffer(1)]], constant uint* in_strides [[buffer(2)]], constant uint* out_shape [[buffer(3)]], constant uint& ndim [[buffer(4)]], constant uint& numel [[buffer(5)]], uint id [[thread_position_in_grid]]) {
+    if (id >= numel) return;
+    uint in_off = nd_index_to_offset(id, out_shape, in_strides, ndim);
+    out[id] = sign(input[in_off]);
 }
 "#
 );
@@ -1690,6 +1770,100 @@ impl ComputePipeline {
         };
         if cb.is_null() { Err(GpuError::ComputeFailed("Non-blocking unary N-D dispatch failed".to_string())) } else { Ok(cb) }
     }
+
+    /// Dispatch N-D pow op with stride arrays and exponent constant.
+    pub fn dispatch_pow_nd(
+        &self,
+        buf_input: &Buffer, in_strides: &[u32; MAX_DIMS],
+        buf_out: &Buffer, out_shape: &[u32; MAX_DIMS],
+        ndim: u32, numel: u32, exponent: f32,
+    ) -> Result<()> {
+        let result = unsafe {
+            ffi::gpu_bridge_compute_pow_nd(
+                self.handle,
+                buf_input.raw_handle() as *const _,
+                buf_out.raw_handle(),
+                in_strides.as_ptr(),
+                out_shape.as_ptr(),
+                ndim,
+                numel,
+                exponent,
+            )
+        };
+        if result == 0 { Ok(()) } else { Err(GpuError::ComputeFailed("Pow N-D dispatch failed".to_string())) }
+    }
+
+    /// Non-blocking N-D pow op.
+    pub fn dispatch_pow_nd_nb(
+        &self,
+        queue: *mut std::ffi::c_void,
+        buf_input: &Buffer, in_strides: &[u32; MAX_DIMS],
+        buf_out: &Buffer, out_shape: &[u32; MAX_DIMS],
+        ndim: u32, numel: u32, exponent: f32,
+    ) -> Result<*mut std::ffi::c_void> {
+        let cb = unsafe {
+            ffi::gpu_bridge_compute_pow_nd_nb(
+                self.handle,
+                queue,
+                buf_input.raw_handle() as *const _,
+                buf_out.raw_handle(),
+                in_strides.as_ptr(),
+                out_shape.as_ptr(),
+                ndim,
+                numel,
+                exponent,
+            )
+        };
+        if cb.is_null() { Err(GpuError::ComputeFailed("Non-blocking pow N-D dispatch failed".to_string())) } else { Ok(cb) }
+    }
+
+    /// Dispatch N-D clamp op with stride arrays, min and max constants.
+    pub fn dispatch_clamp_nd(
+        &self,
+        buf_input: &Buffer, in_strides: &[u32; MAX_DIMS],
+        buf_out: &Buffer, out_shape: &[u32; MAX_DIMS],
+        ndim: u32, numel: u32, min_val: f32, max_val: f32,
+    ) -> Result<()> {
+        let result = unsafe {
+            ffi::gpu_bridge_compute_clamp_nd(
+                self.handle,
+                buf_input.raw_handle() as *const _,
+                buf_out.raw_handle(),
+                in_strides.as_ptr(),
+                out_shape.as_ptr(),
+                ndim,
+                numel,
+                min_val,
+                max_val,
+            )
+        };
+        if result == 0 { Ok(()) } else { Err(GpuError::ComputeFailed("Clamp N-D dispatch failed".to_string())) }
+    }
+
+    /// Non-blocking N-D clamp op.
+    pub fn dispatch_clamp_nd_nb(
+        &self,
+        queue: *mut std::ffi::c_void,
+        buf_input: &Buffer, in_strides: &[u32; MAX_DIMS],
+        buf_out: &Buffer, out_shape: &[u32; MAX_DIMS],
+        ndim: u32, numel: u32, min_val: f32, max_val: f32,
+    ) -> Result<*mut std::ffi::c_void> {
+        let cb = unsafe {
+            ffi::gpu_bridge_compute_clamp_nd_nb(
+                self.handle,
+                queue,
+                buf_input.raw_handle() as *const _,
+                buf_out.raw_handle(),
+                in_strides.as_ptr(),
+                out_shape.as_ptr(),
+                ndim,
+                numel,
+                min_val,
+                max_val,
+            )
+        };
+        if cb.is_null() { Err(GpuError::ComputeFailed("Non-blocking clamp N-D dispatch failed".to_string())) } else { Ok(cb) }
+    }
 }
 
 impl Drop for ComputePipeline {
@@ -1756,6 +1930,8 @@ impl KernelRegistry {
                     "sum_f32" => SUM_KERNEL_SOURCE_F16,
                     "mean_f32" => MEAN_KERNEL_SOURCE_F16,
                     "copy_strided_f32" => COPY_STRIDED_KERNEL_SOURCE_F16,
+                    "pow_f32" => POW_KERNEL_SOURCE_F16,
+                    "clamp_f32" => CLAMP_KERNEL_SOURCE_F16,
                     _ => BINARY_KERNEL_SOURCE_F16, // fallback
                 };
                 // For named kernels like matmul_f32 -> matmul_f16
@@ -1791,6 +1967,8 @@ impl KernelRegistry {
                     "sum_f32" => SUM_KERNEL_SOURCE,
                     "mean_f32" => MEAN_KERNEL_SOURCE,
                     "copy_strided_f32" => COPY_STRIDED_KERNEL_SOURCE,
+                    "pow_f32" => POW_KERNEL_SOURCE,
+                    "clamp_f32" => CLAMP_KERNEL_SOURCE,
                     _ => BINARY_KERNEL_SOURCE,
                 };
                 (source, base_name.to_string())
@@ -1997,6 +2175,50 @@ impl KernelRegistry {
         let (source, func) = Self::resolve_kernel("scalar_mul_f32", dtype);
         let pipeline = self.get_or_create(device, source, &func)?;
         pipeline.dispatch_scalar_mul(buf_input, buf_output, scale, element_count)
+    }
+
+    pub fn dispatch_pow_nd_typed(
+        &self, device: &Device, dtype: DType,
+        buf_input: &Buffer, in_strides: &[u32; MAX_DIMS],
+        buf_out: &Buffer, out_shape: &[u32; MAX_DIMS],
+        ndim: u32, numel: u32, exponent: f32,
+    ) -> Result<()> {
+        let (source, func) = Self::resolve_kernel("pow_f32", dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_pow_nd(buf_input, in_strides, buf_out, out_shape, ndim, numel, exponent)
+    }
+
+    pub fn dispatch_pow_nd_typed_nb(
+        &self, device: &Device, dtype: DType, queue: *mut std::ffi::c_void,
+        buf_input: &Buffer, in_strides: &[u32; MAX_DIMS],
+        buf_out: &Buffer, out_shape: &[u32; MAX_DIMS],
+        ndim: u32, numel: u32, exponent: f32,
+    ) -> Result<*mut std::ffi::c_void> {
+        let (source, func) = Self::resolve_kernel("pow_f32", dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_pow_nd_nb(queue, buf_input, in_strides, buf_out, out_shape, ndim, numel, exponent)
+    }
+
+    pub fn dispatch_clamp_nd_typed(
+        &self, device: &Device, dtype: DType,
+        buf_input: &Buffer, in_strides: &[u32; MAX_DIMS],
+        buf_out: &Buffer, out_shape: &[u32; MAX_DIMS],
+        ndim: u32, numel: u32, min_val: f32, max_val: f32,
+    ) -> Result<()> {
+        let (source, func) = Self::resolve_kernel("clamp_f32", dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_clamp_nd(buf_input, in_strides, buf_out, out_shape, ndim, numel, min_val, max_val)
+    }
+
+    pub fn dispatch_clamp_nd_typed_nb(
+        &self, device: &Device, dtype: DType, queue: *mut std::ffi::c_void,
+        buf_input: &Buffer, in_strides: &[u32; MAX_DIMS],
+        buf_out: &Buffer, out_shape: &[u32; MAX_DIMS],
+        ndim: u32, numel: u32, min_val: f32, max_val: f32,
+    ) -> Result<*mut std::ffi::c_void> {
+        let (source, func) = Self::resolve_kernel("clamp_f32", dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_clamp_nd_nb(queue, buf_input, in_strides, buf_out, out_shape, ndim, numel, min_val, max_val)
     }
 
     /// Dispatch GELU with dtype-aware kernel selection (uses unary dispatch pattern).

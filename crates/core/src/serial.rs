@@ -80,6 +80,10 @@ fn op_to_discriminant(op: &OpKind) -> u32 {
         OpKind::Argmax => 22,
         OpKind::Sum => 23,
         OpKind::Mean => 24,
+        OpKind::Abs => 25,
+        OpKind::Sign => 26,
+        OpKind::Pow { .. } => 27,
+        OpKind::Clamp { .. } => 28,
     }
 }
 
@@ -151,6 +155,20 @@ fn discriminant_to_op(d: u32, r: &mut impl Read) -> io::Result<OpKind> {
         22 => Ok(OpKind::Argmax),
         23 => Ok(OpKind::Sum),
         24 => Ok(OpKind::Mean),
+        25 => Ok(OpKind::Abs),
+        26 => Ok(OpKind::Sign),
+        27 => {
+            let mut exp_bytes = [0u8; 4];
+            r.read_exact(&mut exp_bytes)?;
+            Ok(OpKind::Pow { exponent: f32::from_le_bytes(exp_bytes) })
+        }
+        28 => {
+            let mut min_bytes = [0u8; 4];
+            r.read_exact(&mut min_bytes)?;
+            let mut max_bytes = [0u8; 4];
+            r.read_exact(&mut max_bytes)?;
+            Ok(OpKind::Clamp { min_val: f32::from_le_bytes(min_bytes), max_val: f32::from_le_bytes(max_bytes) })
+        }
         _ => Err(io::Error::new(io::ErrorKind::InvalidData, format!("Unknown op type: {}", d))),
     }
 }
@@ -218,6 +236,13 @@ impl EvalRequest {
             }
             if let OpKind::Concat { dim } = node.op {
                 write_u32(&mut buf, dim as u32).unwrap();
+            }
+            if let OpKind::Pow { exponent } = node.op {
+                buf.write_all(&exponent.to_le_bytes()).unwrap();
+            }
+            if let OpKind::Clamp { min_val, max_val } = node.op {
+                buf.write_all(&min_val.to_le_bytes()).unwrap();
+                buf.write_all(&max_val.to_le_bytes()).unwrap();
             }
         }
 

@@ -314,6 +314,36 @@ impl GpuTensor {
         Ok(GpuTensor { id, destroyed: Cell::new(false) })
     }
 
+    fn abs(&self) -> PyResult<GpuTensor> {
+        let mut rt = RUNTIME_LAZY.lock().unwrap();
+        let id = applegpu_core::ops::abs(&mut rt, self.id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(GpuTensor { id, destroyed: Cell::new(false) })
+    }
+
+    fn sign(&self) -> PyResult<GpuTensor> {
+        let mut rt = RUNTIME_LAZY.lock().unwrap();
+        let id = applegpu_core::ops::sign(&mut rt, self.id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(GpuTensor { id, destroyed: Cell::new(false) })
+    }
+
+    #[pyo3(signature = (exponent))]
+    fn pow(&self, exponent: f32) -> PyResult<GpuTensor> {
+        let mut rt = RUNTIME_LAZY.lock().unwrap();
+        let id = applegpu_core::ops::pow(&mut rt, self.id, exponent)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(GpuTensor { id, destroyed: Cell::new(false) })
+    }
+
+    #[pyo3(signature = (min_val, max_val))]
+    fn clamp(&self, min_val: f32, max_val: f32) -> PyResult<GpuTensor> {
+        let mut rt = RUNTIME_LAZY.lock().unwrap();
+        let id = applegpu_core::ops::clamp(&mut rt, self.id, min_val, max_val)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(GpuTensor { id, destroyed: Cell::new(false) })
+    }
+
     #[pyo3(signature = (scale))]
     fn scalar_mul(&self, scale: f32) -> PyResult<GpuTensor> {
         let mut rt = RUNTIME_LAZY.lock().unwrap();
@@ -634,6 +664,14 @@ fn log(t: &GpuTensor) -> PyResult<GpuTensor> { t.log() }
 #[pyfunction]
 fn sqrt(t: &GpuTensor) -> PyResult<GpuTensor> { t.sqrt() }
 #[pyfunction]
+fn abs(t: &GpuTensor) -> PyResult<GpuTensor> { t.abs() }
+#[pyfunction]
+fn sign(t: &GpuTensor) -> PyResult<GpuTensor> { t.sign() }
+#[pyfunction]
+fn pow(t: &GpuTensor, exponent: f32) -> PyResult<GpuTensor> { t.pow(exponent) }
+#[pyfunction]
+fn clamp(t: &GpuTensor, min_val: f32, max_val: f32) -> PyResult<GpuTensor> { t.clamp(min_val, max_val) }
+#[pyfunction]
 fn scalar_mul(t: &GpuTensor, scale: f32) -> PyResult<GpuTensor> { t.scalar_mul(scale) }
 #[pyfunction]
 fn reshape(t: &GpuTensor, new_shape: Vec<usize>) -> PyResult<GpuTensor> { t.reshape(new_shape) }
@@ -888,6 +926,10 @@ fn applegpu_runtime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(exp, m)?)?;
     m.add_function(wrap_pyfunction!(log, m)?)?;
     m.add_function(wrap_pyfunction!(sqrt, m)?)?;
+    m.add_function(wrap_pyfunction!(abs, m)?)?;
+    m.add_function(wrap_pyfunction!(sign, m)?)?;
+    m.add_function(wrap_pyfunction!(pow, m)?)?;
+    m.add_function(wrap_pyfunction!(clamp, m)?)?;
     m.add_function(wrap_pyfunction!(scalar_mul, m)?)?;
     m.add_function(wrap_pyfunction!(reshape, m)?)?;
     m.add_function(wrap_pyfunction!(softmax, m)?)?;

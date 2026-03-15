@@ -256,6 +256,28 @@ impl LazyRuntime {
             return Ok(out);
         }
 
+        if let crate::graph::OpKind::Pow { exponent } = node.op {
+            let (in_strides, out_shape_u32, ndim, numel) = self.unary_nd_params(node)?;
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+            let input = self.get_tensor(node.inputs[0])?;
+            REGISTRY.dispatch_pow_nd_typed(
+                device, dtype, &input.buffer, &in_strides, &out.buffer, &out_shape_u32, ndim, numel, exponent,
+            )?;
+            return Ok(out);
+        }
+
+        if let crate::graph::OpKind::Clamp { min_val, max_val } = node.op {
+            let (in_strides, out_shape_u32, ndim, numel) = self.unary_nd_params(node)?;
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+            let input = self.get_tensor(node.inputs[0])?;
+            REGISTRY.dispatch_clamp_nd_typed(
+                device, dtype, &input.buffer, &in_strides, &out.buffer, &out_shape_u32, ndim, numel, min_val, max_val,
+            )?;
+            return Ok(out);
+        }
+
         if node.op.is_gelu() {
             let (in_strides, out_shape_u32, ndim, numel) = self.unary_nd_params(node)?;
             let out_buf = self.pool.acquire(device, out_size)?;
@@ -558,6 +580,22 @@ impl LazyRuntime {
         if let crate::graph::OpKind::ScalarMul(scale) = node.op {
             let input = self.get_tensor(node.inputs[0])?;
             return REGISTRY.dispatch_scalar_mul_typed_nb(device, dtype, queue, &input.buffer, &out.buffer, scale, input.numel());
+        }
+
+        if let crate::graph::OpKind::Pow { exponent } = node.op {
+            let (in_strides, out_shape_u32, ndim, numel) = self.unary_nd_params(node)?;
+            let input = self.get_tensor(node.inputs[0])?;
+            return REGISTRY.dispatch_pow_nd_typed_nb(
+                device, dtype, queue, &input.buffer, &in_strides, &out.buffer, &out_shape_u32, ndim, numel, exponent,
+            );
+        }
+
+        if let crate::graph::OpKind::Clamp { min_val, max_val } = node.op {
+            let (in_strides, out_shape_u32, ndim, numel) = self.unary_nd_params(node)?;
+            let input = self.get_tensor(node.inputs[0])?;
+            return REGISTRY.dispatch_clamp_nd_typed_nb(
+                device, dtype, queue, &input.buffer, &in_strides, &out.buffer, &out_shape_u32, ndim, numel, min_val, max_val,
+            );
         }
 
         if node.op.is_gelu() {

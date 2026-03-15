@@ -485,4 +485,52 @@ void* gpu_bridge_compute_unary_nd_nb(
     uint32_t numel
 );
 
+int32_t gpu_bridge_compute_pow_nd(
+    GPUComputeHandle* compute,
+    const GPUBufferHandle* buf_input,
+    GPUBufferHandle* buf_out,
+    const uint32_t* in_strides,
+    const uint32_t* out_shape,
+    uint32_t ndim,
+    uint32_t numel,
+    float exponent
+);
+
+void* gpu_bridge_compute_pow_nd_nb(
+    GPUComputeHandle* compute,
+    void* queue,
+    const GPUBufferHandle* buf_input,
+    GPUBufferHandle* buf_out,
+    const uint32_t* in_strides,
+    const uint32_t* out_shape,
+    uint32_t ndim,
+    uint32_t numel,
+    float exponent
+);
+
+int32_t gpu_bridge_compute_clamp_nd(
+    GPUComputeHandle* compute,
+    const GPUBufferHandle* buf_input,
+    GPUBufferHandle* buf_out,
+    const uint32_t* in_strides,
+    const uint32_t* out_shape,
+    uint32_t ndim,
+    uint32_t numel,
+    float min_val,
+    float max_val
+);
+
+void* gpu_bridge_compute_clamp_nd_nb(
+    GPUComputeHandle* compute,
+    void* queue,
+    const GPUBufferHandle* buf_input,
+    GPUBufferHandle* buf_out,
+    const uint32_t* in_strides,
+    const uint32_t* out_shape,
+    uint32_t ndim,
+    uint32_t numel,
+    float min_val,
+    float max_val
+);
+
 #endif
