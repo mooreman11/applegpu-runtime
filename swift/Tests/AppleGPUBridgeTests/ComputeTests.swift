@@ -93,6 +93,78 @@ kernel void elementwise_add(
         #expect(cb2 == nil)
     }
 
+    @Test func testBatchMultiOpCorrectness() throws {
+        gpuBridgeAbortBatch()
+
+        let gpuDevice = gpuBridgeCreateDevice()!
+
+        let addSource = """
+        #include <metal_stdlib>
+        using namespace metal;
+        kernel void add_f32(device const float* a [[buffer(0)]],
+                            device const float* b [[buffer(1)]],
+                            device float* out [[buffer(2)]],
+                            constant uint& count [[buffer(3)]],
+                            uint idx [[thread_position_in_grid]]) {
+            if (idx < count) { out[idx] = a[idx] + b[idx]; }
+        }
+        """
+        let mulSource = """
+        #include <metal_stdlib>
+        using namespace metal;
+        kernel void mul_f32(device const float* a [[buffer(0)]],
+                            device const float* b [[buffer(1)]],
+                            device float* out [[buffer(2)]],
+                            constant uint& count [[buffer(3)]],
+                            uint idx [[thread_position_in_grid]]) {
+            if (idx < count) { out[idx] = a[idx] * b[idx]; }
+        }
+        """
+
+        let addCompute = addSource.withCString { src in "add_f32".withCString { name in gpuBridgeCreateCompute(gpuDevice, src, name) } }!
+        let mulCompute = mulSource.withCString { src in "mul_f32".withCString { name in gpuBridgeCreateCompute(gpuDevice, src, name) } }!
+
+        var aData: [Float] = [1, 2, 3, 4]
+        var bData: [Float] = [10, 20, 30, 40]
+        let bufA = aData.withUnsafeBytes { gpuBridgeCreateBufferWithData(gpuDevice, $0.baseAddress, UInt64(aData.count * 4)) }!
+        let bufB = bData.withUnsafeBytes { gpuBridgeCreateBufferWithData(gpuDevice, $0.baseAddress, UInt64(bData.count * 4)) }!
+        let bufC = gpuBridgeCreateBuffer(gpuDevice, UInt64(4 * 4))!
+        let bufD = gpuBridgeCreateBuffer(gpuDevice, UInt64(4 * 4))!
+
+        let queue = gpuBridgeGetSharedQueue(gpuDevice)!
+        let batchCB = gpuBridgeBeginBatch(queue)
+        #expect(batchCB != nil)
+
+        // In batch mode, _nb returns non-null (unretained batch CB pointer)
+        let cb1 = gpuBridgeComputeElementwiseNB(addCompute, queue, bufA, bufB, bufC, 4)
+        #expect(cb1 != nil)
+
+        let cb2 = gpuBridgeComputeElementwiseNB(mulCompute, queue, bufC, bufB, bufD, 4)
+        #expect(cb2 != nil)
+
+        // Both should return the same batch command buffer pointer
+        #expect(cb1 == batchCB)
+        #expect(cb2 == batchCB)
+
+        let finalCB = gpuBridgeEndBatch()
+        #expect(finalCB != nil)
+        gpuBridgeWaitCommandBuffer(finalCB!)
+
+        let ptr = gpuBridgeBufferContents(bufD)!.assumingMemoryBound(to: Float.self)
+        #expect(ptr[0] == 110.0)
+        #expect(ptr[1] == 440.0)
+        #expect(ptr[2] == 990.0)
+        #expect(ptr[3] == 1760.0)
+
+        gpuBridgeDestroyBuffer(bufA)
+        gpuBridgeDestroyBuffer(bufB)
+        gpuBridgeDestroyBuffer(bufC)
+        gpuBridgeDestroyBuffer(bufD)
+        gpuBridgeDestroyCompute(addCompute)
+        gpuBridgeDestroyCompute(mulCompute)
+        gpuBridgeDestroyDevice(gpuDevice)
+    }
+
     @Test func testAbortBatch() throws {
         // Reset any leftover batch state
         gpuBridgeAbortBatch()

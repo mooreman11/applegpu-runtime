@@ -584,11 +584,29 @@ final class GPUCompute {
 
     /// Non-blocking gather dispatch.
     func dispatchGatherNB(queue: MTLCommandQueue, bufIn: MTLBuffer, bufIndices: MTLBuffer,
-                          bufOut: MTLBuffer, rows: Int, inCols: Int, outCols: Int) -> AnyObject? {
-        if rows == 0 || outCols == 0 { return nil }
+                          bufOut: MTLBuffer, rows: Int, inCols: Int, outCols: Int) -> (AnyObject, Bool)? {
+        if rows == 0 || outCols == 0 {
+            batchLock.lock()
+            let result = activeBatchCommandBuffer.map { ($0 as AnyObject, true) }
+            batchLock.unlock()
+            return result
+        }
 
-        guard let commandBuffer = queue.makeCommandBuffer(),
-              let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
+        let commandBuffer: MTLCommandBuffer
+        let isBatch: Bool
+        batchLock.lock()
+        if let batchCB = activeBatchCommandBuffer {
+            commandBuffer = batchCB
+            isBatch = true
+            batchLock.unlock()
+        } else {
+            batchLock.unlock()
+            guard let cb = queue.makeCommandBuffer() else { return nil }
+            commandBuffer = cb
+            isBatch = false
+        }
+
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
 
         encoder.setComputePipelineState(pipelineState)
         encoder.setBuffer(bufIn, offset: 0, index: 0)
@@ -607,8 +625,13 @@ final class GPUCompute {
 
         encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadsPerGroup)
         encoder.endEncoding()
-        commandBuffer.commit()
-        return commandBuffer
+
+        if isBatch {
+            return (commandBuffer as AnyObject, true)
+        } else {
+            commandBuffer.commit()
+            return (commandBuffer as AnyObject, false)
+        }
     }
 }
 
@@ -1062,12 +1085,16 @@ public func gpuBridgeComputeGatherNB(
     let bufIndices = Unmanaged<GPUBuffer>.fromOpaque(bufIndicesPtr).takeUnretainedValue()
     let bufOut = Unmanaged<GPUBuffer>.fromOpaque(bufOutPtr).takeUnretainedValue()
 
-    guard let cb = compute.dispatchGatherNB(
+    guard let (cb, isBatch) = compute.dispatchGatherNB(
         queue: queue, bufIn: bufIn.buffer, bufIndices: bufIndices.buffer,
         bufOut: bufOut.buffer, rows: Int(rows), inCols: Int(inCols), outCols: Int(outCols)
     ) else { return nil }
 
-    return Unmanaged.passRetained(cb).toOpaque()
+    if isBatch {
+        return Unmanaged.passUnretained(cb).toOpaque()
+    } else {
+        return Unmanaged.passRetained(cb).toOpaque()
+    }
 }
 
 // MARK: - Slice C ABI exports
@@ -1204,10 +1231,28 @@ public func gpuBridgeComputeElementwiseNB(
     let bufOut = Unmanaged<GPUBuffer>.fromOpaque(bufOutPtr).takeUnretainedValue()
 
     let count = Int(elementCount)
-    if count == 0 { return nil }
+    if count == 0 {
+        batchLock.lock()
+        let ptr = activeBatchCommandBuffer.map { Unmanaged.passUnretained($0 as AnyObject).toOpaque() }
+        batchLock.unlock()
+        return ptr
+    }
 
-    guard let commandBuffer = queue.makeCommandBuffer(),
-          let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
+    let commandBuffer: MTLCommandBuffer
+    let isBatch: Bool
+    batchLock.lock()
+    if let batchCB = activeBatchCommandBuffer {
+        commandBuffer = batchCB
+        isBatch = true
+        batchLock.unlock()
+    } else {
+        batchLock.unlock()
+        guard let cb = queue.makeCommandBuffer() else { return nil }
+        commandBuffer = cb
+        isBatch = false
+    }
+
+    guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
 
     encoder.setComputePipelineState(compute.pipelineState)
     encoder.setBuffer(bufA.buffer, offset: 0, index: 0)
@@ -1225,9 +1270,13 @@ public func gpuBridgeComputeElementwiseNB(
         threadsPerThreadgroup: MTLSize(width: threadGroupSize, height: 1, depth: 1)
     )
     encoder.endEncoding()
-    commandBuffer.commit()
 
-    return Unmanaged.passRetained(commandBuffer as AnyObject).toOpaque()
+    if isBatch {
+        return Unmanaged.passUnretained(commandBuffer as AnyObject).toOpaque()
+    } else {
+        commandBuffer.commit()
+        return Unmanaged.passRetained(commandBuffer as AnyObject).toOpaque()
+    }
 }
 
 @_cdecl("gpu_bridge_compute_unary_nb")
@@ -1249,10 +1298,28 @@ public func gpuBridgeComputeUnaryNB(
     let bufOut = Unmanaged<GPUBuffer>.fromOpaque(bufOutPtr).takeUnretainedValue()
 
     let count = Int(elementCount)
-    if count == 0 { return nil }
+    if count == 0 {
+        batchLock.lock()
+        let ptr = activeBatchCommandBuffer.map { Unmanaged.passUnretained($0 as AnyObject).toOpaque() }
+        batchLock.unlock()
+        return ptr
+    }
 
-    guard let commandBuffer = queue.makeCommandBuffer(),
-          let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
+    let commandBuffer: MTLCommandBuffer
+    let isBatch: Bool
+    batchLock.lock()
+    if let batchCB = activeBatchCommandBuffer {
+        commandBuffer = batchCB
+        isBatch = true
+        batchLock.unlock()
+    } else {
+        batchLock.unlock()
+        guard let cb = queue.makeCommandBuffer() else { return nil }
+        commandBuffer = cb
+        isBatch = false
+    }
+
+    guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
 
     encoder.setComputePipelineState(compute.pipelineState)
     encoder.setBuffer(bufIn.buffer, offset: 0, index: 0)
@@ -1269,9 +1336,13 @@ public func gpuBridgeComputeUnaryNB(
         threadsPerThreadgroup: MTLSize(width: threadGroupSize, height: 1, depth: 1)
     )
     encoder.endEncoding()
-    commandBuffer.commit()
 
-    return Unmanaged.passRetained(commandBuffer as AnyObject).toOpaque()
+    if isBatch {
+        return Unmanaged.passUnretained(commandBuffer as AnyObject).toOpaque()
+    } else {
+        commandBuffer.commit()
+        return Unmanaged.passRetained(commandBuffer as AnyObject).toOpaque()
+    }
 }
 
 @_cdecl("gpu_bridge_compute_matmul_nb")
@@ -1314,10 +1385,28 @@ public func gpuBridgeComputeMatmulBatchedNB(
     let bufB = Unmanaged<GPUBuffer>.fromOpaque(bufBPtr).takeUnretainedValue()
     let bufC = Unmanaged<GPUBuffer>.fromOpaque(bufCPtr).takeUnretainedValue()
 
-    if M == 0 || N == 0 || K == 0 || batchSize == 0 { return nil }
+    if M == 0 || N == 0 || K == 0 || batchSize == 0 {
+        batchLock.lock()
+        let ptr = activeBatchCommandBuffer.map { Unmanaged.passUnretained($0 as AnyObject).toOpaque() }
+        batchLock.unlock()
+        return ptr
+    }
 
-    guard let commandBuffer = queue.makeCommandBuffer(),
-          let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
+    let commandBuffer: MTLCommandBuffer
+    let isBatch: Bool
+    batchLock.lock()
+    if let batchCB = activeBatchCommandBuffer {
+        commandBuffer = batchCB
+        isBatch = true
+        batchLock.unlock()
+    } else {
+        batchLock.unlock()
+        guard let cb = queue.makeCommandBuffer() else { return nil }
+        commandBuffer = cb
+        isBatch = false
+    }
+
+    guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
 
     encoder.setComputePipelineState(compute.pipelineState)
     encoder.setBuffer(bufA.buffer, offset: 0, index: 0)
@@ -1339,9 +1428,13 @@ public func gpuBridgeComputeMatmulBatchedNB(
 
     encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadsPerGroup)
     encoder.endEncoding()
-    commandBuffer.commit()
 
-    return Unmanaged.passRetained(commandBuffer as AnyObject).toOpaque()
+    if isBatch {
+        return Unmanaged.passUnretained(commandBuffer as AnyObject).toOpaque()
+    } else {
+        commandBuffer.commit()
+        return Unmanaged.passRetained(commandBuffer as AnyObject).toOpaque()
+    }
 }
 
 @_cdecl("gpu_bridge_compute_softmax_causal_nb")
@@ -1364,10 +1457,28 @@ public func gpuBridgeComputeSoftmaxCausalNB(
     let bufIn = Unmanaged<GPUBuffer>.fromOpaque(bufInPtr).takeUnretainedValue()
     let bufOut = Unmanaged<GPUBuffer>.fromOpaque(bufOutPtr).takeUnretainedValue()
 
-    if batchSize == 0 || rows == 0 || cols == 0 { return nil }
+    if batchSize == 0 || rows == 0 || cols == 0 {
+        batchLock.lock()
+        let ptr = activeBatchCommandBuffer.map { Unmanaged.passUnretained($0 as AnyObject).toOpaque() }
+        batchLock.unlock()
+        return ptr
+    }
 
-    guard let commandBuffer = queue.makeCommandBuffer(),
-          let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
+    let commandBuffer: MTLCommandBuffer
+    let isBatch: Bool
+    batchLock.lock()
+    if let batchCB = activeBatchCommandBuffer {
+        commandBuffer = batchCB
+        isBatch = true
+        batchLock.unlock()
+    } else {
+        batchLock.unlock()
+        guard let cb = queue.makeCommandBuffer() else { return nil }
+        commandBuffer = cb
+        isBatch = false
+    }
+
+    guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
 
     encoder.setComputePipelineState(compute.pipelineState)
     encoder.setBuffer(bufIn.buffer, offset: 0, index: 0)
@@ -1385,9 +1496,13 @@ public func gpuBridgeComputeSoftmaxCausalNB(
 
     encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadsPerGroup)
     encoder.endEncoding()
-    commandBuffer.commit()
 
-    return Unmanaged.passRetained(commandBuffer as AnyObject).toOpaque()
+    if isBatch {
+        return Unmanaged.passUnretained(commandBuffer as AnyObject).toOpaque()
+    } else {
+        commandBuffer.commit()
+        return Unmanaged.passRetained(commandBuffer as AnyObject).toOpaque()
+    }
 }
 
 @_cdecl("gpu_bridge_compute_softmax_nb")
@@ -1409,10 +1524,28 @@ public func gpuBridgeComputeSoftmaxNB(
     let bufIn = Unmanaged<GPUBuffer>.fromOpaque(bufInPtr).takeUnretainedValue()
     let bufOut = Unmanaged<GPUBuffer>.fromOpaque(bufOutPtr).takeUnretainedValue()
 
-    if rows == 0 || cols == 0 { return nil }
+    if rows == 0 || cols == 0 {
+        batchLock.lock()
+        let ptr = activeBatchCommandBuffer.map { Unmanaged.passUnretained($0 as AnyObject).toOpaque() }
+        batchLock.unlock()
+        return ptr
+    }
 
-    guard let commandBuffer = queue.makeCommandBuffer(),
-          let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
+    let commandBuffer: MTLCommandBuffer
+    let isBatch: Bool
+    batchLock.lock()
+    if let batchCB = activeBatchCommandBuffer {
+        commandBuffer = batchCB
+        isBatch = true
+        batchLock.unlock()
+    } else {
+        batchLock.unlock()
+        guard let cb = queue.makeCommandBuffer() else { return nil }
+        commandBuffer = cb
+        isBatch = false
+    }
+
+    guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
 
     encoder.setComputePipelineState(compute.pipelineState)
     encoder.setBuffer(bufIn.buffer, offset: 0, index: 0)
@@ -1431,9 +1564,13 @@ public func gpuBridgeComputeSoftmaxNB(
         threadsPerThreadgroup: MTLSize(width: threadGroupSize, height: 1, depth: 1)
     )
     encoder.endEncoding()
-    commandBuffer.commit()
 
-    return Unmanaged.passRetained(commandBuffer as AnyObject).toOpaque()
+    if isBatch {
+        return Unmanaged.passUnretained(commandBuffer as AnyObject).toOpaque()
+    } else {
+        commandBuffer.commit()
+        return Unmanaged.passRetained(commandBuffer as AnyObject).toOpaque()
+    }
 }
 
 @_cdecl("gpu_bridge_compute_transpose_nb")
@@ -1455,10 +1592,28 @@ public func gpuBridgeComputeTransposeNB(
     let bufIn = Unmanaged<GPUBuffer>.fromOpaque(bufInPtr).takeUnretainedValue()
     let bufOut = Unmanaged<GPUBuffer>.fromOpaque(bufOutPtr).takeUnretainedValue()
 
-    if rows == 0 || cols == 0 { return nil }
+    if rows == 0 || cols == 0 {
+        batchLock.lock()
+        let ptr = activeBatchCommandBuffer.map { Unmanaged.passUnretained($0 as AnyObject).toOpaque() }
+        batchLock.unlock()
+        return ptr
+    }
 
-    guard let commandBuffer = queue.makeCommandBuffer(),
-          let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
+    let commandBuffer: MTLCommandBuffer
+    let isBatch: Bool
+    batchLock.lock()
+    if let batchCB = activeBatchCommandBuffer {
+        commandBuffer = batchCB
+        isBatch = true
+        batchLock.unlock()
+    } else {
+        batchLock.unlock()
+        guard let cb = queue.makeCommandBuffer() else { return nil }
+        commandBuffer = cb
+        isBatch = false
+    }
+
+    guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
 
     encoder.setComputePipelineState(compute.pipelineState)
     encoder.setBuffer(bufIn.buffer, offset: 0, index: 0)
@@ -1475,9 +1630,13 @@ public func gpuBridgeComputeTransposeNB(
 
     encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadsPerGroup)
     encoder.endEncoding()
-    commandBuffer.commit()
 
-    return Unmanaged.passRetained(commandBuffer as AnyObject).toOpaque()
+    if isBatch {
+        return Unmanaged.passUnretained(commandBuffer as AnyObject).toOpaque()
+    } else {
+        commandBuffer.commit()
+        return Unmanaged.passRetained(commandBuffer as AnyObject).toOpaque()
+    }
 }
 
 @_cdecl("gpu_bridge_compute_transpose_batched_nb")
@@ -1500,10 +1659,28 @@ public func gpuBridgeComputeTransposeBatchedNB(
     let bufIn = Unmanaged<GPUBuffer>.fromOpaque(bufInPtr).takeUnretainedValue()
     let bufOut = Unmanaged<GPUBuffer>.fromOpaque(bufOutPtr).takeUnretainedValue()
 
-    if batchSize == 0 || rows == 0 || cols == 0 { return nil }
+    if batchSize == 0 || rows == 0 || cols == 0 {
+        batchLock.lock()
+        let ptr = activeBatchCommandBuffer.map { Unmanaged.passUnretained($0 as AnyObject).toOpaque() }
+        batchLock.unlock()
+        return ptr
+    }
 
-    guard let commandBuffer = queue.makeCommandBuffer(),
-          let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
+    let commandBuffer: MTLCommandBuffer
+    let isBatch: Bool
+    batchLock.lock()
+    if let batchCB = activeBatchCommandBuffer {
+        commandBuffer = batchCB
+        isBatch = true
+        batchLock.unlock()
+    } else {
+        batchLock.unlock()
+        guard let cb = queue.makeCommandBuffer() else { return nil }
+        commandBuffer = cb
+        isBatch = false
+    }
+
+    guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
 
     encoder.setComputePipelineState(compute.pipelineState)
     encoder.setBuffer(bufIn.buffer, offset: 0, index: 0)
@@ -1521,9 +1698,13 @@ public func gpuBridgeComputeTransposeBatchedNB(
 
     encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadsPerGroup)
     encoder.endEncoding()
-    commandBuffer.commit()
 
-    return Unmanaged.passRetained(commandBuffer as AnyObject).toOpaque()
+    if isBatch {
+        return Unmanaged.passUnretained(commandBuffer as AnyObject).toOpaque()
+    } else {
+        commandBuffer.commit()
+        return Unmanaged.passRetained(commandBuffer as AnyObject).toOpaque()
+    }
 }
 
 @_cdecl("gpu_bridge_compute_scalar_mul_nb")
@@ -1546,10 +1727,28 @@ public func gpuBridgeComputeScalarMulNB(
     let bufOut = Unmanaged<GPUBuffer>.fromOpaque(bufOutPtr).takeUnretainedValue()
 
     let count = Int(elementCount)
-    if count == 0 { return nil }
+    if count == 0 {
+        batchLock.lock()
+        let ptr = activeBatchCommandBuffer.map { Unmanaged.passUnretained($0 as AnyObject).toOpaque() }
+        batchLock.unlock()
+        return ptr
+    }
 
-    guard let commandBuffer = queue.makeCommandBuffer(),
-          let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
+    let commandBuffer: MTLCommandBuffer
+    let isBatch: Bool
+    batchLock.lock()
+    if let batchCB = activeBatchCommandBuffer {
+        commandBuffer = batchCB
+        isBatch = true
+        batchLock.unlock()
+    } else {
+        batchLock.unlock()
+        guard let cb = queue.makeCommandBuffer() else { return nil }
+        commandBuffer = cb
+        isBatch = false
+    }
+
+    guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
 
     encoder.setComputePipelineState(compute.pipelineState)
     encoder.setBuffer(bufIn.buffer, offset: 0, index: 0)
@@ -1568,9 +1767,13 @@ public func gpuBridgeComputeScalarMulNB(
         threadsPerThreadgroup: MTLSize(width: threadGroupSize, height: 1, depth: 1)
     )
     encoder.endEncoding()
-    commandBuffer.commit()
 
-    return Unmanaged.passRetained(commandBuffer as AnyObject).toOpaque()
+    if isBatch {
+        return Unmanaged.passUnretained(commandBuffer as AnyObject).toOpaque()
+    } else {
+        commandBuffer.commit()
+        return Unmanaged.passRetained(commandBuffer as AnyObject).toOpaque()
+    }
 }
 
 @_cdecl("gpu_bridge_compute_fused_nb")
@@ -1599,10 +1802,28 @@ public func gpuBridgeComputeFusedNB(
     }
 
     let count = Int(elementCount)
-    if count == 0 { return nil }
+    if count == 0 {
+        batchLock.lock()
+        let ptr = activeBatchCommandBuffer.map { Unmanaged.passUnretained($0 as AnyObject).toOpaque() }
+        batchLock.unlock()
+        return ptr
+    }
 
-    guard let commandBuffer = queue.makeCommandBuffer(),
-          let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
+    let commandBuffer: MTLCommandBuffer
+    let isBatch: Bool
+    batchLock.lock()
+    if let batchCB = activeBatchCommandBuffer {
+        commandBuffer = batchCB
+        isBatch = true
+        batchLock.unlock()
+    } else {
+        batchLock.unlock()
+        guard let cb = queue.makeCommandBuffer() else { return nil }
+        commandBuffer = cb
+        isBatch = false
+    }
+
+    guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
 
     encoder.setComputePipelineState(compute.pipelineState)
 
@@ -1621,9 +1842,13 @@ public func gpuBridgeComputeFusedNB(
         threadsPerThreadgroup: MTLSize(width: threadGroupSize, height: 1, depth: 1)
     )
     encoder.endEncoding()
-    commandBuffer.commit()
 
-    return Unmanaged.passRetained(commandBuffer as AnyObject).toOpaque()
+    if isBatch {
+        return Unmanaged.passUnretained(commandBuffer as AnyObject).toOpaque()
+    } else {
+        commandBuffer.commit()
+        return Unmanaged.passRetained(commandBuffer as AnyObject).toOpaque()
+    }
 }
 
 @_cdecl("gpu_bridge_compute_layer_norm_nb")
@@ -1652,10 +1877,28 @@ public func gpuBridgeComputeLayerNormNB(
     let bufBeta = Unmanaged<GPUBuffer>.fromOpaque(bufBetaPtr).takeUnretainedValue()
     let bufOut = Unmanaged<GPUBuffer>.fromOpaque(bufOutPtr).takeUnretainedValue()
 
-    if rows == 0 || cols == 0 { return nil }
+    if rows == 0 || cols == 0 {
+        batchLock.lock()
+        let ptr = activeBatchCommandBuffer.map { Unmanaged.passUnretained($0 as AnyObject).toOpaque() }
+        batchLock.unlock()
+        return ptr
+    }
 
-    guard let commandBuffer = queue.makeCommandBuffer(),
-          let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
+    let commandBuffer: MTLCommandBuffer
+    let isBatch: Bool
+    batchLock.lock()
+    if let batchCB = activeBatchCommandBuffer {
+        commandBuffer = batchCB
+        isBatch = true
+        batchLock.unlock()
+    } else {
+        batchLock.unlock()
+        guard let cb = queue.makeCommandBuffer() else { return nil }
+        commandBuffer = cb
+        isBatch = false
+    }
+
+    guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
 
     encoder.setComputePipelineState(compute.pipelineState)
     encoder.setBuffer(bufIn.buffer, offset: 0, index: 0)
@@ -1677,9 +1920,13 @@ public func gpuBridgeComputeLayerNormNB(
         threadsPerThreadgroup: MTLSize(width: threadGroupSize, height: 1, depth: 1)
     )
     encoder.endEncoding()
-    commandBuffer.commit()
 
-    return Unmanaged.passRetained(commandBuffer as AnyObject).toOpaque()
+    if isBatch {
+        return Unmanaged.passUnretained(commandBuffer as AnyObject).toOpaque()
+    } else {
+        commandBuffer.commit()
+        return Unmanaged.passRetained(commandBuffer as AnyObject).toOpaque()
+    }
 }
 
 @_cdecl("gpu_bridge_compute_softmax_backward_nb")
@@ -1800,14 +2047,31 @@ public func gpuBridgeBlitCopyNonBlocking(
     let src = Unmanaged<GPUBuffer>.fromOpaque(srcBuf).takeUnretainedValue()
     let dst = Unmanaged<GPUBuffer>.fromOpaque(dstBuf).takeUnretainedValue()
 
-    guard let commandBuffer = queue.makeCommandBuffer(),
-          let blitEncoder = commandBuffer.makeBlitCommandEncoder() else { return nil }
+    let commandBuffer: MTLCommandBuffer
+    let isBatch: Bool
+    batchLock.lock()
+    if let batchCB = activeBatchCommandBuffer {
+        commandBuffer = batchCB
+        isBatch = true
+        batchLock.unlock()
+    } else {
+        batchLock.unlock()
+        guard let cb = queue.makeCommandBuffer() else { return nil }
+        commandBuffer = cb
+        isBatch = false
+    }
+
+    guard let blitEncoder = commandBuffer.makeBlitCommandEncoder() else { return nil }
 
     blitEncoder.copy(from: src.buffer, sourceOffset: 0, to: dst.buffer, destinationOffset: 0, size: Int(sizeBytes))
     blitEncoder.endEncoding()
-    commandBuffer.commit()
 
-    return Unmanaged.passRetained(commandBuffer as AnyObject).toOpaque()
+    if isBatch {
+        return Unmanaged.passUnretained(commandBuffer as AnyObject).toOpaque()
+    } else {
+        commandBuffer.commit()
+        return Unmanaged.passRetained(commandBuffer as AnyObject).toOpaque()
+    }
 }
 
 @_cdecl("gpu_bridge_compute_embedding_nb")
