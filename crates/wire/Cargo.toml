@@ -1,0 +1,7 @@
+[package]
+name = "applegpu-wire"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "applegpu_wire"
