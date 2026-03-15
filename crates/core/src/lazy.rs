@@ -1614,6 +1614,17 @@ impl LazyRuntime {
         self.pool.drain();
     }
 
+    /// Clean up all resources belonging to a container.
+    /// Removes tensors, graph nodes, and deregisters from the scheduler.
+    pub fn cleanup_container(&mut self, container_id: ContainerId) -> Result<()> {
+        let owned_tensors = self.scheduler.deregister_container(container_id)?;
+        for tid in &owned_tensors {
+            self.remove_tensor_raw(*tid);
+        }
+        self.graph.remove_nodes_for_container(container_id);
+        Ok(())
+    }
+
     /// Remove a tensor without scheduler tracking (for deregister cleanup).
     pub fn remove_tensor_raw(&mut self, id: u64) {
         if let Some(tensor) = self.tensors.remove(&id) {
