@@ -7,6 +7,12 @@ import applegpu_runtime as gpu
 _backend_enabled = False
 _warned_ops = set()
 
+# Global registry mapping CPU data_ptr -> GpuTensor.
+# When ApplegpuTensor is stored in nn.Parameter, custom attributes are lost.
+# We use the backing CPU tensor's data_ptr as a stable key to retrieve
+# the associated GpuTensor.
+_gpu_tensor_registry = {}
+
 
 def enable():
     """Register applegpu as a PyTorch device backend. Requires torch >= 2.1."""
@@ -77,7 +83,7 @@ def register_op(aten_op):
 
 def _unsqueeze_shape(t, dim):
     """Compute shape after unsqueeze."""
-    shape = list(t._gpu_tensor.shape)
+    shape = list(_unwrap(t).shape)
     if dim < 0:
         dim = len(shape) + 1 + dim
     shape.insert(dim, 1)
@@ -86,7 +92,7 @@ def _unsqueeze_shape(t, dim):
 
 def _squeeze_shape(t, dim):
     """Compute shape after squeeze."""
-    shape = list(t._gpu_tensor.shape)
+    shape = list(_unwrap(t).shape)
     if dim < 0:
         dim = len(shape) + dim
     if 0 <= dim < len(shape) and shape[dim] == 1:
@@ -97,8 +103,12 @@ def _squeeze_shape(t, dim):
 def _unwrap(t):
     """Get the GpuTensor from an ApplegpuTensor, or convert CPU tensor/scalar."""
     if isinstance(t, ApplegpuTensor):
-        return t._gpu_tensor
+        return t._gpu
     if isinstance(t, torch.Tensor):
+        # Check registry in case this is an ApplegpuTensor that lost its type
+        gt = _gpu_tensor_registry.get(t.data_ptr())
+        if gt is not None:
+            return gt
         return gpu.from_torch(t)
     return t
 
@@ -201,13 +211,27 @@ def _op_matmul(a, b):
     return _wrap(gpu.matmul(_unwrap(a), _unwrap(b)))
 
 
+@register_op(torch.ops.aten.addmm.default)
+def _op_addmm(bias, input, weight, beta=1, alpha=1):
+    """addmm: beta * bias + alpha * (input @ weight). Used by nn.Linear."""
+    result = _wrap(gpu.matmul(_unwrap(input), _unwrap(weight)))
+    if alpha != 1:
+        result = _wrap(gpu.scalar_mul(_unwrap(result), float(alpha)))
+    if bias is not None:
+        bias_gpu = _unwrap(bias)
+        if beta != 1:
+            bias_gpu = gpu.scalar_mul(bias_gpu, float(beta))
+        result = _wrap(gpu.add(_unwrap(result), bias_gpu))
+    return result
+
+
 # ============================================================
 # Reductions
 # ============================================================
 
 @register_op(torch.ops.aten._softmax.default)
 def _op_softmax(a, dim, half_to_float):
-    ndim = len(a._gpu_tensor.shape) if isinstance(a, ApplegpuTensor) else len(_unwrap(a).shape)
+    ndim = len(_unwrap(a).shape)
     # Our softmax always operates on last dim
     if dim != -1 and dim != ndim - 1:
         return NotImplemented
@@ -385,11 +409,14 @@ def _op_copy_(dst, src, non_blocking=False):
     """In-place copy of src into dst."""
     if isinstance(src, ApplegpuTensor):
         cpu_data = src.to_torch_cpu()
-        dst._gpu_tensor = gpu.from_torch(cpu_data)
-        return dst
+        new_gpu = gpu.from_torch(cpu_data)
     elif isinstance(src, torch.Tensor):
-        dst._gpu_tensor = gpu.from_torch(src)
+        new_gpu = gpu.from_torch(src)
+    else:
         return dst
+    # Update both the direct attribute and the registry
+    dst._gpu_tensor = new_gpu
+    _gpu_tensor_registry[dst.data_ptr()] = new_gpu
     return dst
 
 
@@ -512,31 +539,60 @@ def _op_embedding(weight, indices, padding_idx=-1, scale_grad_by_freq=False, spa
 # ============================================================
 
 class ApplegpuTensor(torch.Tensor):
-    """A torch.Tensor subclass backed by applegpu Metal buffers."""
+    """A torch.Tensor subclass backed by applegpu Metal buffers.
+
+    Uses _make_subclass with real CPU backing storage so that repr/str never
+    segfault. The actual GPU data is tracked in _gpu_tensor_registry keyed
+    by data_ptr, since nn.Parameter strips custom attributes from subclasses.
+    """
 
     @staticmethod
     def __new__(cls, gpu_tensor, torch_dtype=None):
-        # Create a dummy tensor with the right shape and dtype
         shape = tuple(gpu_tensor.shape)
         if torch_dtype is None:
             torch_dtype = _GPU_TO_TORCH_DTYPE.get(gpu_tensor.dtype, torch.float32)
 
-        # Create empty shell tensor (no real CPU storage)
-        r = torch.Tensor._make_wrapper_subclass(
-            cls,
-            shape,
-            dtype=torch_dtype,
-            device=torch.device("cpu"),  # placeholder, overridden by dispatch
-        )
+        # Create a real CPU tensor as backing storage (prevents segfaults in repr)
+        backing = torch.zeros(shape, dtype=torch_dtype)
+        r = torch.Tensor._make_subclass(cls, backing)
+        # Store directly on the instance (works for direct access)
         r._gpu_tensor = gpu_tensor
+        # Also store in the global registry (survives Parameter.data round-trip)
+        _gpu_tensor_registry[r.data_ptr()] = gpu_tensor
         return r
 
+    @property
+    def _gpu(self):
+        """Retrieve the GpuTensor, even after nn.Parameter strips attributes."""
+        if hasattr(self, "_gpu_tensor"):
+            return self._gpu_tensor
+        return _gpu_tensor_registry.get(self.data_ptr())
+
     def __repr__(self):
-        return f"ApplegpuTensor(shape={list(self._gpu_tensor.shape)}, dtype={self._gpu_tensor.dtype}, device='applegpu')"
+        gt = self._gpu
+        if gt is not None:
+            return f"ApplegpuTensor(shape={list(gt.shape)}, dtype={gt.dtype}, device='applegpu')"
+        return f"ApplegpuTensor(shape={list(self.shape)}, device='applegpu')"
+
+    def __str__(self):
+        return self.__repr__()
 
     def __del__(self):
-        # GpuTensor handles cleanup via its own Drop
-        pass
+        # Clean up the registry entry
+        try:
+            ptr = self.data_ptr()
+            _gpu_tensor_registry.pop(ptr, None)
+        except Exception:
+            pass
+
+    @classmethod
+    def __torch_function__(cls, func, types, args=(), kwargs=None):
+        """Intercept torch functions to prevent unsafe operations on our tensors."""
+        kwargs = kwargs or {}
+
+        # For most operations, fall through to __torch_dispatch__
+        with torch.no_grad():
+            return super().__torch_function__(func, types, args, kwargs)
 
     @classmethod
     def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
@@ -567,7 +623,10 @@ class ApplegpuTensor(torch.Tensor):
 
     def to_torch_cpu(self):
         """Convert back to a CPU torch.Tensor."""
-        return _gpu_tensor_to_torch_cpu(self._gpu_tensor)
+        gt = self._gpu
+        if gt is not None:
+            return _gpu_tensor_to_torch_cpu(gt)
+        raise RuntimeError("ApplegpuTensor has no associated GPU data")
 
 
 # ============================================================
@@ -602,7 +661,7 @@ def _handle_detach(args, kwargs):
     """Handle aten.detach -- return same tensor (no autograd graph)."""
     src = args[0]
     if isinstance(src, ApplegpuTensor):
-        return _wrap(src._gpu_tensor, torch_dtype=src.dtype)
+        return _wrap(src._gpu, torch_dtype=src.dtype)
     return src.detach()
 
 
@@ -614,6 +673,56 @@ def _handle_clone(args, kwargs):
         cpu_t = src.to_torch_cpu()
         return ApplegpuTensor.from_torch(cpu_t)
     return src.clone()
+
+
+def to_applegpu(model_or_tensor):
+    """Move a PyTorch model or tensor to applegpu Metal GPU.
+
+    For nn.Module: converts all parameters and buffers in-place.
+    For torch.Tensor: wraps as ApplegpuTensor.
+
+    Args:
+        model_or_tensor: an nn.Module or torch.Tensor
+
+    Returns:
+        The same object with data on applegpu.
+    """
+    import torch.nn as nn
+
+    if isinstance(model_or_tensor, ApplegpuTensor):
+        return model_or_tensor
+    elif isinstance(model_or_tensor, nn.Module):
+        _move_module_to_applegpu(model_or_tensor)
+        return model_or_tensor
+    elif isinstance(model_or_tensor, torch.Tensor):
+        return ApplegpuTensor.from_torch(model_or_tensor)
+    else:
+        raise TypeError(f"Expected nn.Module or torch.Tensor, got {type(model_or_tensor)}")
+
+
+def _move_module_to_applegpu(module):
+    """Recursively replace parameters and buffers in a module with ApplegpuTensors.
+
+    We must replace parameters at the module level (not via param.data = ...)
+    because PyTorch's Parameter.data setter strips tensor subclass types.
+    """
+    import torch.nn as nn
+
+    # Replace parameters on this module (non-recursive to avoid double-processing)
+    for name, param in list(module._parameters.items()):
+        if param is not None and not isinstance(param.data, ApplegpuTensor):
+            new_data = ApplegpuTensor.from_torch(param.data)
+            new_param = nn.Parameter(new_data, requires_grad=param.requires_grad)
+            module._parameters[name] = new_param
+
+    # Replace buffers on this module
+    for name, buf in list(module._buffers.items()):
+        if buf is not None and not isinstance(buf, ApplegpuTensor):
+            module._buffers[name] = ApplegpuTensor.from_torch(buf)
+
+    # Recurse into child modules
+    for child in module.children():
+        _move_module_to_applegpu(child)
 
 
 def _cpu_fallback(func, args, kwargs):

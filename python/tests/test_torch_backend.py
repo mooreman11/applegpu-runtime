@@ -530,6 +530,113 @@ class TestEndToEndTransformerBlock:
         assert torch.allclose(row_sums, torch.ones(seq_len), atol=0.01)
 
 
+# ============================================================
+# Phase E tests (to_applegpu + addmm)
+# ============================================================
+
+class TestToApplegpu:
+    """Tests for to_applegpu() model/tensor migration."""
+
+    def test_to_applegpu_tensor(self):
+        """Single tensor migration."""
+        from applegpu_runtime.torch_backend import ApplegpuTensor
+        t = torch.tensor([1.0, 2.0, 3.0])
+        a = gpu.to_applegpu(t)
+        assert isinstance(a, ApplegpuTensor)
+        assert torch.allclose(a.to_torch_cpu(), t)
+
+    def test_to_applegpu_already_on_device(self):
+        """Passing an ApplegpuTensor returns it unchanged."""
+        from applegpu_runtime.torch_backend import ApplegpuTensor
+        t = ApplegpuTensor.from_torch(torch.tensor([1.0, 2.0]))
+        a = gpu.to_applegpu(t)
+        assert a is t
+
+    def test_to_applegpu_linear(self):
+        """nn.Linear parameter migration."""
+        from applegpu_runtime.torch_backend import ApplegpuTensor
+        model = torch.nn.Linear(4, 3, bias=True)
+        w_before = model.weight.data.clone()
+        b_before = model.bias.data.clone()
+
+        model = gpu.to_applegpu(model)
+
+        assert isinstance(model.weight.data, ApplegpuTensor)
+        assert isinstance(model.bias.data, ApplegpuTensor)
+        assert torch.allclose(model.weight.data.to_torch_cpu(), w_before, atol=1e-6)
+        assert torch.allclose(model.bias.data.to_torch_cpu(), b_before, atol=1e-6)
+
+    def test_to_applegpu_linear_forward(self):
+        """nn.Linear forward pass after migration produces correct result."""
+        from applegpu_runtime.torch_backend import ApplegpuTensor
+        model = torch.nn.Linear(4, 3, bias=True)
+        x = torch.randn(2, 4)
+        expected = model(x)  # CPU result
+
+        model = gpu.to_applegpu(model)
+        x_gpu = ApplegpuTensor.from_torch(x)
+
+        result = model(x_gpu)
+        assert isinstance(result, ApplegpuTensor)
+        assert torch.allclose(result.to_torch_cpu(), expected, atol=1e-3)
+
+    def test_to_applegpu_sequential(self):
+        """nn.Sequential with multiple layers."""
+        from applegpu_runtime.torch_backend import ApplegpuTensor
+        model = torch.nn.Sequential(
+            torch.nn.Linear(4, 8),
+            torch.nn.ReLU(),
+            torch.nn.Linear(8, 3),
+        )
+        x = torch.randn(2, 4)
+        expected = model(x)
+
+        model = gpu.to_applegpu(model)
+        x_gpu = ApplegpuTensor.from_torch(x)
+        result = model(x_gpu)
+
+        assert isinstance(result, ApplegpuTensor)
+        assert torch.allclose(result.to_torch_cpu(), expected, atol=1e-3)
+
+    def test_to_applegpu_invalid_type(self):
+        """Passing an unsupported type raises TypeError."""
+        with pytest.raises(TypeError):
+            gpu.to_applegpu("not a tensor")
+
+
+class TestAddmm:
+    """Tests for aten.addmm dispatch (used by nn.Linear)."""
+
+    def test_addmm_basic(self):
+        """Basic addmm: bias + input @ weight."""
+        from applegpu_runtime.torch_backend import ApplegpuTensor, SUPPORTED_OPS
+        bias = ApplegpuTensor.from_torch(torch.tensor([1.0, 2.0, 3.0]))
+        input = ApplegpuTensor.from_torch(torch.tensor([[1.0, 0.0], [0.0, 1.0]]))
+        weight = ApplegpuTensor.from_torch(torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))
+        result = SUPPORTED_OPS[torch.ops.aten.addmm.default](bias, input, weight)
+        expected = torch.tensor([[2.0, 4.0, 6.0], [5.0, 7.0, 9.0]])
+        assert isinstance(result, ApplegpuTensor)
+        assert torch.allclose(result.to_torch_cpu(), expected, atol=1e-4)
+
+    def test_addmm_with_alpha_beta(self):
+        """addmm with non-default alpha and beta."""
+        from applegpu_runtime.torch_backend import ApplegpuTensor, SUPPORTED_OPS
+        bias = ApplegpuTensor.from_torch(torch.tensor([10.0, 20.0]))
+        input = ApplegpuTensor.from_torch(torch.tensor([[1.0, 2.0]]))
+        weight = ApplegpuTensor.from_torch(torch.tensor([[3.0, 4.0], [5.0, 6.0]]))
+        # beta * bias + alpha * (input @ weight)
+        # 2 * [10, 20] + 3 * ([1,2] @ [[3,4],[5,6]]) = [20, 40] + 3 * [13, 16] = [59, 88]
+        result = SUPPORTED_OPS[torch.ops.aten.addmm.default](bias, input, weight, beta=2, alpha=3)
+        expected = torch.tensor([[59.0, 88.0]])
+        assert isinstance(result, ApplegpuTensor)
+        assert torch.allclose(result.to_torch_cpu(), expected, atol=1e-3)
+
+    def test_addmm_registered(self):
+        """addmm is in the dispatch table."""
+        from applegpu_runtime.torch_backend import SUPPORTED_OPS
+        assert torch.ops.aten.addmm.default in SUPPORTED_OPS
+
+
 class TestDispatchRegistry:
     """Test that the dispatch registry is wired correctly."""
 

@@ -146,6 +146,22 @@ def enable_torch_backend():
     enable()
 
 
+def to_applegpu(model_or_tensor):
+    """Move a PyTorch model or tensor to applegpu Metal GPU.
+
+    For nn.Module: converts all parameters and buffers in-place.
+    For torch.Tensor: wraps as ApplegpuTensor.
+
+    Args:
+        model_or_tensor: an nn.Module or torch.Tensor
+
+    Returns:
+        The same object with data on applegpu.
+    """
+    from applegpu_runtime.torch_backend import to_applegpu
+    return to_applegpu(model_or_tensor)
+
+
 __all__ = [
     "GpuTensor",
     "version",
@@ -207,4 +223,5 @@ __all__ = [
     "run_model",
     "generate_text",
     "enable_torch_backend",
+    "to_applegpu",
 ]
