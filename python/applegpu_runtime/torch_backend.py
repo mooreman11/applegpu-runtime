@@ -220,6 +220,35 @@ def _op_argmax(a, dim=None, keepdim=False):
     return _wrap(gpu.argmax(_unwrap(a)))
 
 
+@register_op(torch.ops.aten.sum.dim_IntList)
+def _op_sum(a, dim, keepdim=False, dtype=None):
+    ndim = len(_unwrap(a).shape)
+    # Normalize dim list
+    dims = [d if d >= 0 else d + ndim for d in dim]
+    if dims != [ndim - 1]:
+        return NotImplemented
+    result = _wrap(gpu.sum(_unwrap(a)))
+    if keepdim:
+        new_shape = list(_unwrap(a).shape)
+        new_shape[-1] = 1
+        result = _wrap(gpu.reshape(_unwrap(result), new_shape))
+    return result
+
+
+@register_op(torch.ops.aten.mean.dim)
+def _op_mean(a, dim, keepdim=False, dtype=None):
+    ndim = len(_unwrap(a).shape)
+    dims = [d if d >= 0 else d + ndim for d in dim]
+    if dims != [ndim - 1]:
+        return NotImplemented
+    result = _wrap(gpu.mean(_unwrap(a)))
+    if keepdim:
+        new_shape = list(_unwrap(a).shape)
+        new_shape[-1] = 1
+        result = _wrap(gpu.reshape(_unwrap(result), new_shape))
+    return result
+
+
 # ============================================================
 # Shape ops
 # ============================================================

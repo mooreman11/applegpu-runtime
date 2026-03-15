@@ -443,6 +443,54 @@ kernel void transpose_f16(
 }
 "#;
 
+/// MSL source for strided copy (general transpose via arbitrary stride permutation).
+const COPY_STRIDED_KERNEL_SOURCE: &str = const_format::concatcp!(
+    r#"
+#include <metal_stdlib>
+using namespace metal;
+"#,
+    ND_INDEX_HELPER,
+    r#"
+kernel void copy_strided_f32(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    constant uint* in_strides [[buffer(2)]],
+    constant uint* out_shape [[buffer(3)]],
+    constant uint& ndim [[buffer(4)]],
+    constant uint& numel [[buffer(5)]],
+    uint id [[thread_position_in_grid]]
+) {
+    if (id >= numel) return;
+    uint in_off = nd_index_to_offset(id, out_shape, in_strides, ndim);
+    output[id] = input[in_off];
+}
+"#
+);
+
+/// MSL source for f16 strided copy (general transpose).
+const COPY_STRIDED_KERNEL_SOURCE_F16: &str = const_format::concatcp!(
+    r#"
+#include <metal_stdlib>
+using namespace metal;
+"#,
+    ND_INDEX_HELPER,
+    r#"
+kernel void copy_strided_f16(
+    device const half* input [[buffer(0)]],
+    device half* output [[buffer(1)]],
+    constant uint* in_strides [[buffer(2)]],
+    constant uint* out_shape [[buffer(3)]],
+    constant uint& ndim [[buffer(4)]],
+    constant uint& numel [[buffer(5)]],
+    uint id [[thread_position_in_grid]]
+) {
+    if (id >= numel) return;
+    uint in_off = nd_index_to_offset(id, out_shape, in_strides, ndim);
+    output[id] = input[in_off];
+}
+"#
+);
+
 const GELU_KERNEL_SOURCE_F16: &str = const_format::concatcp!(
     r#"
 #include <metal_stdlib>
@@ -686,6 +734,90 @@ kernel void softmax_causal_f16(device const half* input [[buffer(0)]], device ha
 "#;
 
 // ── Argmax kernel sources ───────────────────────────────────────────────────
+
+const SUM_KERNEL_SOURCE: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void sum_f32(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    constant uint& total_rows [[buffer(2)]],
+    constant uint& cols [[buffer(3)]],
+    uint row [[thread_position_in_grid]]
+) {
+    if (row >= total_rows) return;
+    uint offset = row * cols;
+    float sum = 0.0f;
+    for (uint j = 0; j < cols; j++) {
+        sum += input[offset + j];
+    }
+    output[row] = sum;
+}
+"#;
+
+const SUM_KERNEL_SOURCE_F16: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void sum_f16(
+    device const half* input [[buffer(0)]],
+    device half* output [[buffer(1)]],
+    constant uint& total_rows [[buffer(2)]],
+    constant uint& cols [[buffer(3)]],
+    uint row [[thread_position_in_grid]]
+) {
+    if (row >= total_rows) return;
+    uint offset = row * cols;
+    float sum = 0.0f;
+    for (uint j = 0; j < cols; j++) {
+        sum += float(input[offset + j]);
+    }
+    output[row] = half(sum);
+}
+"#;
+
+const MEAN_KERNEL_SOURCE: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void mean_f32(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    constant uint& total_rows [[buffer(2)]],
+    constant uint& cols [[buffer(3)]],
+    uint row [[thread_position_in_grid]]
+) {
+    if (row >= total_rows) return;
+    uint offset = row * cols;
+    float sum = 0.0f;
+    for (uint j = 0; j < cols; j++) {
+        sum += input[offset + j];
+    }
+    output[row] = sum / float(cols);
+}
+"#;
+
+const MEAN_KERNEL_SOURCE_F16: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void mean_f16(
+    device const half* input [[buffer(0)]],
+    device half* output [[buffer(1)]],
+    constant uint& total_rows [[buffer(2)]],
+    constant uint& cols [[buffer(3)]],
+    uint row [[thread_position_in_grid]]
+) {
+    if (row >= total_rows) return;
+    uint offset = row * cols;
+    float sum = 0.0f;
+    for (uint j = 0; j < cols; j++) {
+        sum += float(input[offset + j]);
+    }
+    output[row] = half(sum / float(cols));
+}
+"#;
 
 const ARGMAX_KERNEL_SOURCE: &str = r#"
 #include <metal_stdlib>
@@ -1621,6 +1753,9 @@ impl KernelRegistry {
                     "add_bias_f32" => ADD_BIAS_KERNEL_SOURCE_F16,
                     "softmax_causal_f32" => SOFTMAX_CAUSAL_KERNEL_SOURCE_F16,
                     "argmax_f32" => ARGMAX_KERNEL_SOURCE_F16,
+                    "sum_f32" => SUM_KERNEL_SOURCE_F16,
+                    "mean_f32" => MEAN_KERNEL_SOURCE_F16,
+                    "copy_strided_f32" => COPY_STRIDED_KERNEL_SOURCE_F16,
                     _ => BINARY_KERNEL_SOURCE_F16, // fallback
                 };
                 // For named kernels like matmul_f32 -> matmul_f16
@@ -1653,6 +1788,9 @@ impl KernelRegistry {
                     "add_bias_f32" => ADD_BIAS_KERNEL_SOURCE,
                     "softmax_causal_f32" => SOFTMAX_CAUSAL_KERNEL_SOURCE,
                     "argmax_f32" => ARGMAX_KERNEL_SOURCE,
+                    "sum_f32" => SUM_KERNEL_SOURCE,
+                    "mean_f32" => MEAN_KERNEL_SOURCE,
+                    "copy_strided_f32" => COPY_STRIDED_KERNEL_SOURCE,
                     _ => BINARY_KERNEL_SOURCE,
                 };
                 (source, base_name.to_string())
@@ -1965,6 +2103,24 @@ impl KernelRegistry {
         pipeline.dispatch_softmax_causal(buf_input, buf_output, batch_size, rows, cols)
     }
 
+    pub fn dispatch_sum_typed(
+        &self, device: &Device, dtype: DType, buf_input: &Buffer, buf_output: &Buffer,
+        rows: usize, cols: usize,
+    ) -> Result<()> {
+        let (source, func) = Self::resolve_kernel("sum_f32", dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_softmax(buf_input, buf_output, rows, cols)
+    }
+
+    pub fn dispatch_mean_typed(
+        &self, device: &Device, dtype: DType, buf_input: &Buffer, buf_output: &Buffer,
+        rows: usize, cols: usize,
+    ) -> Result<()> {
+        let (source, func) = Self::resolve_kernel("mean_f32", dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_softmax(buf_input, buf_output, rows, cols)
+    }
+
     pub fn dispatch_argmax_typed(
         &self, device: &Device, input_dtype: DType, buf_input: &Buffer, buf_output: &Buffer,
         rows: usize, cols: usize,
@@ -2029,6 +2185,24 @@ impl KernelRegistry {
         let (source, func) = Self::resolve_kernel("softmax_causal_f32", dtype);
         let pipeline = self.get_or_create(device, source, &func)?;
         pipeline.dispatch_softmax_causal_nb(queue, buf_input, buf_output, batch_size, rows, cols)
+    }
+
+    pub fn dispatch_sum_typed_nb(
+        &self, device: &Device, dtype: DType, queue: *mut std::ffi::c_void,
+        buf_input: &Buffer, buf_output: &Buffer, rows: usize, cols: usize,
+    ) -> Result<*mut std::ffi::c_void> {
+        let (source, func) = Self::resolve_kernel("sum_f32", dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_softmax_nb(queue, buf_input, buf_output, rows, cols)
+    }
+
+    pub fn dispatch_mean_typed_nb(
+        &self, device: &Device, dtype: DType, queue: *mut std::ffi::c_void,
+        buf_input: &Buffer, buf_output: &Buffer, rows: usize, cols: usize,
+    ) -> Result<*mut std::ffi::c_void> {
+        let (source, func) = Self::resolve_kernel("mean_f32", dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_softmax_nb(queue, buf_input, buf_output, rows, cols)
     }
 
     pub fn dispatch_argmax_typed_nb(

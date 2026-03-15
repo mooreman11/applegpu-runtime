@@ -299,6 +299,14 @@ impl GpuTensor {
         Ok(GpuTensor { id, destroyed: Cell::new(false) })
     }
 
+    #[pyo3(signature = (dim0, dim1))]
+    fn transpose_dims(&self, dim0: usize, dim1: usize) -> PyResult<GpuTensor> {
+        let mut rt = RUNTIME_LAZY.lock().unwrap();
+        let id = applegpu_core::ops::transpose_dims(&mut rt, self.id, dim0, dim1)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(GpuTensor { id, destroyed: Cell::new(false) })
+    }
+
     fn sqrt(&self) -> PyResult<GpuTensor> {
         let mut rt = RUNTIME_LAZY.lock().unwrap();
         let id = applegpu_core::ops::sqrt(&mut rt, self.id)
@@ -325,6 +333,20 @@ impl GpuTensor {
     fn argmax(&self) -> PyResult<GpuTensor> {
         let mut rt = RUNTIME_LAZY.lock().unwrap();
         let id = applegpu_core::ops::argmax(&mut rt, self.id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(GpuTensor { id, destroyed: Cell::new(false) })
+    }
+
+    fn sum(&self) -> PyResult<GpuTensor> {
+        let mut rt = RUNTIME_LAZY.lock().unwrap();
+        let id = applegpu_core::ops::sum(&mut rt, self.id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(GpuTensor { id, destroyed: Cell::new(false) })
+    }
+
+    fn mean(&self) -> PyResult<GpuTensor> {
+        let mut rt = RUNTIME_LAZY.lock().unwrap();
+        let id = applegpu_core::ops::mean(&mut rt, self.id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok(GpuTensor { id, destroyed: Cell::new(false) })
     }
@@ -619,6 +641,8 @@ fn reshape(t: &GpuTensor, new_shape: Vec<usize>) -> PyResult<GpuTensor> { t.resh
 fn softmax(t: &GpuTensor) -> PyResult<GpuTensor> { t.softmax() }
 #[pyfunction]
 fn transpose(t: &GpuTensor) -> PyResult<GpuTensor> { t.transpose() }
+#[pyfunction]
+fn transpose_dims(t: &GpuTensor, dim0: usize, dim1: usize) -> PyResult<GpuTensor> { t.transpose_dims(dim0, dim1) }
 
 #[pyfunction]
 fn gelu(t: &GpuTensor) -> PyResult<GpuTensor> { t.gelu() }
@@ -681,6 +705,22 @@ fn softmax_causal(t: &GpuTensor) -> PyResult<GpuTensor> {
 fn argmax(t: &GpuTensor) -> PyResult<GpuTensor> {
     let mut rt = RUNTIME_LAZY.lock().unwrap();
     let id = applegpu_core::ops::argmax(&mut rt, t.id)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(GpuTensor { id, destroyed: Cell::new(false) })
+}
+
+#[pyfunction]
+fn sum(t: &GpuTensor) -> PyResult<GpuTensor> {
+    let mut rt = RUNTIME_LAZY.lock().unwrap();
+    let id = applegpu_core::ops::sum(&mut rt, t.id)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(GpuTensor { id, destroyed: Cell::new(false) })
+}
+
+#[pyfunction]
+fn mean(t: &GpuTensor) -> PyResult<GpuTensor> {
+    let mut rt = RUNTIME_LAZY.lock().unwrap();
+    let id = applegpu_core::ops::mean(&mut rt, t.id)
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(GpuTensor { id, destroyed: Cell::new(false) })
 }
@@ -852,6 +892,7 @@ fn applegpu_runtime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(reshape, m)?)?;
     m.add_function(wrap_pyfunction!(softmax, m)?)?;
     m.add_function(wrap_pyfunction!(transpose, m)?)?;
+    m.add_function(wrap_pyfunction!(transpose_dims, m)?)?;
     m.add_function(wrap_pyfunction!(gelu, m)?)?;
     m.add_function(wrap_pyfunction!(layer_norm, m)?)?;
     m.add_function(wrap_pyfunction!(embedding, m)?)?;
@@ -862,6 +903,8 @@ fn applegpu_runtime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(add_bias, m)?)?;
     m.add_function(wrap_pyfunction!(softmax_causal, m)?)?;
     m.add_function(wrap_pyfunction!(argmax, m)?)?;
+    m.add_function(wrap_pyfunction!(sum, m)?)?;
+    m.add_function(wrap_pyfunction!(mean, m)?)?;
     m.add_function(wrap_pyfunction!(attention_causal, m)?)?;
     m.add_function(wrap_pyfunction!(register_container, m)?)?;
     m.add_function(wrap_pyfunction!(deregister_container, m)?)?;

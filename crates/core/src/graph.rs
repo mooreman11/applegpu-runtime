@@ -26,8 +26,8 @@ pub enum OpKind {
     },
     // Reduction ops
     Softmax,
-    // Shape ops
-    Transpose,
+    // Shape ops — general transpose swapping two dimensions
+    Transpose { dim0: usize, dim1: usize },
     // Scalar multiply (carries the scalar value)
     ScalarMul(f32),
     // Transformer ops
@@ -46,6 +46,10 @@ pub enum OpKind {
     SoftmaxCausal,
     // Argmax reduction (output is always Int32)
     Argmax,
+    // Sum reduction along last dim
+    Sum,
+    // Mean reduction along last dim
+    Mean,
 }
 
 impl OpKind {
@@ -64,7 +68,7 @@ impl OpKind {
             OpKind::Matmul => "matmul_f32",
             OpKind::FusedElementwise { ref function_name, .. } => function_name.as_str(),
             OpKind::Softmax => "softmax_f32",
-            OpKind::Transpose => "transpose_f32",
+            OpKind::Transpose { .. } => "transpose_f32",
             OpKind::ScalarMul(_) => "scalar_mul_f32",
             OpKind::Gelu => "gelu_f32",
             OpKind::LayerNorm { .. } => "layer_norm_f32",
@@ -75,6 +79,8 @@ impl OpKind {
             OpKind::AddBias => "add_bias_f32",
             OpKind::SoftmaxCausal => "softmax_causal_f32",
             OpKind::Argmax => "argmax_f32",
+            OpKind::Sum => "sum_f32",
+            OpKind::Mean => "mean_f32",
         }
     }
 
@@ -100,7 +106,7 @@ impl OpKind {
     }
 
     pub fn is_transpose(&self) -> bool {
-        matches!(self, OpKind::Transpose)
+        matches!(self, OpKind::Transpose { .. })
     }
 
     pub fn is_scalar_mul(&self) -> bool {
@@ -141,6 +147,14 @@ impl OpKind {
 
     pub fn is_argmax(&self) -> bool {
         matches!(self, OpKind::Argmax)
+    }
+
+    pub fn is_sum(&self) -> bool {
+        matches!(self, OpKind::Sum)
+    }
+
+    pub fn is_mean(&self) -> bool {
+        matches!(self, OpKind::Mean)
     }
 }
 

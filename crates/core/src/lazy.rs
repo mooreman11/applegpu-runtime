@@ -217,19 +217,33 @@ impl LazyRuntime {
             return Ok(out);
         }
 
-        if node.op.is_transpose() {
+        if let crate::graph::OpKind::Transpose { dim0, dim1 } = node.op {
             let out_buf = self.pool.acquire(device, out_size)?;
             let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
             let input = self.get_tensor(node.inputs[0])?;
             let dims = input.meta.layout.shape.dims();
             let ndim = dims.len();
-            let rows = dims[ndim - 2];
-            let cols = dims[ndim - 1];
-            let batch_size: usize = dims[..ndim - 2].iter().product::<usize>().max(1);
-            if batch_size <= 1 {
-                REGISTRY.dispatch_transpose_typed(device, dtype, &input.buffer, &out.buffer, rows, cols)?;
+
+            // Fast path: swapping last two dims uses optimized batched kernel
+            if dim0 == ndim - 2 && dim1 == ndim - 1 {
+                let rows = dims[ndim - 2];
+                let cols = dims[ndim - 1];
+                let batch_size: usize = dims[..ndim - 2].iter().product::<usize>().max(1);
+                if batch_size <= 1 {
+                    REGISTRY.dispatch_transpose_typed(device, dtype, &input.buffer, &out.buffer, rows, cols)?;
+                } else {
+                    REGISTRY.dispatch_transpose_batched_typed(device, dtype, &input.buffer, &out.buffer, batch_size, rows, cols)?;
+                }
             } else {
-                REGISTRY.dispatch_transpose_batched_typed(device, dtype, &input.buffer, &out.buffer, batch_size, rows, cols)?;
+                // General path: compute transposed strides, use strided copy kernel
+                let in_strides = self.transposed_strides(dims, dim0, dim1);
+                let out_shape_u32 = Self::shape_to_u32(&node.out_shape);
+                let ndim_u32 = ndim as u32;
+                let numel = node.out_shape.numel() as u32;
+                REGISTRY.dispatch_unary_nd_typed(
+                    device, "copy_strided_f32", dtype,
+                    &input.buffer, &in_strides, &out.buffer, &out_shape_u32, ndim_u32, numel,
+                )?;
             }
             return Ok(out);
         }
@@ -380,6 +394,21 @@ impl LazyRuntime {
             return Ok(out);
         }
 
+        if node.op.is_sum() || node.op.is_mean() {
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+            let input = self.get_tensor(node.inputs[0])?;
+            let dims = input.meta.layout.shape.dims();
+            let cols = dims[dims.len() - 1];
+            let total_rows: usize = dims[..dims.len() - 1].iter().product::<usize>().max(1);
+            if node.op.is_sum() {
+                REGISTRY.dispatch_sum_typed(device, dtype, &input.buffer, &out.buffer, total_rows, cols)?;
+            } else {
+                REGISTRY.dispatch_mean_typed(device, dtype, &input.buffer, &out.buffer, total_rows, cols)?;
+            }
+            return Ok(out);
+        }
+
         if node.op.is_unary() {
             let (in_strides, out_shape_u32, ndim, numel) = self.unary_nd_params(node)?;
             let out_buf = self.pool.acquire(device, out_size)?;
@@ -498,17 +527,31 @@ impl LazyRuntime {
             return REGISTRY.dispatch_softmax_typed_nb(device, dtype, queue, &input.buffer, &out.buffer, total_rows, cols);
         }
 
-        if node.op.is_transpose() {
+        if let crate::graph::OpKind::Transpose { dim0, dim1 } = node.op {
             let input = self.get_tensor(node.inputs[0])?;
             let dims = input.meta.layout.shape.dims();
             let ndim = dims.len();
-            let rows = dims[ndim - 2];
-            let cols = dims[ndim - 1];
-            let batch_size: usize = dims[..ndim - 2].iter().product::<usize>().max(1);
-            if batch_size <= 1 {
-                return REGISTRY.dispatch_transpose_typed_nb(device, dtype, queue, &input.buffer, &out.buffer, rows, cols);
+
+            // Fast path: swapping last two dims uses optimized batched kernel
+            if dim0 == ndim - 2 && dim1 == ndim - 1 {
+                let rows = dims[ndim - 2];
+                let cols = dims[ndim - 1];
+                let batch_size: usize = dims[..ndim - 2].iter().product::<usize>().max(1);
+                if batch_size <= 1 {
+                    return REGISTRY.dispatch_transpose_typed_nb(device, dtype, queue, &input.buffer, &out.buffer, rows, cols);
+                } else {
+                    return REGISTRY.dispatch_transpose_batched_typed_nb(device, dtype, queue, &input.buffer, &out.buffer, batch_size, rows, cols);
+                }
             } else {
-                return REGISTRY.dispatch_transpose_batched_typed_nb(device, dtype, queue, &input.buffer, &out.buffer, batch_size, rows, cols);
+                // General path: strided copy
+                let in_strides = self.transposed_strides(dims, dim0, dim1);
+                let out_shape_u32 = Self::shape_to_u32(&node.out_shape);
+                let ndim_u32 = ndim as u32;
+                let numel = node.out_shape.numel() as u32;
+                return REGISTRY.dispatch_unary_nd_typed_nb(
+                    device, "copy_strided_f32", dtype, queue,
+                    &input.buffer, &in_strides, &out.buffer, &out_shape_u32, ndim_u32, numel,
+                );
             }
         }
 
@@ -625,6 +668,18 @@ impl LazyRuntime {
             return REGISTRY.dispatch_argmax_typed_nb(device, input_dtype, queue, &input.buffer, &out.buffer, rows, cols);
         }
 
+        if node.op.is_sum() || node.op.is_mean() {
+            let input = self.get_tensor(node.inputs[0])?;
+            let dims = input.meta.layout.shape.dims();
+            let cols = dims[dims.len() - 1];
+            let total_rows: usize = dims[..dims.len() - 1].iter().product::<usize>().max(1);
+            if node.op.is_sum() {
+                return REGISTRY.dispatch_sum_typed_nb(device, dtype, queue, &input.buffer, &out.buffer, total_rows, cols);
+            } else {
+                return REGISTRY.dispatch_mean_typed_nb(device, dtype, queue, &input.buffer, &out.buffer, total_rows, cols);
+            }
+        }
+
         if node.op.is_unary() {
             let (in_strides, out_shape_u32, ndim, numel) = self.unary_nd_params(node)?;
             let input = self.get_tensor(node.inputs[0])?;
@@ -694,6 +749,27 @@ impl LazyRuntime {
     /// Convert a Shape's dims to [u32; MAX_DIMS] for Metal dispatch.
     fn shape_to_u32(shape: &Shape) -> [u32; MAX_DIMS] {
         Self::to_u32_array(&shape.dims)
+    }
+
+    /// Compute contiguous strides for the input, then swap dim0/dim1
+    /// so that reading the input with these strides produces the transposed output.
+    fn transposed_strides(&self, in_dims: &[usize], dim0: usize, dim1: usize) -> [u32; MAX_DIMS] {
+        let ndim = in_dims.len();
+        // Compute contiguous strides for the input
+        let mut strides = [0usize; MAX_DIMS];
+        if ndim > 0 {
+            strides[ndim - 1] = 1;
+            for i in (0..ndim - 1).rev() {
+                strides[i] = strides[i + 1] * in_dims[i + 1];
+            }
+        }
+        // Swap strides for dim0 and dim1
+        strides.swap(dim0, dim1);
+        let mut out = [0u32; MAX_DIMS];
+        for i in 0..MAX_DIMS {
+            out[i] = strides[i] as u32;
+        }
+        out
     }
 
     /// Compute broadcast strides for a binary op, converting to u32.

@@ -78,6 +78,8 @@ fn op_to_discriminant(op: &OpKind) -> u32 {
         OpKind::AddBias => 20,
         OpKind::SoftmaxCausal => 21,
         OpKind::Argmax => 22,
+        OpKind::Sum => 23,
+        OpKind::Mean => 24,
     }
 }
 
@@ -147,6 +149,8 @@ fn discriminant_to_op(d: u32, r: &mut impl Read) -> io::Result<OpKind> {
         20 => Ok(OpKind::AddBias),
         21 => Ok(OpKind::SoftmaxCausal),
         22 => Ok(OpKind::Argmax),
+        23 => Ok(OpKind::Sum),
+        24 => Ok(OpKind::Mean),
         _ => Err(io::Error::new(io::ErrorKind::InvalidData, format!("Unknown op type: {}", d))),
     }
 }

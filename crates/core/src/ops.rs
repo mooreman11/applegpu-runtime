@@ -204,28 +204,47 @@ pub fn softmax(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
 }
 
 /// Transpose last two dimensions: [..., rows, cols] → [..., cols, rows].
-pub fn transpose(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
+/// General transpose: swap dimensions dim0 and dim1.
+pub fn transpose_dims(rt: &mut LazyRuntime, input_id: u64, dim0: usize, dim1: usize) -> Result<u64> {
     let dtype = rt.dtype(input_id)?;
     validate_compute_dtype(dtype)?;
     let shape = rt.shape(input_id)?;
-    if shape.len() < 2 {
+    let ndim = shape.len();
+
+    if dim0 >= ndim || dim1 >= ndim {
         return Err(GpuError::InvalidTensor(format!(
-            "transpose requires at least 2D tensor, got {:?}", shape
+            "transpose dims ({}, {}) out of range for {}D tensor", dim0, dim1, ndim
         )));
     }
-    let ndim = shape.len();
+    if dim0 == dim1 {
+        // No-op: return the input tensor unchanged
+        return Ok(input_id);
+    }
+
     let mut out_shape = shape.clone();
-    out_shape.swap(ndim - 2, ndim - 1);
+    out_shape.swap(dim0, dim1);
     let out_id = next_id();
     rt.record_op(OpNode {
         id: out_id,
-        op: OpKind::Transpose,
+        op: OpKind::Transpose { dim0, dim1 },
         inputs: vec![input_id],
         out_shape: Shape::new(out_shape)?,
         out_dtype: dtype,
         container_id: ContainerId::DEFAULT,
     });
     Ok(out_id)
+}
+
+/// Transpose: swap the last two dimensions (backward-compatible shorthand).
+pub fn transpose(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
+    let shape = rt.shape(input_id)?;
+    let ndim = shape.len();
+    if ndim < 2 {
+        return Err(GpuError::InvalidTensor(format!(
+            "transpose requires at least 2D tensor, got {:?}", shape
+        )));
+    }
+    transpose_dims(rt, input_id, ndim - 2, ndim - 1)
 }
 
 /// Multiply every element by a scalar.
@@ -524,6 +543,52 @@ pub fn argmax(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
         inputs: vec![input_id],
         out_shape: Shape::new(out_shape)?,
         out_dtype: DType::Int32,
+        container_id: ContainerId::DEFAULT,
+    });
+    Ok(out_id)
+}
+
+/// Sum reduction along last dimension. N-D supported: [..., cols] -> [...].
+/// For 1D input [n] -> [1].
+pub fn sum(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
+    let shape = rt.shape(input_id)?;
+    let dtype = rt.dtype(input_id)?;
+    validate_compute_dtype(dtype)?;
+    if shape.is_empty() {
+        return Err(GpuError::InvalidTensor("sum requires at least 1D tensor".into()));
+    }
+    let mut out_shape = shape[..shape.len() - 1].to_vec();
+    if out_shape.is_empty() { out_shape = vec![1]; }
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op: OpKind::Sum,
+        inputs: vec![input_id],
+        out_shape: Shape::new(out_shape)?,
+        out_dtype: dtype,
+        container_id: ContainerId::DEFAULT,
+    });
+    Ok(out_id)
+}
+
+/// Mean reduction along last dimension. N-D supported: [..., cols] -> [...].
+/// For 1D input [n] -> [1].
+pub fn mean(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
+    let shape = rt.shape(input_id)?;
+    let dtype = rt.dtype(input_id)?;
+    validate_compute_dtype(dtype)?;
+    if shape.is_empty() {
+        return Err(GpuError::InvalidTensor("mean requires at least 1D tensor".into()));
+    }
+    let mut out_shape = shape[..shape.len() - 1].to_vec();
+    if out_shape.is_empty() { out_shape = vec![1]; }
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op: OpKind::Mean,
+        inputs: vec![input_id],
+        out_shape: Shape::new(out_shape)?,
+        out_dtype: dtype,
         container_id: ContainerId::DEFAULT,
     });
     Ok(out_id)
@@ -1380,6 +1445,114 @@ mod tests {
         let bytes = rt.read_bytes(a_id).unwrap();
         let idx = i32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
         assert_eq!(idx, 2); // max at index 2
+    }
+
+    // ── Sum tests ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_sum_2d() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        // [[1,2,3],[4,5,6]] -> sum over last dim -> [6, 15]
+        let t = Tensor::from_f32(&device, vec![2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
+        let id = t.meta.id;
+        rt.insert_tensor(t).unwrap();
+        let s_id = crate::ops::sum(&mut rt, id).unwrap();
+        assert_eq!(rt.shape(s_id).unwrap(), vec![2]);
+        rt.eval(&device, s_id).unwrap();
+        let result = rt.read_f32(s_id).unwrap();
+        assert!((result[0] - 6.0).abs() < 0.001);
+        assert!((result[1] - 15.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_sum_1d() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        // [1,2,3,4] -> sum -> [10]
+        let t = Tensor::from_f32(&device, vec![4], &[1.0, 2.0, 3.0, 4.0]).unwrap();
+        let id = t.meta.id;
+        rt.insert_tensor(t).unwrap();
+        let s_id = crate::ops::sum(&mut rt, id).unwrap();
+        assert_eq!(rt.shape(s_id).unwrap(), vec![1]);
+        rt.eval(&device, s_id).unwrap();
+        let result = rt.read_f32(s_id).unwrap();
+        assert!((result[0] - 10.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_sum_3d() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        // [2,3,4] -> sum over last dim -> [2,3]
+        let data: Vec<f32> = (1..=24).map(|x| x as f32).collect();
+        let t = Tensor::from_f32(&device, vec![2, 3, 4], &data).unwrap();
+        let id = t.meta.id;
+        rt.insert_tensor(t).unwrap();
+        let s_id = crate::ops::sum(&mut rt, id).unwrap();
+        assert_eq!(rt.shape(s_id).unwrap(), vec![2, 3]);
+        rt.eval(&device, s_id).unwrap();
+        let result = rt.read_f32(s_id).unwrap();
+        // Row 0: 1+2+3+4=10
+        assert!((result[0] - 10.0).abs() < 0.001);
+        // Row 1: 5+6+7+8=26
+        assert!((result[1] - 26.0).abs() < 0.001);
+        // Row 5: 21+22+23+24=90
+        assert!((result[5] - 90.0).abs() < 0.001);
+    }
+
+    // ── Mean tests ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_mean_2d() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        // [[1,2,3],[4,5,6]] -> mean over last dim -> [2.0, 5.0]
+        let t = Tensor::from_f32(&device, vec![2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
+        let id = t.meta.id;
+        rt.insert_tensor(t).unwrap();
+        let m_id = crate::ops::mean(&mut rt, id).unwrap();
+        assert_eq!(rt.shape(m_id).unwrap(), vec![2]);
+        rt.eval(&device, m_id).unwrap();
+        let result = rt.read_f32(m_id).unwrap();
+        assert!((result[0] - 2.0).abs() < 0.001);
+        assert!((result[1] - 5.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_mean_1d() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        // [1,2,3,4] -> mean -> [2.5]
+        let t = Tensor::from_f32(&device, vec![4], &[1.0, 2.0, 3.0, 4.0]).unwrap();
+        let id = t.meta.id;
+        rt.insert_tensor(t).unwrap();
+        let m_id = crate::ops::mean(&mut rt, id).unwrap();
+        assert_eq!(rt.shape(m_id).unwrap(), vec![1]);
+        rt.eval(&device, m_id).unwrap();
+        let result = rt.read_f32(m_id).unwrap();
+        assert!((result[0] - 2.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_mean_3d() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        // [2,3,4] -> mean over last dim -> [2,3]
+        let data: Vec<f32> = (1..=24).map(|x| x as f32).collect();
+        let t = Tensor::from_f32(&device, vec![2, 3, 4], &data).unwrap();
+        let id = t.meta.id;
+        rt.insert_tensor(t).unwrap();
+        let m_id = crate::ops::mean(&mut rt, id).unwrap();
+        assert_eq!(rt.shape(m_id).unwrap(), vec![2, 3]);
+        rt.eval(&device, m_id).unwrap();
+        let result = rt.read_f32(m_id).unwrap();
+        // Row 0: (1+2+3+4)/4=2.5
+        assert!((result[0] - 2.5).abs() < 0.001);
+        // Row 1: (5+6+7+8)/4=6.5
+        assert!((result[1] - 6.5).abs() < 0.001);
+        // Row 5: (21+22+23+24)/4=22.5
+        assert!((result[5] - 22.5).abs() < 0.001);
     }
 
     // ── AttentionCausal tests ──────────────────────────────────────────────
