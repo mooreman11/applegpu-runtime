@@ -434,6 +434,19 @@ def _op_zeros_like(a, dtype=None, layout=None, device=None, pin_memory=None, mem
     return _wrap(gpu_t, torch_dtype=torch_dtype)
 
 
+@register_op(torch.ops.aten.new_empty_strided.default)
+def _op_new_empty_strided(a, size, stride, dtype=None, layout=None, device=None, pin_memory=None):
+    """Create empty tensor with given size (ignore stride — always contiguous)."""
+    shape = list(size)
+    n_elems = 1
+    for s in shape:
+        n_elems *= s
+    torch_dtype = dtype if dtype is not None else (a.dtype if isinstance(a, torch.Tensor) else torch.float32)
+    gpu_dtype = _TORCH_TO_GPU_DTYPE.get(torch_dtype, "float32")
+    gpu_t = gpu.tensor([0.0] * max(n_elems, 1), shape=shape, dtype=gpu_dtype)
+    return _wrap(gpu_t, torch_dtype=torch_dtype)
+
+
 @register_op(torch.ops.aten.where.self)
 def _op_where(condition, x, y):
     cond_gpu = _unwrap(condition)

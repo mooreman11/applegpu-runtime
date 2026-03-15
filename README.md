@@ -116,6 +116,7 @@ All ops support N-D tensors (up to 8 dimensions) with NumPy-style broadcasting a
 ### Infrastructure
 
 - **PyTorch device backend** — `ApplegpuTensor` with `__torch_dispatch__`, 40+ aten ops routed to Metal, CPU fallback with warnings
+- **Training support** — PyTorch autograd works natively, SGD/Adam optimizers, MLP training verified with loss decrease
 - **Multi-container scheduler** — priority-based fair queuing with per-container resource quotas
 - **Persistent memory pool** — power-of-two bucketed buffer reuse with watermark eviction
 - **Command buffer batching** — non-blocking GPU dispatch, single wait per eval
@@ -134,7 +135,7 @@ All ops support N-D tensors (up to 8 dimensions) with NumPy-style broadcasting a
 
 ### Test Coverage
 
-549 tests across all layers (265 Rust + 13 Swift + 271 Python)
+560 tests across all layers (266 Rust + 13 Swift + 281 Python)
 
 ## Examples
 

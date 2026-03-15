@@ -143,18 +143,40 @@ _Model validation: GPT-2 (small/medium/large), ResNet-18, BERT all run on Metal.
 - [x] **BERT** — encoder inference, output matches CPU
 - [x] **Examples directory** — 4 demo scripts with CLI args
 
+## v0.6.0 — SHIPPED
+_Training support: PyTorch autograd works natively on Metal GPU for MLP training._
+
+### What's verified:
+- [x] **PyTorch autograd integration** — backward ops flow through __torch_dispatch__ natively
+- [x] **Backward ops for element-wise** — grad_add, grad_mul, grad_relu, grad_gelu, grad_tanh verified via MLP training
+- [x] **Backward ops for matmul** — grad_matmul verified (dA = dOut @ B^T, dB = A^T @ dOut)
+- [x] **SGD optimizer** — torch.optim.SGD parameter updates verified
+- [x] **MLP training** — loss decreases over multiple training steps
+- [x] **Eager evaluation mode** — enable_training() preserves tensors for backward pass
+
+### Not yet verified (may work via CPU fallback, needs testing):
+- [ ] **Backward ops for softmax** — grad_softmax (Jacobian-vector product)
+- [ ] **Backward ops for layer_norm** — grad_layer_norm (complex gradient)
+- [ ] **Backward ops for CNN** — grad_conv2d, grad_batch_norm, grad_max_pool2d, grad_avg_pool2d
+- [ ] **Backward ops for embedding** — grad_embedding (scatter gradients to weight rows)
+- [ ] **Gradient accumulation** — in-place parameter updates for large batch training
+- [ ] **Adam optimizer** — may work via dispatch, needs verification
+
 ## Up Next
 
-### v0.6.0: Training support (autograd)
-_Enable model training on Metal GPU. Currently inference-only._
+### v0.7.0: Production training + performance
+_Scale training to real models. Verify all backward ops. Optimize dispatch overhead._
 
-**Autograd:**
-- [ ] **Backward ops for element-wise** — grad_add, grad_mul, grad_relu, grad_gelu, grad_exp, grad_log, grad_sqrt, grad_tanh, grad_abs, grad_sign
-- [ ] **Backward ops for matrix** — grad_matmul, grad_softmax, grad_layer_norm
-- [ ] **Backward ops for CNN** — grad_conv2d, grad_batch_norm, grad_max_pool2d, grad_avg_pool2d
-- [x] **PyTorch autograd integration** — backward ops flow through __torch_dispatch__, MLP training verified
-- [ ] **Gradient accumulation** — in-place parameter updates
-- [ ] **Optimizer kernels** — SGD, Adam on Metal GPU
+**Training at scale:**
+- [ ] **Verify/fix softmax backward** — test in attention training loop
+- [ ] **Verify/fix layer_norm backward** — test in transformer training
+- [ ] **Verify/fix conv2d backward** — test in ResNet training
+- [ ] **Verify/fix batch_norm backward** — test in ResNet training
+- [ ] **Verify/fix embedding backward** — test in GPT-2 fine-tuning
+- [ ] **GPT-2 fine-tuning** — backward through full transformer, cross-entropy loss
+- [ ] **ResNet training** — CNN training loop end-to-end
+- [ ] **Adam optimizer** — verify adaptive learning rate works
+- [ ] **Gradient clipping** — prevent exploding gradients
 
 **Performance:**
 - [ ] **torch.compile() support** — graph-level fusion, eliminate Python dispatch overhead
@@ -164,7 +186,7 @@ _Enable model training on Metal GPU. Currently inference-only._
 **More models:**
 - [ ] **Whisper** — audio model with conv1d
 - [ ] **Stable Diffusion** — requires group_norm (new kernel)
-- [ ] **Training validation** — fine-tune GPT-2 small on a text corpus
+- [ ] **Fine-tuned model export** — save trained weights
 
 ## Further Backlog
 
