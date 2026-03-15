@@ -296,6 +296,118 @@ mod tests {
     }
 
     #[test]
+    fn wire_dtype_to_core_maps_all_known_variants() {
+        assert_eq!(wire_dtype_to_core(0).unwrap(), DType::Float32);
+        assert_eq!(wire_dtype_to_core(1).unwrap(), DType::Float16);
+        assert_eq!(wire_dtype_to_core(2).unwrap(), DType::Float64);
+        assert_eq!(wire_dtype_to_core(3).unwrap(), DType::Int8);
+        assert_eq!(wire_dtype_to_core(4).unwrap(), DType::Int16);
+        assert_eq!(wire_dtype_to_core(5).unwrap(), DType::Int32);
+        assert_eq!(wire_dtype_to_core(6).unwrap(), DType::Int64);
+        assert_eq!(wire_dtype_to_core(7).unwrap(), DType::UInt8);
+        assert_eq!(wire_dtype_to_core(8).unwrap(), DType::UInt32);
+        assert_eq!(wire_dtype_to_core(9).unwrap(), DType::Bool);
+    }
+
+    #[test]
+    fn wire_dtype_to_core_rejects_unknown() {
+        assert!(wire_dtype_to_core(10).is_err());
+        assert!(wire_dtype_to_core(255).is_err());
+    }
+
+    #[test]
+    fn eval_respects_wire_dtype_int32() {
+        let shared = make_shared();
+        let cid = {
+            let mut rt = shared.runtime.lock().unwrap();
+            let config = ContainerConfig {
+                priority: Priority::Normal,
+                max_memory_bytes: 1024 * 1024,
+                max_tensor_count: 64,
+                max_tensor_size_bytes: 0,
+                max_pending_jobs: 64,
+            };
+            rt.scheduler.register_container(config).unwrap()
+        };
+
+        // Create Int32 tensor data (dtype=5)
+        let data: Vec<u8> = vec![1i32, -2, 3, -4]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+
+        let request = EvalRequest {
+            target_id: 42,
+            tensors: vec![WireTensorData {
+                id: 1,
+                shape: vec![4],
+                dtype: 5, // Int32
+                data,
+            }],
+            nodes: vec![WireOpNode {
+                id: 42,
+                op: WireOpKind::Neg,
+                inputs: vec![1],
+                out_shape: vec![4],
+                out_dtype: 5,
+            }],
+        };
+
+        let response = handle_eval(&shared, cid, &request);
+        match &response {
+            EvalResponse::Err(msg) => {
+                // If the backend doesn't support Int32 neg, at least it shouldn't
+                // fail with "Unknown dtype" — that would mean the mapping is broken
+                assert!(
+                    !msg.contains("Unknown dtype") && !msg.contains("Invalid dtype"),
+                    "DType mapping failed: {}",
+                    msg,
+                );
+            }
+            EvalResponse::Ok { .. } => { /* success — dtype was accepted */ }
+        }
+    }
+
+    #[test]
+    fn eval_rejects_unknown_dtype() {
+        let shared = make_shared();
+        let cid = {
+            let mut rt = shared.runtime.lock().unwrap();
+            let config = ContainerConfig {
+                priority: Priority::Normal,
+                max_memory_bytes: 1024 * 1024,
+                max_tensor_count: 64,
+                max_tensor_size_bytes: 0,
+                max_pending_jobs: 64,
+            };
+            rt.scheduler.register_container(config).unwrap()
+        };
+
+        let request = EvalRequest {
+            target_id: 42,
+            tensors: vec![WireTensorData {
+                id: 1,
+                shape: vec![4],
+                dtype: 99, // invalid dtype
+                data: vec![0u8; 16],
+            }],
+            nodes: vec![],
+        };
+
+        let response = handle_eval(&shared, cid, &request);
+        match response {
+            EvalResponse::Err(msg) => {
+                assert!(
+                    msg.contains("Invalid dtype") || msg.contains("Unknown dtype"),
+                    "Expected dtype error, got: {}",
+                    msg,
+                );
+            }
+            _ => panic!("Expected error for unknown dtype 99"),
+        }
+    }
+
+    #[test]
     fn allow_safe_ops_over_wire() {
         let shared = make_shared();
         let cid = {
