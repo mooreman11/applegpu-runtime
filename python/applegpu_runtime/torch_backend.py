@@ -214,6 +214,26 @@ def _op_clamp(a, min=None, max=None):
     return _wrap(gpu.clamp(_unwrap(a), min_val, max_val))
 
 
+@register_op(torch.ops.aten.where.self)
+def _op_where(condition, x, y):
+    return _wrap(gpu.where_cond(_unwrap(condition), _unwrap(x), _unwrap(y)))
+
+
+@register_op(torch.ops.aten.masked_fill.Scalar)
+def _op_masked_fill(input, mask, value):
+    return _wrap(gpu.masked_fill(_unwrap(input), _unwrap(mask), float(value)))
+
+
+@register_op(torch.ops.aten.triu.default)
+def _op_triu(input, diagonal=0):
+    return _wrap(gpu.triu(_unwrap(input), diagonal))
+
+
+@register_op(torch.ops.aten.tril.default)
+def _op_tril(input, diagonal=0):
+    return _wrap(gpu.tril(_unwrap(input), diagonal))
+
+
 # ============================================================
 # Matrix ops
 # ============================================================

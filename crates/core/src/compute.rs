@@ -290,6 +290,164 @@ kernel void clamp_f16(device const half* input [[buffer(0)]], device half* out [
 "#
 );
 
+/// MSL source for ternary where op (3 inputs + 3 stride arrays + shape + ndim + numel).
+const WHERE_KERNEL_SOURCE: &str = const_format::concatcp!(
+    r#"
+#include <metal_stdlib>
+using namespace metal;
+"#,
+    ND_INDEX_HELPER,
+    r#"
+kernel void where_f32(device const float* condition [[buffer(0)]], device const float* x [[buffer(1)]], device const float* y [[buffer(2)]], device float* out [[buffer(3)]], constant uint* cond_strides [[buffer(4)]], constant uint* x_strides [[buffer(5)]], constant uint* y_strides [[buffer(6)]], constant uint* out_shape [[buffer(7)]], constant uint& ndim [[buffer(8)]], constant uint& numel [[buffer(9)]], uint id [[thread_position_in_grid]]) {
+    if (id >= numel) return;
+    uint c_off = nd_index_to_offset(id, out_shape, cond_strides, ndim);
+    uint x_off = nd_index_to_offset(id, out_shape, x_strides, ndim);
+    uint y_off = nd_index_to_offset(id, out_shape, y_strides, ndim);
+    out[id] = (condition[c_off] != 0.0f) ? x[x_off] : y[y_off];
+}
+"#
+);
+
+const WHERE_KERNEL_SOURCE_F16: &str = const_format::concatcp!(
+    r#"
+#include <metal_stdlib>
+using namespace metal;
+"#,
+    ND_INDEX_HELPER,
+    r#"
+kernel void where_f16(device const half* condition [[buffer(0)]], device const half* x [[buffer(1)]], device const half* y [[buffer(2)]], device half* out [[buffer(3)]], constant uint* cond_strides [[buffer(4)]], constant uint* x_strides [[buffer(5)]], constant uint* y_strides [[buffer(6)]], constant uint* out_shape [[buffer(7)]], constant uint& ndim [[buffer(8)]], constant uint& numel [[buffer(9)]], uint id [[thread_position_in_grid]]) {
+    if (id >= numel) return;
+    uint c_off = nd_index_to_offset(id, out_shape, cond_strides, ndim);
+    uint x_off = nd_index_to_offset(id, out_shape, x_strides, ndim);
+    uint y_off = nd_index_to_offset(id, out_shape, y_strides, ndim);
+    out[id] = (condition[c_off] != half(0)) ? x[x_off] : y[y_off];
+}
+"#
+);
+
+/// MSL source for masked_fill op (2 inputs + 2 stride arrays + shape + ndim + numel + fill_value).
+const MASKED_FILL_KERNEL_SOURCE: &str = const_format::concatcp!(
+    r#"
+#include <metal_stdlib>
+using namespace metal;
+"#,
+    ND_INDEX_HELPER,
+    r#"
+kernel void masked_fill_f32(device const float* input [[buffer(0)]], device const float* mask [[buffer(1)]], device float* out [[buffer(2)]], constant uint* in_strides [[buffer(3)]], constant uint* mask_strides [[buffer(4)]], constant uint* out_shape [[buffer(5)]], constant uint& ndim [[buffer(6)]], constant uint& numel [[buffer(7)]], constant float& fill_value [[buffer(8)]], uint id [[thread_position_in_grid]]) {
+    if (id >= numel) return;
+    uint in_off = nd_index_to_offset(id, out_shape, in_strides, ndim);
+    uint m_off = nd_index_to_offset(id, out_shape, mask_strides, ndim);
+    out[id] = (mask[m_off] != 0.0f) ? fill_value : input[in_off];
+}
+"#
+);
+
+const MASKED_FILL_KERNEL_SOURCE_F16: &str = const_format::concatcp!(
+    r#"
+#include <metal_stdlib>
+using namespace metal;
+"#,
+    ND_INDEX_HELPER,
+    r#"
+kernel void masked_fill_f16(device const half* input [[buffer(0)]], device const half* mask [[buffer(1)]], device half* out [[buffer(2)]], constant uint* in_strides [[buffer(3)]], constant uint* mask_strides [[buffer(4)]], constant uint* out_shape [[buffer(5)]], constant uint& ndim [[buffer(6)]], constant uint& numel [[buffer(7)]], constant float& fill_value [[buffer(8)]], uint id [[thread_position_in_grid]]) {
+    if (id >= numel) return;
+    uint in_off = nd_index_to_offset(id, out_shape, in_strides, ndim);
+    uint m_off = nd_index_to_offset(id, out_shape, mask_strides, ndim);
+    out[id] = (mask[m_off] != half(0)) ? half(fill_value) : input[in_off];
+}
+"#
+);
+
+/// MSL source for triu (upper triangular) op.
+const TRIU_KERNEL_SOURCE: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void triu_f32(
+    device const float* input [[buffer(0)]],
+    device float* out [[buffer(1)]],
+    constant uint& batch_size [[buffer(2)]],
+    constant uint& rows [[buffer(3)]],
+    constant uint& cols [[buffer(4)]],
+    constant int& diagonal [[buffer(5)]],
+    uint3 gid [[thread_position_in_grid]]
+) {
+    uint col = gid.x;
+    uint row = gid.y;
+    uint batch = gid.z;
+    if (row >= rows || col >= cols || batch >= batch_size) return;
+    uint idx = batch * rows * cols + row * cols + col;
+    out[idx] = (int(col) >= int(row) + diagonal) ? input[idx] : 0.0f;
+}
+"#;
+
+const TRIU_KERNEL_SOURCE_F16: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void triu_f16(
+    device const half* input [[buffer(0)]],
+    device half* out [[buffer(1)]],
+    constant uint& batch_size [[buffer(2)]],
+    constant uint& rows [[buffer(3)]],
+    constant uint& cols [[buffer(4)]],
+    constant int& diagonal [[buffer(5)]],
+    uint3 gid [[thread_position_in_grid]]
+) {
+    uint col = gid.x;
+    uint row = gid.y;
+    uint batch = gid.z;
+    if (row >= rows || col >= cols || batch >= batch_size) return;
+    uint idx = batch * rows * cols + row * cols + col;
+    out[idx] = (int(col) >= int(row) + diagonal) ? input[idx] : half(0);
+}
+"#;
+
+/// MSL source for tril (lower triangular) op.
+const TRIL_KERNEL_SOURCE: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void tril_f32(
+    device const float* input [[buffer(0)]],
+    device float* out [[buffer(1)]],
+    constant uint& batch_size [[buffer(2)]],
+    constant uint& rows [[buffer(3)]],
+    constant uint& cols [[buffer(4)]],
+    constant int& diagonal [[buffer(5)]],
+    uint3 gid [[thread_position_in_grid]]
+) {
+    uint col = gid.x;
+    uint row = gid.y;
+    uint batch = gid.z;
+    if (row >= rows || col >= cols || batch >= batch_size) return;
+    uint idx = batch * rows * cols + row * cols + col;
+    out[idx] = (int(col) <= int(row) + diagonal) ? input[idx] : 0.0f;
+}
+"#;
+
+const TRIL_KERNEL_SOURCE_F16: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void tril_f16(
+    device const half* input [[buffer(0)]],
+    device half* out [[buffer(1)]],
+    constant uint& batch_size [[buffer(2)]],
+    constant uint& rows [[buffer(3)]],
+    constant uint& cols [[buffer(4)]],
+    constant int& diagonal [[buffer(5)]],
+    uint3 gid [[thread_position_in_grid]]
+) {
+    uint col = gid.x;
+    uint row = gid.y;
+    uint batch = gid.z;
+    if (row >= rows || col >= cols || batch >= batch_size) return;
+    uint idx = batch * rows * cols + row * cols + col;
+    out[idx] = (int(col) <= int(row) + diagonal) ? input[idx] : half(0);
+}
+"#;
+
 const GELU_KERNEL_SOURCE: &str = const_format::concatcp!(
     r#"
 #include <metal_stdlib>
@@ -1864,6 +2022,156 @@ impl ComputePipeline {
         };
         if cb.is_null() { Err(GpuError::ComputeFailed("Non-blocking clamp N-D dispatch failed".to_string())) } else { Ok(cb) }
     }
+
+    /// Dispatch ternary where op: 3 inputs with stride arrays.
+    pub fn dispatch_where_nd(
+        &self,
+        buf_cond: &Buffer, cond_strides: &[u32; MAX_DIMS],
+        buf_x: &Buffer, x_strides: &[u32; MAX_DIMS],
+        buf_y: &Buffer, y_strides: &[u32; MAX_DIMS],
+        buf_out: &Buffer, out_shape: &[u32; MAX_DIMS],
+        ndim: u32, numel: u32,
+    ) -> Result<()> {
+        let result = unsafe {
+            ffi::gpu_bridge_compute_where_nd(
+                self.handle,
+                buf_cond.raw_handle() as *const _,
+                buf_x.raw_handle() as *const _,
+                buf_y.raw_handle() as *const _,
+                buf_out.raw_handle(),
+                cond_strides.as_ptr(),
+                x_strides.as_ptr(),
+                y_strides.as_ptr(),
+                out_shape.as_ptr(),
+                ndim,
+                numel,
+            )
+        };
+        if result == 0 { Ok(()) } else { Err(GpuError::ComputeFailed("Where N-D dispatch failed".to_string())) }
+    }
+
+    /// Non-blocking ternary where op.
+    pub fn dispatch_where_nd_nb(
+        &self,
+        queue: *mut std::ffi::c_void,
+        buf_cond: &Buffer, cond_strides: &[u32; MAX_DIMS],
+        buf_x: &Buffer, x_strides: &[u32; MAX_DIMS],
+        buf_y: &Buffer, y_strides: &[u32; MAX_DIMS],
+        buf_out: &Buffer, out_shape: &[u32; MAX_DIMS],
+        ndim: u32, numel: u32,
+    ) -> Result<*mut std::ffi::c_void> {
+        let cb = unsafe {
+            ffi::gpu_bridge_compute_where_nd_nb(
+                self.handle,
+                queue,
+                buf_cond.raw_handle() as *const _,
+                buf_x.raw_handle() as *const _,
+                buf_y.raw_handle() as *const _,
+                buf_out.raw_handle(),
+                cond_strides.as_ptr(),
+                x_strides.as_ptr(),
+                y_strides.as_ptr(),
+                out_shape.as_ptr(),
+                ndim,
+                numel,
+            )
+        };
+        if cb.is_null() { Err(GpuError::ComputeFailed("Non-blocking where N-D dispatch failed".to_string())) } else { Ok(cb) }
+    }
+
+    /// Dispatch masked_fill op: binary + fill_value scalar.
+    pub fn dispatch_masked_fill_nd(
+        &self,
+        buf_input: &Buffer, in_strides: &[u32; MAX_DIMS],
+        buf_mask: &Buffer, mask_strides: &[u32; MAX_DIMS],
+        buf_out: &Buffer, out_shape: &[u32; MAX_DIMS],
+        ndim: u32, numel: u32, fill_value: f32,
+    ) -> Result<()> {
+        let result = unsafe {
+            ffi::gpu_bridge_compute_masked_fill_nd(
+                self.handle,
+                buf_input.raw_handle() as *const _,
+                buf_mask.raw_handle() as *const _,
+                buf_out.raw_handle(),
+                in_strides.as_ptr(),
+                mask_strides.as_ptr(),
+                out_shape.as_ptr(),
+                ndim,
+                numel,
+                fill_value,
+            )
+        };
+        if result == 0 { Ok(()) } else { Err(GpuError::ComputeFailed("MaskedFill N-D dispatch failed".to_string())) }
+    }
+
+    /// Non-blocking masked_fill op.
+    pub fn dispatch_masked_fill_nd_nb(
+        &self,
+        queue: *mut std::ffi::c_void,
+        buf_input: &Buffer, in_strides: &[u32; MAX_DIMS],
+        buf_mask: &Buffer, mask_strides: &[u32; MAX_DIMS],
+        buf_out: &Buffer, out_shape: &[u32; MAX_DIMS],
+        ndim: u32, numel: u32, fill_value: f32,
+    ) -> Result<*mut std::ffi::c_void> {
+        let cb = unsafe {
+            ffi::gpu_bridge_compute_masked_fill_nd_nb(
+                self.handle,
+                queue,
+                buf_input.raw_handle() as *const _,
+                buf_mask.raw_handle() as *const _,
+                buf_out.raw_handle(),
+                in_strides.as_ptr(),
+                mask_strides.as_ptr(),
+                out_shape.as_ptr(),
+                ndim,
+                numel,
+                fill_value,
+            )
+        };
+        if cb.is_null() { Err(GpuError::ComputeFailed("Non-blocking masked_fill N-D dispatch failed".to_string())) } else { Ok(cb) }
+    }
+
+    /// Dispatch triu/tril op: batched 3D grid + diagonal constant.
+    pub fn dispatch_triangular(
+        &self,
+        buf_input: &Buffer, buf_out: &Buffer,
+        batch_size: usize, rows: usize, cols: usize, diagonal: i32,
+    ) -> Result<()> {
+        let result = unsafe {
+            ffi::gpu_bridge_compute_triangular(
+                self.handle,
+                buf_input.raw_handle() as *const _,
+                buf_out.raw_handle(),
+                batch_size as u32,
+                rows as u32,
+                cols as u32,
+                diagonal,
+            )
+        };
+        if result == 0 { Ok(()) } else { Err(GpuError::ComputeFailed("Triangular dispatch failed".to_string())) }
+    }
+
+    /// Non-blocking triu/tril op.
+    pub fn dispatch_triangular_nb(
+        &self,
+        queue: *mut std::ffi::c_void,
+        buf_input: &Buffer, buf_out: &Buffer,
+        batch_size: usize, rows: usize, cols: usize, diagonal: i32,
+    ) -> Result<*mut std::ffi::c_void> {
+        let cb = unsafe {
+            ffi::gpu_bridge_compute_triangular_nb(
+                self.handle,
+                queue,
+                buf_input.raw_handle() as *const _,
+                buf_out.raw_handle(),
+                batch_size as u32,
+                rows as u32,
+                cols as u32,
+                diagonal,
+            )
+        };
+        if cb.is_null() { Err(GpuError::ComputeFailed("Non-blocking triangular dispatch failed".to_string())) } else { Ok(cb) }
+    }
 }
 
 impl Drop for ComputePipeline {
@@ -1932,6 +2240,10 @@ impl KernelRegistry {
                     "copy_strided_f32" => COPY_STRIDED_KERNEL_SOURCE_F16,
                     "pow_f32" => POW_KERNEL_SOURCE_F16,
                     "clamp_f32" => CLAMP_KERNEL_SOURCE_F16,
+                    "where_f32" => WHERE_KERNEL_SOURCE_F16,
+                    "masked_fill_f32" => MASKED_FILL_KERNEL_SOURCE_F16,
+                    "triu_f32" => TRIU_KERNEL_SOURCE_F16,
+                    "tril_f32" => TRIL_KERNEL_SOURCE_F16,
                     _ => BINARY_KERNEL_SOURCE_F16, // fallback
                 };
                 // For named kernels like matmul_f32 -> matmul_f16
@@ -1969,6 +2281,10 @@ impl KernelRegistry {
                     "copy_strided_f32" => COPY_STRIDED_KERNEL_SOURCE,
                     "pow_f32" => POW_KERNEL_SOURCE,
                     "clamp_f32" => CLAMP_KERNEL_SOURCE,
+                    "where_f32" => WHERE_KERNEL_SOURCE,
+                    "masked_fill_f32" => MASKED_FILL_KERNEL_SOURCE,
+                    "triu_f32" => TRIU_KERNEL_SOURCE,
+                    "tril_f32" => TRIL_KERNEL_SOURCE,
                     _ => BINARY_KERNEL_SOURCE,
                 };
                 (source, base_name.to_string())
@@ -2219,6 +2535,102 @@ impl KernelRegistry {
         let (source, func) = Self::resolve_kernel("clamp_f32", dtype);
         let pipeline = self.get_or_create(device, source, &func)?;
         pipeline.dispatch_clamp_nd_nb(queue, buf_input, in_strides, buf_out, out_shape, ndim, numel, min_val, max_val)
+    }
+
+    // ── Where (ternary) ──────────────────────────────────────────────
+
+    pub fn dispatch_where_nd_typed(
+        &self, device: &Device, dtype: DType,
+        buf_cond: &Buffer, cond_strides: &[u32; MAX_DIMS],
+        buf_x: &Buffer, x_strides: &[u32; MAX_DIMS],
+        buf_y: &Buffer, y_strides: &[u32; MAX_DIMS],
+        buf_out: &Buffer, out_shape: &[u32; MAX_DIMS],
+        ndim: u32, numel: u32,
+    ) -> Result<()> {
+        let (source, func) = Self::resolve_kernel("where_f32", dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_where_nd(buf_cond, cond_strides, buf_x, x_strides, buf_y, y_strides, buf_out, out_shape, ndim, numel)
+    }
+
+    pub fn dispatch_where_nd_typed_nb(
+        &self, device: &Device, dtype: DType, queue: *mut std::ffi::c_void,
+        buf_cond: &Buffer, cond_strides: &[u32; MAX_DIMS],
+        buf_x: &Buffer, x_strides: &[u32; MAX_DIMS],
+        buf_y: &Buffer, y_strides: &[u32; MAX_DIMS],
+        buf_out: &Buffer, out_shape: &[u32; MAX_DIMS],
+        ndim: u32, numel: u32,
+    ) -> Result<*mut std::ffi::c_void> {
+        let (source, func) = Self::resolve_kernel("where_f32", dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_where_nd_nb(queue, buf_cond, cond_strides, buf_x, x_strides, buf_y, y_strides, buf_out, out_shape, ndim, numel)
+    }
+
+    // ── MaskedFill ──────────────────────────────────────────────────
+
+    pub fn dispatch_masked_fill_nd_typed(
+        &self, device: &Device, dtype: DType,
+        buf_input: &Buffer, in_strides: &[u32; MAX_DIMS],
+        buf_mask: &Buffer, mask_strides: &[u32; MAX_DIMS],
+        buf_out: &Buffer, out_shape: &[u32; MAX_DIMS],
+        ndim: u32, numel: u32, fill_value: f32,
+    ) -> Result<()> {
+        let (source, func) = Self::resolve_kernel("masked_fill_f32", dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_masked_fill_nd(buf_input, in_strides, buf_mask, mask_strides, buf_out, out_shape, ndim, numel, fill_value)
+    }
+
+    pub fn dispatch_masked_fill_nd_typed_nb(
+        &self, device: &Device, dtype: DType, queue: *mut std::ffi::c_void,
+        buf_input: &Buffer, in_strides: &[u32; MAX_DIMS],
+        buf_mask: &Buffer, mask_strides: &[u32; MAX_DIMS],
+        buf_out: &Buffer, out_shape: &[u32; MAX_DIMS],
+        ndim: u32, numel: u32, fill_value: f32,
+    ) -> Result<*mut std::ffi::c_void> {
+        let (source, func) = Self::resolve_kernel("masked_fill_f32", dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_masked_fill_nd_nb(queue, buf_input, in_strides, buf_mask, mask_strides, buf_out, out_shape, ndim, numel, fill_value)
+    }
+
+    // ── Triu / Tril ─────────────────────────────────────────────────
+
+    pub fn dispatch_triu_typed(
+        &self, device: &Device, dtype: DType,
+        buf_input: &Buffer, buf_out: &Buffer,
+        batch_size: usize, rows: usize, cols: usize, diagonal: i32,
+    ) -> Result<()> {
+        let (source, func) = Self::resolve_kernel("triu_f32", dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_triangular(buf_input, buf_out, batch_size, rows, cols, diagonal)
+    }
+
+    pub fn dispatch_triu_typed_nb(
+        &self, device: &Device, dtype: DType, queue: *mut std::ffi::c_void,
+        buf_input: &Buffer, buf_out: &Buffer,
+        batch_size: usize, rows: usize, cols: usize, diagonal: i32,
+    ) -> Result<*mut std::ffi::c_void> {
+        let (source, func) = Self::resolve_kernel("triu_f32", dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_triangular_nb(queue, buf_input, buf_out, batch_size, rows, cols, diagonal)
+    }
+
+    pub fn dispatch_tril_typed(
+        &self, device: &Device, dtype: DType,
+        buf_input: &Buffer, buf_out: &Buffer,
+        batch_size: usize, rows: usize, cols: usize, diagonal: i32,
+    ) -> Result<()> {
+        let (source, func) = Self::resolve_kernel("tril_f32", dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_triangular(buf_input, buf_out, batch_size, rows, cols, diagonal)
+    }
+
+    pub fn dispatch_tril_typed_nb(
+        &self, device: &Device, dtype: DType, queue: *mut std::ffi::c_void,
+        buf_input: &Buffer, buf_out: &Buffer,
+        batch_size: usize, rows: usize, cols: usize, diagonal: i32,
+    ) -> Result<*mut std::ffi::c_void> {
+        let (source, func) = Self::resolve_kernel("tril_f32", dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_triangular_nb(queue, buf_input, buf_out, batch_size, rows, cols, diagonal)
     }
 
     /// Dispatch GELU with dtype-aware kernel selection (uses unary dispatch pattern).

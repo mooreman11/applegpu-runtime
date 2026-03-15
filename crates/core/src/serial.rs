@@ -84,6 +84,10 @@ fn op_to_discriminant(op: &OpKind) -> u32 {
         OpKind::Sign => 26,
         OpKind::Pow { .. } => 27,
         OpKind::Clamp { .. } => 28,
+        OpKind::Where => 29,
+        OpKind::MaskedFill { .. } => 30,
+        OpKind::Triu { .. } => 31,
+        OpKind::Tril { .. } => 32,
     }
 }
 
@@ -169,6 +173,22 @@ fn discriminant_to_op(d: u32, r: &mut impl Read) -> io::Result<OpKind> {
             r.read_exact(&mut max_bytes)?;
             Ok(OpKind::Clamp { min_val: f32::from_le_bytes(min_bytes), max_val: f32::from_le_bytes(max_bytes) })
         }
+        29 => Ok(OpKind::Where),
+        30 => {
+            let mut val_bytes = [0u8; 4];
+            r.read_exact(&mut val_bytes)?;
+            Ok(OpKind::MaskedFill { value: f32::from_le_bytes(val_bytes) })
+        }
+        31 => {
+            let mut diag_bytes = [0u8; 4];
+            r.read_exact(&mut diag_bytes)?;
+            Ok(OpKind::Triu { diagonal: i32::from_le_bytes(diag_bytes) })
+        }
+        32 => {
+            let mut diag_bytes = [0u8; 4];
+            r.read_exact(&mut diag_bytes)?;
+            Ok(OpKind::Tril { diagonal: i32::from_le_bytes(diag_bytes) })
+        }
         _ => Err(io::Error::new(io::ErrorKind::InvalidData, format!("Unknown op type: {}", d))),
     }
 }
@@ -243,6 +263,15 @@ impl EvalRequest {
             if let OpKind::Clamp { min_val, max_val } = node.op {
                 buf.write_all(&min_val.to_le_bytes()).unwrap();
                 buf.write_all(&max_val.to_le_bytes()).unwrap();
+            }
+            if let OpKind::MaskedFill { value } = node.op {
+                buf.write_all(&value.to_le_bytes()).unwrap();
+            }
+            if let OpKind::Triu { diagonal } = node.op {
+                buf.write_all(&diagonal.to_le_bytes()).unwrap();
+            }
+            if let OpKind::Tril { diagonal } = node.op {
+                buf.write_all(&diagonal.to_le_bytes()).unwrap();
             }
         }
 

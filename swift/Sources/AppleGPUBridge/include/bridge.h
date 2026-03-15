@@ -533,4 +533,84 @@ void* gpu_bridge_compute_clamp_nd_nb(
     float max_val
 );
 
+// Where (ternary) N-D dispatch
+int32_t gpu_bridge_compute_where_nd(
+    GPUComputeHandle* compute,
+    const GPUBufferHandle* buf_cond,
+    const GPUBufferHandle* buf_x,
+    const GPUBufferHandle* buf_y,
+    GPUBufferHandle* buf_out,
+    const uint32_t* cond_strides,
+    const uint32_t* x_strides,
+    const uint32_t* y_strides,
+    const uint32_t* out_shape,
+    uint32_t ndim,
+    uint32_t numel
+);
+
+void* gpu_bridge_compute_where_nd_nb(
+    GPUComputeHandle* compute,
+    void* queue,
+    const GPUBufferHandle* buf_cond,
+    const GPUBufferHandle* buf_x,
+    const GPUBufferHandle* buf_y,
+    GPUBufferHandle* buf_out,
+    const uint32_t* cond_strides,
+    const uint32_t* x_strides,
+    const uint32_t* y_strides,
+    const uint32_t* out_shape,
+    uint32_t ndim,
+    uint32_t numel
+);
+
+// MaskedFill N-D dispatch
+int32_t gpu_bridge_compute_masked_fill_nd(
+    GPUComputeHandle* compute,
+    const GPUBufferHandle* buf_input,
+    const GPUBufferHandle* buf_mask,
+    GPUBufferHandle* buf_out,
+    const uint32_t* in_strides,
+    const uint32_t* mask_strides,
+    const uint32_t* out_shape,
+    uint32_t ndim,
+    uint32_t numel,
+    float fill_value
+);
+
+void* gpu_bridge_compute_masked_fill_nd_nb(
+    GPUComputeHandle* compute,
+    void* queue,
+    const GPUBufferHandle* buf_input,
+    const GPUBufferHandle* buf_mask,
+    GPUBufferHandle* buf_out,
+    const uint32_t* in_strides,
+    const uint32_t* mask_strides,
+    const uint32_t* out_shape,
+    uint32_t ndim,
+    uint32_t numel,
+    float fill_value
+);
+
+// Triangular (triu/tril) dispatch
+int32_t gpu_bridge_compute_triangular(
+    GPUComputeHandle* compute,
+    const GPUBufferHandle* buf_input,
+    GPUBufferHandle* buf_out,
+    uint32_t batch_size,
+    uint32_t rows,
+    uint32_t cols,
+    int32_t diagonal
+);
+
+void* gpu_bridge_compute_triangular_nb(
+    GPUComputeHandle* compute,
+    void* queue,
+    const GPUBufferHandle* buf_input,
+    GPUBufferHandle* buf_out,
+    uint32_t batch_size,
+    uint32_t rows,
+    uint32_t cols,
+    int32_t diagonal
+);
+
 #endif

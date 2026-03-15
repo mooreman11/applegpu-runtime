@@ -555,6 +555,89 @@ extern "C" {
         min_val: f32,
         max_val: f32,
     ) -> *mut std::ffi::c_void;
+
+    // ── Where (ternary) ─────────────────────────────────────────────
+
+    pub fn gpu_bridge_compute_where_nd(
+        compute: *mut GPUComputeHandle,
+        buf_cond: *const GPUBufferHandle,
+        buf_x: *const GPUBufferHandle,
+        buf_y: *const GPUBufferHandle,
+        buf_out: *mut GPUBufferHandle,
+        cond_strides: *const u32,
+        x_strides: *const u32,
+        y_strides: *const u32,
+        out_shape: *const u32,
+        ndim: u32,
+        numel: u32,
+    ) -> i32;
+
+    pub fn gpu_bridge_compute_where_nd_nb(
+        compute: *mut GPUComputeHandle,
+        queue: *mut std::ffi::c_void,
+        buf_cond: *const GPUBufferHandle,
+        buf_x: *const GPUBufferHandle,
+        buf_y: *const GPUBufferHandle,
+        buf_out: *mut GPUBufferHandle,
+        cond_strides: *const u32,
+        x_strides: *const u32,
+        y_strides: *const u32,
+        out_shape: *const u32,
+        ndim: u32,
+        numel: u32,
+    ) -> *mut std::ffi::c_void;
+
+    // ── MaskedFill ──────────────────────────────────────────────────
+
+    pub fn gpu_bridge_compute_masked_fill_nd(
+        compute: *mut GPUComputeHandle,
+        buf_input: *const GPUBufferHandle,
+        buf_mask: *const GPUBufferHandle,
+        buf_out: *mut GPUBufferHandle,
+        in_strides: *const u32,
+        mask_strides: *const u32,
+        out_shape: *const u32,
+        ndim: u32,
+        numel: u32,
+        fill_value: f32,
+    ) -> i32;
+
+    pub fn gpu_bridge_compute_masked_fill_nd_nb(
+        compute: *mut GPUComputeHandle,
+        queue: *mut std::ffi::c_void,
+        buf_input: *const GPUBufferHandle,
+        buf_mask: *const GPUBufferHandle,
+        buf_out: *mut GPUBufferHandle,
+        in_strides: *const u32,
+        mask_strides: *const u32,
+        out_shape: *const u32,
+        ndim: u32,
+        numel: u32,
+        fill_value: f32,
+    ) -> *mut std::ffi::c_void;
+
+    // ── Triangular (triu/tril) ──────────────────────────────────────
+
+    pub fn gpu_bridge_compute_triangular(
+        compute: *mut GPUComputeHandle,
+        buf_input: *const GPUBufferHandle,
+        buf_out: *mut GPUBufferHandle,
+        batch_size: u32,
+        rows: u32,
+        cols: u32,
+        diagonal: i32,
+    ) -> i32;
+
+    pub fn gpu_bridge_compute_triangular_nb(
+        compute: *mut GPUComputeHandle,
+        queue: *mut std::ffi::c_void,
+        buf_input: *const GPUBufferHandle,
+        buf_out: *mut GPUBufferHandle,
+        batch_size: u32,
+        rows: u32,
+        cols: u32,
+        diagonal: i32,
+    ) -> *mut std::ffi::c_void;
 }
 
 #[cfg(test)]

@@ -58,6 +58,14 @@ pub enum OpKind {
     Pow { exponent: f32 },
     // Element-wise clamp to [min, max]
     Clamp { min_val: f32, max_val: f32 },
+    // Ternary conditional: where(cond, x, y) — select x where cond != 0, else y
+    Where,
+    // Masked fill: set elements to value where mask is true
+    MaskedFill { value: f32 },
+    // Upper triangular: zero below diagonal
+    Triu { diagonal: i32 },
+    // Lower triangular: zero above diagonal
+    Tril { diagonal: i32 },
 }
 
 impl OpKind {
@@ -93,6 +101,10 @@ impl OpKind {
             OpKind::Sign => "elementwise_sign",
             OpKind::Pow { .. } => "pow_f32",
             OpKind::Clamp { .. } => "clamp_f32",
+            OpKind::Where => "where_f32",
+            OpKind::MaskedFill { .. } => "masked_fill_f32",
+            OpKind::Triu { .. } => "triu_f32",
+            OpKind::Tril { .. } => "tril_f32",
         }
     }
 
@@ -184,6 +196,22 @@ impl OpKind {
 
     pub fn is_clamp(&self) -> bool {
         matches!(self, OpKind::Clamp { .. })
+    }
+
+    pub fn is_where(&self) -> bool {
+        matches!(self, OpKind::Where)
+    }
+
+    pub fn is_masked_fill(&self) -> bool {
+        matches!(self, OpKind::MaskedFill { .. })
+    }
+
+    pub fn is_triu(&self) -> bool {
+        matches!(self, OpKind::Triu { .. })
+    }
+
+    pub fn is_tril(&self) -> bool {
+        matches!(self, OpKind::Tril { .. })
     }
 }
 

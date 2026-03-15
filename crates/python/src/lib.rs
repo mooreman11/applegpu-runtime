@@ -344,6 +344,30 @@ impl GpuTensor {
         Ok(GpuTensor { id, destroyed: Cell::new(false) })
     }
 
+    #[pyo3(signature = (mask, value))]
+    fn masked_fill(&self, mask: &GpuTensor, value: f32) -> PyResult<GpuTensor> {
+        let mut rt = RUNTIME_LAZY.lock().unwrap();
+        let id = applegpu_core::ops::masked_fill(&mut rt, self.id, mask.id, value)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(GpuTensor { id, destroyed: Cell::new(false) })
+    }
+
+    #[pyo3(signature = (diagonal=0))]
+    fn triu(&self, diagonal: i32) -> PyResult<GpuTensor> {
+        let mut rt = RUNTIME_LAZY.lock().unwrap();
+        let id = applegpu_core::ops::triu(&mut rt, self.id, diagonal)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(GpuTensor { id, destroyed: Cell::new(false) })
+    }
+
+    #[pyo3(signature = (diagonal=0))]
+    fn tril(&self, diagonal: i32) -> PyResult<GpuTensor> {
+        let mut rt = RUNTIME_LAZY.lock().unwrap();
+        let id = applegpu_core::ops::tril(&mut rt, self.id, diagonal)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(GpuTensor { id, destroyed: Cell::new(false) })
+    }
+
     #[pyo3(signature = (scale))]
     fn scalar_mul(&self, scale: f32) -> PyResult<GpuTensor> {
         let mut rt = RUNTIME_LAZY.lock().unwrap();
@@ -672,6 +696,21 @@ fn pow(t: &GpuTensor, exponent: f32) -> PyResult<GpuTensor> { t.pow(exponent) }
 #[pyfunction]
 fn clamp(t: &GpuTensor, min_val: f32, max_val: f32) -> PyResult<GpuTensor> { t.clamp(min_val, max_val) }
 #[pyfunction]
+fn where_cond(cond: &GpuTensor, x: &GpuTensor, y: &GpuTensor) -> PyResult<GpuTensor> {
+    let mut rt = RUNTIME_LAZY.lock().unwrap();
+    let id = applegpu_core::ops::where_cond(&mut rt, cond.id, x.id, y.id)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(GpuTensor { id, destroyed: Cell::new(false) })
+}
+#[pyfunction]
+fn masked_fill(t: &GpuTensor, mask: &GpuTensor, value: f32) -> PyResult<GpuTensor> { t.masked_fill(mask, value) }
+#[pyfunction]
+#[pyo3(signature = (t, diagonal=0))]
+fn triu(t: &GpuTensor, diagonal: i32) -> PyResult<GpuTensor> { t.triu(diagonal) }
+#[pyfunction]
+#[pyo3(signature = (t, diagonal=0))]
+fn tril(t: &GpuTensor, diagonal: i32) -> PyResult<GpuTensor> { t.tril(diagonal) }
+#[pyfunction]
 fn scalar_mul(t: &GpuTensor, scale: f32) -> PyResult<GpuTensor> { t.scalar_mul(scale) }
 #[pyfunction]
 fn reshape(t: &GpuTensor, new_shape: Vec<usize>) -> PyResult<GpuTensor> { t.reshape(new_shape) }
@@ -930,6 +969,10 @@ fn applegpu_runtime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(sign, m)?)?;
     m.add_function(wrap_pyfunction!(pow, m)?)?;
     m.add_function(wrap_pyfunction!(clamp, m)?)?;
+    m.add_function(wrap_pyfunction!(where_cond, m)?)?;
+    m.add_function(wrap_pyfunction!(masked_fill, m)?)?;
+    m.add_function(wrap_pyfunction!(triu, m)?)?;
+    m.add_function(wrap_pyfunction!(tril, m)?)?;
     m.add_function(wrap_pyfunction!(scalar_mul, m)?)?;
     m.add_function(wrap_pyfunction!(reshape, m)?)?;
     m.add_function(wrap_pyfunction!(softmax, m)?)?;

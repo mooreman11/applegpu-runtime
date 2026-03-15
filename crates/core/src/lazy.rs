@@ -278,6 +278,69 @@ impl LazyRuntime {
             return Ok(out);
         }
 
+        if node.op.is_where() {
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+            let cond = self.get_tensor(node.inputs[0])?;
+            let x = self.get_tensor(node.inputs[1])?;
+            let y = self.get_tensor(node.inputs[2])?;
+            let cond_strides = Self::to_u32_array(&TensorLayout::broadcast_strides_for(&cond.meta.layout.shape, &node.out_shape));
+            let x_strides = Self::to_u32_array(&TensorLayout::broadcast_strides_for(&x.meta.layout.shape, &node.out_shape));
+            let y_strides = Self::to_u32_array(&TensorLayout::broadcast_strides_for(&y.meta.layout.shape, &node.out_shape));
+            let out_shape_u32 = Self::shape_to_u32(&node.out_shape);
+            let ndim = node.out_shape.ndim() as u32;
+            let numel = node.out_shape.numel() as u32;
+            REGISTRY.dispatch_where_nd_typed(
+                device, dtype,
+                &cond.buffer, &cond_strides,
+                &x.buffer, &x_strides,
+                &y.buffer, &y_strides,
+                &out.buffer, &out_shape_u32, ndim, numel,
+            )?;
+            return Ok(out);
+        }
+
+        if let crate::graph::OpKind::MaskedFill { value } = node.op {
+            let (a_strides, b_strides, out_shape_u32, ndim, numel) = self.binary_nd_params(node)?;
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+            let input = self.get_tensor(node.inputs[0])?;
+            let mask = self.get_tensor(node.inputs[1])?;
+            REGISTRY.dispatch_masked_fill_nd_typed(
+                device, dtype,
+                &input.buffer, &a_strides,
+                &mask.buffer, &b_strides,
+                &out.buffer, &out_shape_u32, ndim, numel, value,
+            )?;
+            return Ok(out);
+        }
+
+        if let crate::graph::OpKind::Triu { diagonal } = node.op {
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+            let input = self.get_tensor(node.inputs[0])?;
+            let dims = input.meta.layout.shape.dims();
+            let ndim = dims.len();
+            let rows = dims[ndim - 2];
+            let cols = dims[ndim - 1];
+            let batch_size: usize = dims[..ndim - 2].iter().product::<usize>().max(1);
+            REGISTRY.dispatch_triu_typed(device, dtype, &input.buffer, &out.buffer, batch_size, rows, cols, diagonal)?;
+            return Ok(out);
+        }
+
+        if let crate::graph::OpKind::Tril { diagonal } = node.op {
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+            let input = self.get_tensor(node.inputs[0])?;
+            let dims = input.meta.layout.shape.dims();
+            let ndim = dims.len();
+            let rows = dims[ndim - 2];
+            let cols = dims[ndim - 1];
+            let batch_size: usize = dims[..ndim - 2].iter().product::<usize>().max(1);
+            REGISTRY.dispatch_tril_typed(device, dtype, &input.buffer, &out.buffer, batch_size, rows, cols, diagonal)?;
+            return Ok(out);
+        }
+
         if node.op.is_gelu() {
             let (in_strides, out_shape_u32, ndim, numel) = self.unary_nd_params(node)?;
             let out_buf = self.pool.acquire(device, out_size)?;
@@ -596,6 +659,57 @@ impl LazyRuntime {
             return REGISTRY.dispatch_clamp_nd_typed_nb(
                 device, dtype, queue, &input.buffer, &in_strides, &out.buffer, &out_shape_u32, ndim, numel, min_val, max_val,
             );
+        }
+
+        if node.op.is_where() {
+            let cond = self.get_tensor(node.inputs[0])?;
+            let x = self.get_tensor(node.inputs[1])?;
+            let y = self.get_tensor(node.inputs[2])?;
+            let cond_strides = Self::to_u32_array(&TensorLayout::broadcast_strides_for(&cond.meta.layout.shape, &node.out_shape));
+            let x_strides = Self::to_u32_array(&TensorLayout::broadcast_strides_for(&x.meta.layout.shape, &node.out_shape));
+            let y_strides = Self::to_u32_array(&TensorLayout::broadcast_strides_for(&y.meta.layout.shape, &node.out_shape));
+            let out_shape_u32 = Self::shape_to_u32(&node.out_shape);
+            let ndim = node.out_shape.ndim() as u32;
+            let numel = node.out_shape.numel() as u32;
+            return REGISTRY.dispatch_where_nd_typed_nb(
+                device, dtype, queue,
+                &cond.buffer, &cond_strides,
+                &x.buffer, &x_strides,
+                &y.buffer, &y_strides,
+                &out.buffer, &out_shape_u32, ndim, numel,
+            );
+        }
+
+        if let crate::graph::OpKind::MaskedFill { value } = node.op {
+            let (a_strides, b_strides, out_shape_u32, ndim, numel) = self.binary_nd_params(node)?;
+            let input = self.get_tensor(node.inputs[0])?;
+            let mask = self.get_tensor(node.inputs[1])?;
+            return REGISTRY.dispatch_masked_fill_nd_typed_nb(
+                device, dtype, queue,
+                &input.buffer, &a_strides,
+                &mask.buffer, &b_strides,
+                &out.buffer, &out_shape_u32, ndim, numel, value,
+            );
+        }
+
+        if let crate::graph::OpKind::Triu { diagonal } = node.op {
+            let input = self.get_tensor(node.inputs[0])?;
+            let dims = input.meta.layout.shape.dims();
+            let ndim = dims.len();
+            let rows = dims[ndim - 2];
+            let cols = dims[ndim - 1];
+            let batch_size: usize = dims[..ndim - 2].iter().product::<usize>().max(1);
+            return REGISTRY.dispatch_triu_typed_nb(device, dtype, queue, &input.buffer, &out.buffer, batch_size, rows, cols, diagonal);
+        }
+
+        if let crate::graph::OpKind::Tril { diagonal } = node.op {
+            let input = self.get_tensor(node.inputs[0])?;
+            let dims = input.meta.layout.shape.dims();
+            let ndim = dims.len();
+            let rows = dims[ndim - 2];
+            let cols = dims[ndim - 1];
+            let batch_size: usize = dims[..ndim - 2].iter().product::<usize>().max(1);
+            return REGISTRY.dispatch_tril_typed_nb(device, dtype, queue, &input.buffer, &out.buffer, batch_size, rows, cols, diagonal);
         }
 
         if node.op.is_gelu() {

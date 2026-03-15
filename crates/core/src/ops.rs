@@ -728,6 +728,112 @@ pub fn attention_causal(rt: &mut LazyRuntime, q_id: u64, k_id: u64, v_id: u64) -
     Ok(output_id)
 }
 
+/// Ternary conditional select: where(cond, x, y) — select x where cond != 0, else y.
+/// All three inputs broadcast together.
+pub fn where_cond(rt: &mut LazyRuntime, cond_id: u64, x_id: u64, y_id: u64) -> Result<u64> {
+    let cond_dtype = rt.dtype(cond_id)?;
+    validate_compute_dtype(cond_dtype)?;
+    let x_dtype = rt.dtype(x_id)?;
+    validate_compute_dtype(x_dtype)?;
+    let y_dtype = rt.dtype(y_id)?;
+    validate_compute_dtype(y_dtype)?;
+
+    if x_dtype != y_dtype {
+        return Err(GpuError::InvalidTensor(format!(
+            "where: x and y dtype mismatch: {:?} vs {:?}", x_dtype, y_dtype
+        )));
+    }
+
+    let cond_shape = Shape::new(rt.shape(cond_id)?)?;
+    let x_shape = Shape::new(rt.shape(x_id)?)?;
+    let y_shape = Shape::new(rt.shape(y_id)?)?;
+
+    // Broadcast all three shapes together
+    let out_shape = cond_shape.broadcast_with(&x_shape)?;
+    let out_shape = out_shape.broadcast_with(&y_shape)?;
+
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op: OpKind::Where,
+        inputs: vec![cond_id, x_id, y_id],
+        out_shape,
+        out_dtype: x_dtype,
+        container_id: ContainerId::DEFAULT,
+    });
+    Ok(out_id)
+}
+
+/// Masked fill: set elements to `value` where mask is true (nonzero).
+/// Input and mask broadcast together.
+pub fn masked_fill(rt: &mut LazyRuntime, input_id: u64, mask_id: u64, value: f32) -> Result<u64> {
+    let in_dtype = rt.dtype(input_id)?;
+    validate_compute_dtype(in_dtype)?;
+    let mask_dtype = rt.dtype(mask_id)?;
+    validate_compute_dtype(mask_dtype)?;
+
+    let in_shape = Shape::new(rt.shape(input_id)?)?;
+    let mask_shape = Shape::new(rt.shape(mask_id)?)?;
+    let out_shape = in_shape.broadcast_with(&mask_shape)?;
+
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op: OpKind::MaskedFill { value },
+        inputs: vec![input_id, mask_id],
+        out_shape,
+        out_dtype: in_dtype,
+        container_id: ContainerId::DEFAULT,
+    });
+    Ok(out_id)
+}
+
+/// Upper triangular: zero elements below the diagonal.
+/// Input must be at least 2D. Operates on last two dims.
+pub fn triu(rt: &mut LazyRuntime, input_id: u64, diagonal: i32) -> Result<u64> {
+    let dtype = rt.dtype(input_id)?;
+    validate_compute_dtype(dtype)?;
+    let shape = rt.shape(input_id)?;
+    if shape.len() < 2 {
+        return Err(GpuError::InvalidTensor(
+            "triu requires at least 2D tensor".to_string()
+        ));
+    }
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op: OpKind::Triu { diagonal },
+        inputs: vec![input_id],
+        out_shape: Shape::new(shape)?,
+        out_dtype: dtype,
+        container_id: ContainerId::DEFAULT,
+    });
+    Ok(out_id)
+}
+
+/// Lower triangular: zero elements above the diagonal.
+/// Input must be at least 2D. Operates on last two dims.
+pub fn tril(rt: &mut LazyRuntime, input_id: u64, diagonal: i32) -> Result<u64> {
+    let dtype = rt.dtype(input_id)?;
+    validate_compute_dtype(dtype)?;
+    let shape = rt.shape(input_id)?;
+    if shape.len() < 2 {
+        return Err(GpuError::InvalidTensor(
+            "tril requires at least 2D tensor".to_string()
+        ));
+    }
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op: OpKind::Tril { diagonal },
+        inputs: vec![input_id],
+        out_shape: Shape::new(shape)?,
+        out_dtype: dtype,
+        container_id: ContainerId::DEFAULT,
+    });
+    Ok(out_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2167,5 +2273,112 @@ mod tests {
         let r_id = clamp(&mut rt, a_id, 2.0, 8.0).unwrap();
         rt.eval(&device, r_id).unwrap();
         assert_eq!(rt.read_f32(r_id).unwrap(), &[2.0, 5.0, 8.0]);
+    }
+
+    #[test]
+    fn test_where() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        let cond = Tensor::from_f32(&device, vec![3], &[1.0, 0.0, 1.0]).unwrap();
+        let x = Tensor::from_f32(&device, vec![3], &[1.0, 2.0, 3.0]).unwrap();
+        let y = Tensor::from_f32(&device, vec![3], &[10.0, 20.0, 30.0]).unwrap();
+        let cond_id = cond.meta.id;
+        let x_id = x.meta.id;
+        let y_id = y.meta.id;
+        rt.insert_tensor(cond).unwrap();
+        rt.insert_tensor(x).unwrap();
+        rt.insert_tensor(y).unwrap();
+        let r_id = where_cond(&mut rt, cond_id, x_id, y_id).unwrap();
+        rt.eval(&device, r_id).unwrap();
+        assert_eq!(rt.read_f32(r_id).unwrap(), &[1.0, 20.0, 3.0]);
+    }
+
+    #[test]
+    fn test_masked_fill() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        let input = Tensor::from_f32(&device, vec![3], &[1.0, 2.0, 3.0]).unwrap();
+        let mask = Tensor::from_f32(&device, vec![3], &[1.0, 0.0, 1.0]).unwrap();
+        let input_id = input.meta.id;
+        let mask_id = mask.meta.id;
+        rt.insert_tensor(input).unwrap();
+        rt.insert_tensor(mask).unwrap();
+        let r_id = masked_fill(&mut rt, input_id, mask_id, f32::NEG_INFINITY).unwrap();
+        rt.eval(&device, r_id).unwrap();
+        let result = rt.read_f32(r_id).unwrap();
+        assert!(result[0].is_infinite() && result[0] < 0.0);
+        assert_eq!(result[1], 2.0);
+        assert!(result[2].is_infinite() && result[2] < 0.0);
+    }
+
+    #[test]
+    fn test_triu() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        let a = Tensor::from_f32(&device, vec![3, 3], &[
+            1.0, 2.0, 3.0,
+            4.0, 5.0, 6.0,
+            7.0, 8.0, 9.0,
+        ]).unwrap();
+        let a_id = a.meta.id;
+        rt.insert_tensor(a).unwrap();
+        let r_id = triu(&mut rt, a_id, 0).unwrap();
+        rt.eval(&device, r_id).unwrap();
+        assert_eq!(rt.read_f32(r_id).unwrap(), &[
+            1.0, 2.0, 3.0,
+            0.0, 5.0, 6.0,
+            0.0, 0.0, 9.0,
+        ]);
+    }
+
+    #[test]
+    fn test_tril() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        let a = Tensor::from_f32(&device, vec![3, 3], &[
+            1.0, 2.0, 3.0,
+            4.0, 5.0, 6.0,
+            7.0, 8.0, 9.0,
+        ]).unwrap();
+        let a_id = a.meta.id;
+        rt.insert_tensor(a).unwrap();
+        let r_id = tril(&mut rt, a_id, 0).unwrap();
+        rt.eval(&device, r_id).unwrap();
+        assert_eq!(rt.read_f32(r_id).unwrap(), &[
+            1.0, 0.0, 0.0,
+            4.0, 5.0, 0.0,
+            7.0, 8.0, 9.0,
+        ]);
+    }
+
+    #[test]
+    fn test_triu_diagonal_offset() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        let a = Tensor::from_f32(&device, vec![3, 3], &[
+            1.0, 2.0, 3.0,
+            4.0, 5.0, 6.0,
+            7.0, 8.0, 9.0,
+        ]).unwrap();
+        let a_id = a.meta.id;
+        rt.insert_tensor(a).unwrap();
+        // diagonal=1: zero on and below main diagonal
+        let r_id = triu(&mut rt, a_id, 1).unwrap();
+        rt.eval(&device, r_id).unwrap();
+        assert_eq!(rt.read_f32(r_id).unwrap(), &[
+            0.0, 2.0, 3.0,
+            0.0, 0.0, 6.0,
+            0.0, 0.0, 0.0,
+        ]);
+    }
+
+    #[test]
+    fn test_triu_rejects_1d() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        let a = Tensor::from_f32(&device, vec![3], &[1.0, 2.0, 3.0]).unwrap();
+        let a_id = a.meta.id;
+        rt.insert_tensor(a).unwrap();
+        assert!(triu(&mut rt, a_id, 0).is_err());
     }
 }
