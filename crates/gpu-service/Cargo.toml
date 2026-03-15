@@ -9,3 +9,4 @@ path = "src/main.rs"
 
 [dependencies]
 applegpu-core = { path = "../core" }
+applegpu-wire = { path = "../wire" }
