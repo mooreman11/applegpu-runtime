@@ -112,6 +112,16 @@ int32_t gpu_bridge_compute_transpose(
     uint32_t cols
 );
 
+// Batched transpose: output[batch, cols, rows] = input[batch, rows, cols]
+int32_t gpu_bridge_compute_transpose_batched(
+    GPUComputeHandle* compute,
+    const GPUBufferHandle* buf_input,
+    GPUBufferHandle* buf_output,
+    uint32_t batch_size,
+    uint32_t rows,
+    uint32_t cols
+);
+
 // Scalar multiply: output[i] = input[i] * scale
 int32_t gpu_bridge_compute_scalar_mul(
     GPUComputeHandle* compute,
@@ -224,6 +234,17 @@ void* gpu_bridge_compute_transpose_nb(
     void* queue,
     const GPUBufferHandle* buf_input,
     GPUBufferHandle* buf_output,
+    uint32_t rows,
+    uint32_t cols
+);
+
+// Non-blocking batched transpose: returns command buffer handle.
+void* gpu_bridge_compute_transpose_batched_nb(
+    GPUComputeHandle* compute,
+    void* queue,
+    const GPUBufferHandle* buf_input,
+    GPUBufferHandle* buf_output,
+    uint32_t batch_size,
     uint32_t rows,
     uint32_t cols
 );

@@ -155,6 +155,15 @@ extern "C" {
         cols: u32,
     ) -> i32;
 
+    pub fn gpu_bridge_compute_transpose_batched(
+        compute: *mut GPUComputeHandle,
+        buf_input: *const GPUBufferHandle,
+        buf_output: *mut GPUBufferHandle,
+        batch_size: u32,
+        rows: u32,
+        cols: u32,
+    ) -> i32;
+
     pub fn gpu_bridge_compute_scalar_mul(
         compute: *mut GPUComputeHandle,
         buf_input: *const GPUBufferHandle,
@@ -237,6 +246,16 @@ extern "C" {
         queue: *mut std::ffi::c_void,
         buf_input: *const GPUBufferHandle,
         buf_output: *mut GPUBufferHandle,
+        rows: u32,
+        cols: u32,
+    ) -> *mut std::ffi::c_void;
+
+    pub fn gpu_bridge_compute_transpose_batched_nb(
+        compute: *mut GPUComputeHandle,
+        queue: *mut std::ffi::c_void,
+        buf_input: *const GPUBufferHandle,
+        buf_output: *mut GPUBufferHandle,
+        batch_size: u32,
         rows: u32,
         cols: u32,
     ) -> *mut std::ffi::c_void;

@@ -222,8 +222,15 @@ impl LazyRuntime {
             let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
             let input = self.get_tensor(node.inputs[0])?;
             let dims = input.meta.layout.shape.dims();
-            let (rows, cols) = (dims[0], dims[1]);
-            REGISTRY.dispatch_transpose_typed(device, dtype, &input.buffer, &out.buffer, rows, cols)?;
+            let ndim = dims.len();
+            let rows = dims[ndim - 2];
+            let cols = dims[ndim - 1];
+            let batch_size: usize = dims[..ndim - 2].iter().product::<usize>().max(1);
+            if batch_size <= 1 {
+                REGISTRY.dispatch_transpose_typed(device, dtype, &input.buffer, &out.buffer, rows, cols)?;
+            } else {
+                REGISTRY.dispatch_transpose_batched_typed(device, dtype, &input.buffer, &out.buffer, batch_size, rows, cols)?;
+            }
             return Ok(out);
         }
 
@@ -255,8 +262,9 @@ impl LazyRuntime {
             let gamma = self.get_tensor(node.inputs[1])?;
             let beta = self.get_tensor(node.inputs[2])?;
             let dims = input.meta.layout.shape.dims();
-            let (rows, cols) = (dims[0], dims[1]);
-            REGISTRY.dispatch_layer_norm_typed(device, dtype, &input.buffer, &gamma.buffer, &beta.buffer, &out.buffer, rows, cols, eps)?;
+            let cols = dims[dims.len() - 1];
+            let total_rows: usize = dims[..dims.len() - 1].iter().product::<usize>().max(1);
+            REGISTRY.dispatch_layer_norm_typed(device, dtype, &input.buffer, &gamma.buffer, &beta.buffer, &out.buffer, total_rows, cols, eps)?;
             return Ok(out);
         }
 
@@ -265,7 +273,7 @@ impl LazyRuntime {
             let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
             let weights = self.get_tensor(node.inputs[0])?;
             let indices = self.get_tensor(node.inputs[1])?;
-            let seq_len = indices.meta.layout.shape.dims()[0];
+            let seq_len = indices.meta.layout.shape.numel();
             let embed_dim = weights.meta.layout.shape.dims()[1];
             REGISTRY.dispatch_embedding_typed(device, dtype, &weights.buffer, &indices.buffer, &out.buffer, seq_len, embed_dim)?;
             return Ok(out);
@@ -493,8 +501,15 @@ impl LazyRuntime {
         if node.op.is_transpose() {
             let input = self.get_tensor(node.inputs[0])?;
             let dims = input.meta.layout.shape.dims();
-            let (rows, cols) = (dims[0], dims[1]);
-            return REGISTRY.dispatch_transpose_typed_nb(device, dtype, queue, &input.buffer, &out.buffer, rows, cols);
+            let ndim = dims.len();
+            let rows = dims[ndim - 2];
+            let cols = dims[ndim - 1];
+            let batch_size: usize = dims[..ndim - 2].iter().product::<usize>().max(1);
+            if batch_size <= 1 {
+                return REGISTRY.dispatch_transpose_typed_nb(device, dtype, queue, &input.buffer, &out.buffer, rows, cols);
+            } else {
+                return REGISTRY.dispatch_transpose_batched_typed_nb(device, dtype, queue, &input.buffer, &out.buffer, batch_size, rows, cols);
+            }
         }
 
         if let crate::graph::OpKind::ScalarMul(scale) = node.op {
@@ -517,14 +532,15 @@ impl LazyRuntime {
             let gamma = self.get_tensor(node.inputs[1])?;
             let beta = self.get_tensor(node.inputs[2])?;
             let dims = input.meta.layout.shape.dims();
-            let (rows, cols) = (dims[0], dims[1]);
-            return REGISTRY.dispatch_layer_norm_typed_nb(device, dtype, queue, &input.buffer, &gamma.buffer, &beta.buffer, &out.buffer, rows, cols, eps);
+            let cols = dims[dims.len() - 1];
+            let total_rows: usize = dims[..dims.len() - 1].iter().product::<usize>().max(1);
+            return REGISTRY.dispatch_layer_norm_typed_nb(device, dtype, queue, &input.buffer, &gamma.buffer, &beta.buffer, &out.buffer, total_rows, cols, eps);
         }
 
         if node.op.is_embedding() {
             let weights = self.get_tensor(node.inputs[0])?;
             let indices = self.get_tensor(node.inputs[1])?;
-            let seq_len = indices.meta.layout.shape.dims()[0];
+            let seq_len = indices.meta.layout.shape.numel();
             let embed_dim = weights.meta.layout.shape.dims()[1];
             return REGISTRY.dispatch_embedding_typed_nb(device, dtype, queue, &weights.buffer, &indices.buffer, &out.buffer, seq_len, embed_dim);
         }

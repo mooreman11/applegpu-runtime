@@ -203,22 +203,25 @@ pub fn softmax(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
     Ok(out_id)
 }
 
-/// Transpose a 2D tensor: [rows, cols] → [cols, rows].
+/// Transpose last two dimensions: [..., rows, cols] → [..., cols, rows].
 pub fn transpose(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
     let dtype = rt.dtype(input_id)?;
     validate_compute_dtype(dtype)?;
     let shape = rt.shape(input_id)?;
-    if shape.len() != 2 {
+    if shape.len() < 2 {
         return Err(GpuError::InvalidTensor(format!(
-            "transpose requires 2D tensor, got {:?}", shape
+            "transpose requires at least 2D tensor, got {:?}", shape
         )));
     }
+    let ndim = shape.len();
+    let mut out_shape = shape.clone();
+    out_shape.swap(ndim - 2, ndim - 1);
     let out_id = next_id();
     rt.record_op(OpNode {
         id: out_id,
         op: OpKind::Transpose,
         inputs: vec![input_id],
-        out_shape: Shape::new(vec![shape[1], shape[0]])?,
+        out_shape: Shape::new(out_shape)?,
         out_dtype: dtype,
         container_id: ContainerId::DEFAULT,
     });
@@ -275,10 +278,10 @@ pub fn layer_norm(rt: &mut LazyRuntime, input_id: u64, gamma_id: u64, beta_id: u
     let input_dtype = rt.dtype(input_id)?;
     validate_compute_dtype(input_dtype)?;
 
-    if input_shape.len() != 2 {
-        return Err(GpuError::InvalidTensor("layer_norm requires 2D input".to_string()));
+    if input_shape.is_empty() {
+        return Err(GpuError::InvalidTensor("layer_norm requires at least 1D input".to_string()));
     }
-    let cols = input_shape[1];
+    let cols = input_shape[input_shape.len() - 1];
 
     let gamma_shape = rt.shape(gamma_id)?;
     if gamma_shape != vec![cols] {
@@ -316,8 +319,8 @@ pub fn embedding(rt: &mut LazyRuntime, weights_id: u64, indices_id: u64) -> Resu
     if weights_shape.len() != 2 {
         return Err(GpuError::InvalidTensor("embedding weights must be 2D [vocab_size, embed_dim]".to_string()));
     }
-    if indices_shape.len() != 1 {
-        return Err(GpuError::InvalidTensor("embedding indices must be 1D [seq_len]".to_string()));
+    if indices_shape.is_empty() {
+        return Err(GpuError::InvalidTensor("embedding indices must have at least 1 dimension".to_string()));
     }
     if indices_dtype != DType::Int32 {
         return Err(GpuError::InvalidTensor(format!(
@@ -325,15 +328,18 @@ pub fn embedding(rt: &mut LazyRuntime, weights_id: u64, indices_id: u64) -> Resu
         )));
     }
 
-    let seq_len = indices_shape[0];
     let embed_dim = weights_shape[1];
+
+    // Output shape = indices_shape + [embed_dim]
+    let mut out_dims = indices_shape.clone();
+    out_dims.push(embed_dim);
 
     let out_id = next_id();
     rt.record_op(OpNode {
         id: out_id,
         op: OpKind::Embedding,
         inputs: vec![weights_id, indices_id],
-        out_shape: Shape::new(vec![seq_len, embed_dim])?,
+        out_shape: Shape::new(out_dims)?,
         out_dtype: weights_dtype,
         container_id: ContainerId::DEFAULT,
     });
@@ -524,86 +530,92 @@ pub fn argmax(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
 }
 
 /// Scaled dot-product attention: softmax(Q @ K^T / sqrt(d_k)) @ V
-/// Q: [q_len, d_k], K: [kv_len, d_k], V: [kv_len, d_v]
-/// Output: [q_len, d_v]
+/// Q: [..., q_len, d_k], K: [..., kv_len, d_k], V: [..., kv_len, d_v]
+/// Output: [..., q_len, d_v]
 pub fn attention(rt: &mut LazyRuntime, q_id: u64, k_id: u64, v_id: u64) -> Result<u64> {
     let q_shape = rt.shape(q_id)?;
     let k_shape = rt.shape(k_id)?;
     let v_shape = rt.shape(v_id)?;
 
-    if q_shape.len() != 2 || k_shape.len() != 2 || v_shape.len() != 2 {
+    if q_shape.len() < 2 || k_shape.len() < 2 || v_shape.len() < 2 {
         return Err(GpuError::InvalidTensor(
-            "attention requires 2D tensors for Q, K, V".to_string()
+            "attention requires at least 2D tensors for Q, K, V".to_string()
         ));
     }
 
-    let d_k = q_shape[1];
-    if k_shape[1] != d_k {
+    let q_ndim = q_shape.len();
+    let k_ndim = k_shape.len();
+    let v_ndim = v_shape.len();
+
+    let d_k = q_shape[q_ndim - 1];
+    if k_shape[k_ndim - 1] != d_k {
         return Err(GpuError::InvalidTensor(format!(
-            "Q and K must have same d_k: Q[{},{}] K[{},{}]",
-            q_shape[0], q_shape[1], k_shape[0], k_shape[1]
+            "Q and K must have same d_k: {} vs {}", d_k, k_shape[k_ndim - 1]
         )));
     }
-    if k_shape[0] != v_shape[0] {
+    let kv_len = k_shape[k_ndim - 2];
+    if v_shape[v_ndim - 2] != kv_len {
         return Err(GpuError::InvalidTensor(format!(
-            "K and V must have same seq_len: K[{},{}] V[{},{}]",
-            k_shape[0], k_shape[1], v_shape[0], v_shape[1]
+            "K and V must have same kv_len: {} vs {}", kv_len, v_shape[v_ndim - 2]
         )));
     }
 
-    // K^T: [kv_len, d_k] → [d_k, kv_len]
+    // K^T: [..., kv_len, d_k] → [..., d_k, kv_len]
     let kt_id = transpose(rt, k_id)?;
-    // scores = Q @ K^T: [q_len, d_k] @ [d_k, kv_len] → [q_len, kv_len]
+    // scores = Q @ K^T: [..., q_len, d_k] @ [..., d_k, kv_len] → [..., q_len, kv_len]
     let scores_id = matmul(rt, q_id, kt_id)?;
     // Scale by 1/sqrt(d_k)
     let scale = 1.0 / (d_k as f32).sqrt();
     let scaled_scores_id = scalar_mul(rt, scores_id, scale)?;
     // softmax along last dimension
     let attn_weights_id = softmax(rt, scaled_scores_id)?;
-    // output = attn_weights @ V: [q_len, kv_len] @ [kv_len, d_v] → [q_len, d_v]
+    // output = attn_weights @ V: [..., q_len, kv_len] @ [..., kv_len, d_v] → [..., q_len, d_v]
     let output_id = matmul(rt, attn_weights_id, v_id)?;
 
     Ok(output_id)
 }
 
 /// Causal scaled dot-product attention: softmax_causal(Q @ K^T / sqrt(d_k)) @ V
-/// Q: [q_len, d_k], K: [kv_len, d_k], V: [kv_len, d_v]
-/// Output: [q_len, d_v]
+/// Q: [..., q_len, d_k], K: [..., kv_len, d_k], V: [..., kv_len, d_v]
+/// Output: [..., q_len, d_v]
 pub fn attention_causal(rt: &mut LazyRuntime, q_id: u64, k_id: u64, v_id: u64) -> Result<u64> {
     let q_shape = rt.shape(q_id)?;
     let k_shape = rt.shape(k_id)?;
     let v_shape = rt.shape(v_id)?;
 
-    if q_shape.len() != 2 || k_shape.len() != 2 || v_shape.len() != 2 {
+    if q_shape.len() < 2 || k_shape.len() < 2 || v_shape.len() < 2 {
         return Err(GpuError::InvalidTensor(
-            "attention_causal requires 2D tensors".to_string()
+            "attention_causal requires at least 2D tensors".to_string()
         ));
     }
 
-    let d_k = q_shape[1];
-    if k_shape[1] != d_k {
+    let q_ndim = q_shape.len();
+    let k_ndim = k_shape.len();
+    let v_ndim = v_shape.len();
+
+    let d_k = q_shape[q_ndim - 1];
+    if k_shape[k_ndim - 1] != d_k {
         return Err(GpuError::InvalidTensor(format!(
-            "Q and K must have same d_k: Q[{},{}] K[{},{}]",
-            q_shape[0], q_shape[1], k_shape[0], k_shape[1]
+            "Q and K must have same d_k: {} vs {}", d_k, k_shape[k_ndim - 1]
         )));
     }
-    if k_shape[0] != v_shape[0] {
+    let kv_len = k_shape[k_ndim - 2];
+    if v_shape[v_ndim - 2] != kv_len {
         return Err(GpuError::InvalidTensor(format!(
-            "K and V must have same seq_len: K[{},{}] V[{},{}]",
-            k_shape[0], k_shape[1], v_shape[0], v_shape[1]
+            "K and V must have same kv_len: {} vs {}", kv_len, v_shape[v_ndim - 2]
         )));
     }
 
-    // K^T: [kv_len, d_k] → [d_k, kv_len]
+    // K^T: [..., kv_len, d_k] → [..., d_k, kv_len]
     let kt_id = transpose(rt, k_id)?;
-    // scores = Q @ K^T: [q_len, d_k] @ [d_k, kv_len] → [q_len, kv_len]
+    // scores = Q @ K^T: [..., q_len, d_k] @ [..., d_k, kv_len] → [..., q_len, kv_len]
     let scores_id = matmul(rt, q_id, kt_id)?;
     // Scale by 1/sqrt(d_k)
     let scale = 1.0 / (d_k as f32).sqrt();
     let scaled_scores_id = scalar_mul(rt, scores_id, scale)?;
     // Causal softmax (masks future positions)
     let attn_weights_id = softmax_causal(rt, scaled_scores_id)?;
-    // output = attn_weights @ V: [q_len, kv_len] @ [kv_len, d_v] → [q_len, d_v]
+    // output = attn_weights @ V: [..., q_len, kv_len] @ [..., kv_len, d_v] → [..., q_len, d_v]
     let output_id = matmul(rt, attn_weights_id, v_id)?;
 
     Ok(output_id)
@@ -1064,12 +1076,32 @@ mod tests {
     }
 
     #[test]
-    fn layer_norm_rejects_non_2d() {
+    fn layer_norm_1d_input_works() {
+        // 1D input should now be accepted (normalize over the single dim)
         let device = match get_device() { Some(d) => d, None => return };
         let mut rt = LazyRuntime::new();
 
         let input = Tensor::from_f32(&device, vec![4], &[1.0, 2.0, 3.0, 4.0]).unwrap();
         let gamma = Tensor::from_f32(&device, vec![4], &[1.0; 4]).unwrap();
+        let beta = Tensor::from_f32(&device, vec![4], &[0.0; 4]).unwrap();
+        let i_id = input.meta.id;
+        let g_id = gamma.meta.id;
+        let b_id = beta.meta.id;
+        rt.insert_tensor(input).unwrap();
+        rt.insert_tensor(gamma).unwrap();
+        rt.insert_tensor(beta).unwrap();
+
+        let result = layer_norm(&mut rt, i_id, g_id, b_id, 1e-5);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn layer_norm_rejects_gamma_mismatch() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        let input = Tensor::from_f32(&device, vec![2, 4], &[1.0; 8]).unwrap();
+        let gamma = Tensor::from_f32(&device, vec![2], &[1.0; 2]).unwrap(); // wrong size
         let beta = Tensor::from_f32(&device, vec![4], &[0.0; 4]).unwrap();
         let i_id = input.meta.id;
         let g_id = gamma.meta.id;
@@ -1617,5 +1649,260 @@ mod tests {
         let mm_id = matmul(&mut rt, a_id, b_id).unwrap();
         rt.eval(&device, mm_id).unwrap();
         assert_eq!(rt.read_f32(mm_id).unwrap(), &[19.0, 22.0, 43.0, 50.0]);
+    }
+
+    // ── Batched transpose tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_batched_transpose_3d() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        // [2, 3, 4] -> transpose last 2 dims -> [2, 4, 3]
+        let data: Vec<f32> = (0..24).map(|i| i as f32).collect();
+        let t = Tensor::from_f32(&device, vec![2, 3, 4], &data).unwrap();
+        let t_id = t.meta.id;
+        rt.insert_tensor(t).unwrap();
+
+        let out_id = transpose(&mut rt, t_id).unwrap();
+        assert_eq!(rt.shape(out_id).unwrap(), vec![2, 4, 3]);
+
+        rt.eval(&device, out_id).unwrap();
+        let result = rt.read_f32(out_id).unwrap();
+        assert_eq!(result.len(), 24);
+
+        // Batch 0: input [3,4] row-major: [[0,1,2,3],[4,5,6,7],[8,9,10,11]]
+        // Transposed [4,3]: [[0,4,8],[1,5,9],[2,6,10],[3,7,11]]
+        assert_eq!(&result[0..12], &[0.0, 4.0, 8.0, 1.0, 5.0, 9.0, 2.0, 6.0, 10.0, 3.0, 7.0, 11.0]);
+        // Batch 1: input [[12,13,14,15],[16,17,18,19],[20,21,22,23]]
+        // Transposed: [[12,16,20],[13,17,21],[14,18,22],[15,19,23]]
+        assert_eq!(&result[12..24], &[12.0, 16.0, 20.0, 13.0, 17.0, 21.0, 14.0, 18.0, 22.0, 15.0, 19.0, 23.0]);
+    }
+
+    #[test]
+    fn test_existing_2d_transpose_unchanged() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        let t = Tensor::from_f32(&device, vec![2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
+        let t_id = t.meta.id;
+        rt.insert_tensor(t).unwrap();
+
+        let out_id = transpose(&mut rt, t_id).unwrap();
+        assert_eq!(rt.shape(out_id).unwrap(), vec![3, 2]);
+
+        rt.eval(&device, out_id).unwrap();
+        assert_eq!(rt.read_f32(out_id).unwrap(), &[1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
+    }
+
+    // ── Batched layer_norm tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_batched_layer_norm_3d() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        // [2, 3, 4] -> layer_norm over last dim (4)
+        let data: Vec<f32> = (0..24).map(|i| i as f32).collect();
+        let input = Tensor::from_f32(&device, vec![2, 3, 4], &data).unwrap();
+        let gamma = Tensor::from_f32(&device, vec![4], &[1.0; 4]).unwrap();
+        let beta = Tensor::from_f32(&device, vec![4], &[0.0; 4]).unwrap();
+        let input_id = input.meta.id;
+        let gamma_id = gamma.meta.id;
+        let beta_id = beta.meta.id;
+        rt.insert_tensor(input).unwrap();
+        rt.insert_tensor(gamma).unwrap();
+        rt.insert_tensor(beta).unwrap();
+
+        let out_id = layer_norm(&mut rt, input_id, gamma_id, beta_id, 1e-5).unwrap();
+        assert_eq!(rt.shape(out_id).unwrap(), vec![2, 3, 4]);
+
+        rt.eval(&device, out_id).unwrap();
+        let result = rt.read_f32(out_id).unwrap();
+        assert_eq!(result.len(), 24);
+
+        // Each group of 4 should be normalized to mean~0, std~1
+        // First row: [0,1,2,3] -> mean=1.5, std=~1.118
+        // Normalized: [-1.342, -0.447, 0.447, 1.342]
+        assert!((result[0] - (-1.342)).abs() < 0.05, "got {}", result[0]);
+        assert!((result[1] - (-0.447)).abs() < 0.05, "got {}", result[1]);
+        assert!((result[2] - 0.447).abs() < 0.05, "got {}", result[2]);
+        assert!((result[3] - 1.342).abs() < 0.05, "got {}", result[3]);
+    }
+
+    #[test]
+    fn test_existing_2d_layer_norm_unchanged() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        let input = Tensor::from_f32(&device, vec![2, 4], &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]).unwrap();
+        let gamma = Tensor::from_f32(&device, vec![4], &[1.0; 4]).unwrap();
+        let beta = Tensor::from_f32(&device, vec![4], &[0.0; 4]).unwrap();
+        let input_id = input.meta.id;
+        let gamma_id = gamma.meta.id;
+        let beta_id = beta.meta.id;
+        rt.insert_tensor(input).unwrap();
+        rt.insert_tensor(gamma).unwrap();
+        rt.insert_tensor(beta).unwrap();
+
+        let out_id = layer_norm(&mut rt, input_id, gamma_id, beta_id, 1e-5).unwrap();
+        assert_eq!(rt.shape(out_id).unwrap(), vec![2, 4]);
+
+        rt.eval(&device, out_id).unwrap();
+        let result = rt.read_f32(out_id).unwrap();
+        assert_eq!(result.len(), 8);
+        // Row 0: [0,1,2,3] -> normalized
+        assert!((result[0] - (-1.342)).abs() < 0.05);
+        assert!((result[3] - 1.342).abs() < 0.05);
+    }
+
+    // ── Batched embedding tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_batched_embedding_2d_indices() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        // weights [5, 3], indices [2, 4] -> [2, 4, 3]
+        let weights_data: Vec<f32> = (0..15).map(|i| i as f32).collect();
+        let weights = Tensor::from_f32(&device, vec![5, 3], &weights_data).unwrap();
+        // indices: [[0,1,2,3],[4,0,1,2]]
+        let indices_data: Vec<i32> = vec![0, 1, 2, 3, 4, 0, 1, 2];
+        let indices_bytes = unsafe {
+            std::slice::from_raw_parts(indices_data.as_ptr() as *const u8, indices_data.len() * 4)
+        };
+        let indices = crate::tensor::Tensor::from_data(&device, vec![2, 4], DType::Int32, indices_bytes).unwrap();
+
+        let w_id = weights.meta.id;
+        let i_id = indices.meta.id;
+        rt.insert_tensor(weights).unwrap();
+        rt.insert_tensor(indices).unwrap();
+
+        let out_id = embedding(&mut rt, w_id, i_id).unwrap();
+        assert_eq!(rt.shape(out_id).unwrap(), vec![2, 4, 3]);
+
+        rt.eval(&device, out_id).unwrap();
+        let result = rt.read_f32(out_id).unwrap();
+        assert_eq!(result.len(), 24);
+
+        // Index 0 -> weights[0] = [0,1,2]
+        assert_eq!(&result[0..3], &[0.0, 1.0, 2.0]);
+        // Index 1 -> weights[1] = [3,4,5]
+        assert_eq!(&result[3..6], &[3.0, 4.0, 5.0]);
+        // Index 4 (second batch, first element) -> weights[4] = [12,13,14]
+        assert_eq!(&result[12..15], &[12.0, 13.0, 14.0]);
+    }
+
+    #[test]
+    fn test_existing_1d_embedding_unchanged() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        let weights_data: Vec<f32> = (0..15).map(|i| i as f32).collect();
+        let weights = Tensor::from_f32(&device, vec![5, 3], &weights_data).unwrap();
+        let indices_data: Vec<i32> = vec![0, 2, 4];
+        let indices_bytes = unsafe {
+            std::slice::from_raw_parts(indices_data.as_ptr() as *const u8, indices_data.len() * 4)
+        };
+        let indices = crate::tensor::Tensor::from_data(&device, vec![3], DType::Int32, indices_bytes).unwrap();
+
+        let w_id = weights.meta.id;
+        let i_id = indices.meta.id;
+        rt.insert_tensor(weights).unwrap();
+        rt.insert_tensor(indices).unwrap();
+
+        let out_id = embedding(&mut rt, w_id, i_id).unwrap();
+        assert_eq!(rt.shape(out_id).unwrap(), vec![3, 3]);
+
+        rt.eval(&device, out_id).unwrap();
+        let result = rt.read_f32(out_id).unwrap();
+        assert_eq!(result.len(), 9);
+        assert_eq!(&result[0..3], &[0.0, 1.0, 2.0]);   // index 0
+        assert_eq!(&result[3..6], &[6.0, 7.0, 8.0]);   // index 2
+        assert_eq!(&result[6..9], &[12.0, 13.0, 14.0]); // index 4
+    }
+
+    // ── Batched attention tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_batched_attention_3d() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        // Q [2, 3, 4], K [2, 3, 4], V [2, 3, 4] -> [2, 3, 4]
+        // 2 batch elements, each seq=3, d_k=d_v=4
+        let q_data: Vec<f32> = (0..24).map(|i| (i as f32) * 0.1).collect();
+        let k_data: Vec<f32> = (0..24).map(|i| (i as f32) * 0.1).collect();
+        let v_data: Vec<f32> = (0..24).map(|i| i as f32).collect();
+
+        let q = Tensor::from_f32(&device, vec![2, 3, 4], &q_data).unwrap();
+        let k = Tensor::from_f32(&device, vec![2, 3, 4], &k_data).unwrap();
+        let v = Tensor::from_f32(&device, vec![2, 3, 4], &v_data).unwrap();
+        let q_id = q.meta.id;
+        let k_id = k.meta.id;
+        let v_id = v.meta.id;
+        rt.insert_tensor(q).unwrap();
+        rt.insert_tensor(k).unwrap();
+        rt.insert_tensor(v).unwrap();
+
+        let out_id = attention(&mut rt, q_id, k_id, v_id).unwrap();
+        assert_eq!(rt.shape(out_id).unwrap(), vec![2, 3, 4]);
+
+        rt.eval(&device, out_id).unwrap();
+        let result = rt.read_f32(out_id).unwrap();
+        assert_eq!(result.len(), 24);
+        // Just verify all values are finite (no NaN/Inf)
+        for &v in &result {
+            assert!(v.is_finite(), "Attention produced non-finite value: {}", v);
+        }
+    }
+
+    #[test]
+    fn test_batched_attention_causal_3d() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        // Batched causal attention: Q,K,V [2, 3, 4]
+        let q_data: Vec<f32> = (0..24).map(|i| (i as f32) * 0.1).collect();
+        let k_data: Vec<f32> = (0..24).map(|i| (i as f32) * 0.1).collect();
+        let v_data: Vec<f32> = (0..24).map(|i| i as f32).collect();
+
+        let q = Tensor::from_f32(&device, vec![2, 3, 4], &q_data).unwrap();
+        let k = Tensor::from_f32(&device, vec![2, 3, 4], &k_data).unwrap();
+        let v = Tensor::from_f32(&device, vec![2, 3, 4], &v_data).unwrap();
+        let q_id = q.meta.id;
+        let k_id = k.meta.id;
+        let v_id = v.meta.id;
+        rt.insert_tensor(q).unwrap();
+        rt.insert_tensor(k).unwrap();
+        rt.insert_tensor(v).unwrap();
+
+        let out_id = attention_causal(&mut rt, q_id, k_id, v_id).unwrap();
+        assert_eq!(rt.shape(out_id).unwrap(), vec![2, 3, 4]);
+
+        rt.eval(&device, out_id).unwrap();
+        let result = rt.read_f32(out_id).unwrap();
+        assert_eq!(result.len(), 24);
+        for &v in &result {
+            assert!(v.is_finite(), "Causal attention produced non-finite value: {}", v);
+        }
+    }
+
+    #[test]
+    fn test_attention_rejects_1d() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        let q = Tensor::from_f32(&device, vec![4], &[1.0; 4]).unwrap();
+        let k = Tensor::from_f32(&device, vec![4], &[1.0; 4]).unwrap();
+        let v = Tensor::from_f32(&device, vec![4], &[1.0; 4]).unwrap();
+        let q_id = q.meta.id;
+        let k_id = k.meta.id;
+        let v_id = v.meta.id;
+        rt.insert_tensor(q).unwrap();
+        rt.insert_tensor(k).unwrap();
+        rt.insert_tensor(v).unwrap();
+
+        assert!(attention(&mut rt, q_id, k_id, v_id).is_err());
     }
 }

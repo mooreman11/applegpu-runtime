@@ -165,6 +165,46 @@ kernel void transpose_f32(
 }
 "#;
 
+const TRANSPOSE_BATCHED_KERNEL_SOURCE: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void transpose_batched_f32(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    constant uint& batch_size [[buffer(2)]],
+    constant uint& rows [[buffer(3)]],
+    constant uint& cols [[buffer(4)]],
+    uint3 gid [[thread_position_in_grid]]
+) {
+    uint col = gid.x;
+    uint row = gid.y;
+    uint batch = gid.z;
+    if (row >= rows || col >= cols || batch >= batch_size) return;
+    output[batch * cols * rows + col * rows + row] = input[batch * rows * cols + row * cols + col];
+}
+"#;
+
+const TRANSPOSE_BATCHED_KERNEL_SOURCE_F16: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void transpose_batched_f16(
+    device const half* input [[buffer(0)]],
+    device half* output [[buffer(1)]],
+    constant uint& batch_size [[buffer(2)]],
+    constant uint& rows [[buffer(3)]],
+    constant uint& cols [[buffer(4)]],
+    uint3 gid [[thread_position_in_grid]]
+) {
+    uint col = gid.x;
+    uint row = gid.y;
+    uint batch = gid.z;
+    if (row >= rows || col >= cols || batch >= batch_size) return;
+    output[batch * cols * rows + col * rows + row] = input[batch * rows * cols + row * cols + col];
+}
+"#;
+
 const SCALAR_MUL_KERNEL_SOURCE: &str = r#"
 #include <metal_stdlib>
 using namespace metal;
@@ -938,6 +978,19 @@ impl ComputePipeline {
         if result == 0 { Ok(()) } else { Err(GpuError::ComputeFailed("Transpose dispatch failed".to_string())) }
     }
 
+    /// Dispatch batched transpose with 3D grid: (col, row, batch).
+    pub fn dispatch_transpose_batched(
+        &self, buf_input: &Buffer, buf_output: &Buffer, batch_size: usize, rows: usize, cols: usize,
+    ) -> Result<()> {
+        let result = unsafe {
+            ffi::gpu_bridge_compute_transpose_batched(
+                self.handle, buf_input.raw_handle() as *const _,
+                buf_output.raw_handle(), batch_size as u32, rows as u32, cols as u32,
+            )
+        };
+        if result == 0 { Ok(()) } else { Err(GpuError::ComputeFailed("Batched transpose dispatch failed".to_string())) }
+    }
+
     pub fn dispatch_scalar_mul(
         &self, buf_input: &Buffer, buf_output: &Buffer, scale: f32, element_count: usize,
     ) -> Result<()> {
@@ -1219,6 +1272,30 @@ impl ComputePipeline {
             )
         };
         if cb.is_null() { Err(GpuError::ComputeFailed("Non-blocking transpose dispatch failed".to_string())) } else { Ok(cb) }
+    }
+
+    /// Non-blocking batched transpose. Returns command buffer handle.
+    pub fn dispatch_transpose_batched_nb(
+        &self,
+        queue: *mut std::ffi::c_void,
+        buf_input: &Buffer,
+        buf_output: &Buffer,
+        batch_size: usize,
+        rows: usize,
+        cols: usize,
+    ) -> Result<*mut std::ffi::c_void> {
+        let cb = unsafe {
+            ffi::gpu_bridge_compute_transpose_batched_nb(
+                self.handle,
+                queue,
+                buf_input.raw_handle() as *const _,
+                buf_output.raw_handle(),
+                batch_size as u32,
+                rows as u32,
+                cols as u32,
+            )
+        };
+        if cb.is_null() { Err(GpuError::ComputeFailed("Non-blocking batched transpose dispatch failed".to_string())) } else { Ok(cb) }
     }
 
     /// Non-blocking scalar multiply. Returns command buffer handle.
@@ -1532,6 +1609,7 @@ impl KernelRegistry {
                     "matmul_f32" => MATMUL_KERNEL_SOURCE_F16,
                     "softmax_f32" => SOFTMAX_KERNEL_SOURCE_F16,
                     "transpose_f32" => TRANSPOSE_KERNEL_SOURCE_F16,
+                    "transpose_batched_f32" => TRANSPOSE_BATCHED_KERNEL_SOURCE_F16,
                     "scalar_mul_f32" => SCALAR_MUL_KERNEL_SOURCE_F16,
                     "gelu_f32" => GELU_KERNEL_SOURCE_F16,
                     "layer_norm_f32" => LAYER_NORM_KERNEL_SOURCE_F16,
@@ -1563,6 +1641,7 @@ impl KernelRegistry {
                     "matmul_f32" => MATMUL_KERNEL_SOURCE,
                     "softmax_f32" => SOFTMAX_KERNEL_SOURCE,
                     "transpose_f32" => TRANSPOSE_KERNEL_SOURCE,
+                    "transpose_batched_f32" => TRANSPOSE_BATCHED_KERNEL_SOURCE,
                     "scalar_mul_f32" => SCALAR_MUL_KERNEL_SOURCE,
                     "gelu_f32" => GELU_KERNEL_SOURCE,
                     "layer_norm_f32" => LAYER_NORM_KERNEL_SOURCE,
@@ -1754,6 +1833,15 @@ impl KernelRegistry {
         let (source, func) = Self::resolve_kernel("transpose_f32", dtype);
         let pipeline = self.get_or_create(device, source, &func)?;
         pipeline.dispatch_transpose(buf_input, buf_output, rows, cols)
+    }
+
+    pub fn dispatch_transpose_batched_typed(
+        &self, device: &Device, dtype: DType, buf_input: &Buffer, buf_output: &Buffer,
+        batch_size: usize, rows: usize, cols: usize,
+    ) -> Result<()> {
+        let (source, func) = Self::resolve_kernel("transpose_batched_f32", dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_transpose_batched(buf_input, buf_output, batch_size, rows, cols)
     }
 
     pub fn dispatch_scalar_mul(
@@ -2037,6 +2125,15 @@ impl KernelRegistry {
         let (source, func) = Self::resolve_kernel("transpose_f32", dtype);
         let pipeline = self.get_or_create(device, source, &func)?;
         pipeline.dispatch_transpose_nb(queue, buf_input, buf_output, rows, cols)
+    }
+
+    pub fn dispatch_transpose_batched_typed_nb(
+        &self, device: &Device, dtype: DType, queue: *mut std::ffi::c_void,
+        buf_input: &Buffer, buf_output: &Buffer, batch_size: usize, rows: usize, cols: usize,
+    ) -> Result<*mut std::ffi::c_void> {
+        let (source, func) = Self::resolve_kernel("transpose_batched_f32", dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_transpose_batched_nb(queue, buf_input, buf_output, batch_size, rows, cols)
     }
 
     pub fn dispatch_scalar_mul_typed_nb(
