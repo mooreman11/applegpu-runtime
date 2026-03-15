@@ -1,4 +1,5 @@
 import Testing
+import Metal
 @testable import AppleGPUBridge
 
 let addKernelSource = """
@@ -65,4 +66,52 @@ kernel void elementwise_add(
     gpuBridgeDestroyBuffer(bufOut)
     gpuBridgeDestroyCompute(computePtr)
     gpuBridgeDestroyDevice(devicePtr)
+}
+
+@Suite(.serialized) struct BatchTests {
+    @Test func testBeginEndBatchBasic() throws {
+        // Reset any leftover batch state
+        gpuBridgeAbortBatch()
+
+        let device = MTLCreateSystemDefaultDevice()!
+        let queue = device.makeCommandQueue()!
+        let queuePtr = Unmanaged.passUnretained(queue).toOpaque()
+
+        let batchCB = gpuBridgeBeginBatch(queuePtr)
+        #expect(batchCB != nil)
+
+        // Double begin should fail
+        let batchCB2 = gpuBridgeBeginBatch(queuePtr)
+        #expect(batchCB2 == nil)
+
+        let cb = gpuBridgeEndBatch()
+        #expect(cb != nil)
+        gpuBridgeWaitCommandBuffer(cb!)
+
+        // End with no active batch should return nil
+        let cb2 = gpuBridgeEndBatch()
+        #expect(cb2 == nil)
+    }
+
+    @Test func testAbortBatch() throws {
+        // Reset any leftover batch state
+        gpuBridgeAbortBatch()
+
+        let device = MTLCreateSystemDefaultDevice()!
+        let queue = device.makeCommandQueue()!
+        let queuePtr = Unmanaged.passUnretained(queue).toOpaque()
+
+        let batchCB = gpuBridgeBeginBatch(queuePtr)
+        #expect(batchCB != nil)
+
+        gpuBridgeAbortBatch()
+
+        // Should be able to begin a new batch after abort
+        let batchCB2 = gpuBridgeBeginBatch(queuePtr)
+        #expect(batchCB2 != nil)
+
+        let cb = gpuBridgeEndBatch()
+        #expect(cb != nil)
+        gpuBridgeWaitCommandBuffer(cb!)
+    }
 }

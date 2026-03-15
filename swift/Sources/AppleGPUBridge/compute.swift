@@ -7,6 +7,11 @@ import Metal
 private var sharedCommandQueue: MTLCommandQueue?
 private let sharedQueueLock = NSLock()
 
+/// Active batch command buffer for single-CB encoding mode.
+/// When non-nil, _nb dispatch functions encode into this CB instead of creating their own.
+private var activeBatchCommandBuffer: MTLCommandBuffer?
+private let batchLock = NSLock()
+
 /// Wraps a Metal compute pipeline with command queue.
 final class GPUCompute {
     let device: MTLDevice
@@ -3179,4 +3184,35 @@ public func gpuBridgeCompute3DNB(
     commandBuffer.commit()
 
     return Unmanaged.passRetained(commandBuffer as AnyObject).toOpaque()
+}
+
+// MARK: - Batch encoding (single command buffer per eval)
+
+@_cdecl("gpu_bridge_begin_batch")
+public func gpuBridgeBeginBatch(_ queuePtr: UnsafeMutableRawPointer?) -> UnsafeMutableRawPointer? {
+    guard let queuePtr = queuePtr else { return nil }
+    let queue = Unmanaged<MTLCommandQueue>.fromOpaque(queuePtr).takeUnretainedValue()
+    batchLock.lock()
+    defer { batchLock.unlock() }
+    guard activeBatchCommandBuffer == nil else { return nil }
+    guard let cb = queue.makeCommandBuffer() else { return nil }
+    activeBatchCommandBuffer = cb
+    return Unmanaged.passUnretained(cb as AnyObject).toOpaque()
+}
+
+@_cdecl("gpu_bridge_end_batch")
+public func gpuBridgeEndBatch() -> UnsafeMutableRawPointer? {
+    batchLock.lock()
+    defer { batchLock.unlock() }
+    guard let cb = activeBatchCommandBuffer else { return nil }
+    cb.commit()
+    activeBatchCommandBuffer = nil
+    return Unmanaged.passRetained(cb as AnyObject).toOpaque()
+}
+
+@_cdecl("gpu_bridge_abort_batch")
+public func gpuBridgeAbortBatch() {
+    batchLock.lock()
+    defer { batchLock.unlock() }
+    activeBatchCommandBuffer = nil
 }
