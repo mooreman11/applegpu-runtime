@@ -840,6 +840,55 @@ fn attention_causal(q: &GpuTensor, k: &GpuTensor, v: &GpuTensor) -> PyResult<Gpu
     Ok(GpuTensor { id, destroyed: Cell::new(false) })
 }
 
+#[pyfunction]
+#[pyo3(signature = (input, weight, stride=1, padding=0))]
+fn conv1d(input: &GpuTensor, weight: &GpuTensor, stride: usize, padding: usize) -> PyResult<GpuTensor> {
+    let mut rt = RUNTIME_LAZY.lock().unwrap();
+    let id = applegpu_core::ops::conv1d(&mut rt, input.id, weight.id, stride, padding)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(GpuTensor { id, destroyed: Cell::new(false) })
+}
+
+#[pyfunction]
+#[pyo3(signature = (input, weight, stride_h=1, stride_w=1, pad_h=0, pad_w=0))]
+fn conv2d(input: &GpuTensor, weight: &GpuTensor, stride_h: usize, stride_w: usize, pad_h: usize, pad_w: usize) -> PyResult<GpuTensor> {
+    let mut rt = RUNTIME_LAZY.lock().unwrap();
+    let id = applegpu_core::ops::conv2d(&mut rt, input.id, weight.id, (stride_h, stride_w), (pad_h, pad_w))
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(GpuTensor { id, destroyed: Cell::new(false) })
+}
+
+#[pyfunction]
+#[pyo3(signature = (input, running_mean, running_var, weight, bias, eps=1e-5))]
+fn batch_norm(input: &GpuTensor, running_mean: &GpuTensor, running_var: &GpuTensor, weight: &GpuTensor, bias: &GpuTensor, eps: f32) -> PyResult<GpuTensor> {
+    let mut rt = RUNTIME_LAZY.lock().unwrap();
+    let id = applegpu_core::ops::batch_norm(&mut rt, input.id, running_mean.id, running_var.id, weight.id, bias.id, eps)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(GpuTensor { id, destroyed: Cell::new(false) })
+}
+
+#[pyfunction]
+#[pyo3(signature = (input, kh=2, kw=2, stride_h=0, stride_w=0, pad_h=0, pad_w=0))]
+fn max_pool2d(input: &GpuTensor, kh: usize, kw: usize, stride_h: usize, stride_w: usize, pad_h: usize, pad_w: usize) -> PyResult<GpuTensor> {
+    let sh = if stride_h == 0 { kh } else { stride_h };
+    let sw = if stride_w == 0 { kw } else { stride_w };
+    let mut rt = RUNTIME_LAZY.lock().unwrap();
+    let id = applegpu_core::ops::max_pool2d(&mut rt, input.id, (kh, kw), (sh, sw), (pad_h, pad_w))
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(GpuTensor { id, destroyed: Cell::new(false) })
+}
+
+#[pyfunction]
+#[pyo3(signature = (input, kh=2, kw=2, stride_h=0, stride_w=0, pad_h=0, pad_w=0))]
+fn avg_pool2d(input: &GpuTensor, kh: usize, kw: usize, stride_h: usize, stride_w: usize, pad_h: usize, pad_w: usize) -> PyResult<GpuTensor> {
+    let sh = if stride_h == 0 { kh } else { stride_h };
+    let sw = if stride_w == 0 { kw } else { stride_w };
+    let mut rt = RUNTIME_LAZY.lock().unwrap();
+    let id = applegpu_core::ops::avg_pool2d(&mut rt, input.id, (kh, kw), (sh, sw), (pad_h, pad_w))
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(GpuTensor { id, destroyed: Cell::new(false) })
+}
+
 // ============================================================
 // Scheduler bindings
 // ============================================================
@@ -1036,5 +1085,10 @@ fn applegpu_runtime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(pool_stats, m)?)?;
     m.add_function(wrap_pyfunction!(pool_drain, m)?)?;
     m.add_function(wrap_pyfunction!(set_pool_watermark, m)?)?;
+    m.add_function(wrap_pyfunction!(conv1d, m)?)?;
+    m.add_function(wrap_pyfunction!(conv2d, m)?)?;
+    m.add_function(wrap_pyfunction!(batch_norm, m)?)?;
+    m.add_function(wrap_pyfunction!(max_pool2d, m)?)?;
+    m.add_function(wrap_pyfunction!(avg_pool2d, m)?)?;
     Ok(())
 }

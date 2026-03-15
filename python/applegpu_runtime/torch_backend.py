@@ -577,6 +577,62 @@ def _op_embedding(weight, indices, padding_idx=-1, scale_grad_by_freq=False, spa
 
 
 # ============================================================
+# CNN ops
+# ============================================================
+
+@register_op(torch.ops.aten.convolution.default)
+def _convolution(input, weight, bias, stride, padding, dilation, transposed, output_padding, groups):
+    # Only support non-transposed, dilation=1, groups=1
+    if transposed or any(d != 1 for d in dilation) or groups != 1:
+        return NotImplemented
+
+    ndim = len(stride)
+    if ndim == 1:
+        result = _wrap(gpu.conv1d(_unwrap(input), _unwrap(weight), stride[0], padding[0]))
+    elif ndim == 2:
+        result = _wrap(gpu.conv2d(_unwrap(input), _unwrap(weight), stride[0], stride[1], padding[0], padding[1]))
+    else:
+        return NotImplemented
+
+    if bias is not None:
+        # Add bias: result is [B, OC, ...], bias is [OC]
+        # Need to reshape bias for broadcasting
+        result_cpu = result.to_torch_cpu()
+        result_cpu = result_cpu + bias.reshape(1, -1, *([1] * ndim))
+        result = ApplegpuTensor.from_torch(result_cpu)
+    return result
+
+
+@register_op(torch.ops.aten._native_batch_norm_legit_no_training.default)
+def _batch_norm(input, weight, bias, running_mean, running_var, momentum, eps):
+    result = _wrap(gpu.batch_norm(_unwrap(input), _unwrap(running_mean), _unwrap(running_var), _unwrap(weight), _unwrap(bias), eps))
+    # Returns (output, mean, rstd) -- return dummies for mean/rstd
+    return result, torch.tensor([]), torch.tensor([])
+
+
+@register_op(torch.ops.aten.max_pool2d_with_indices.default)
+def _max_pool2d(input, kernel_size, stride=None, padding=(0, 0), dilation=(1, 1), ceil_mode=False):
+    if stride is None or len(stride) == 0:
+        stride = kernel_size
+    kh, kw = kernel_size[0], kernel_size[1] if len(kernel_size) > 1 else kernel_size[0]
+    sh, sw = stride[0], stride[1] if len(stride) > 1 else stride[0]
+    ph, pw = padding[0], padding[1] if len(padding) > 1 else padding[0]
+    result = _wrap(gpu.max_pool2d(_unwrap(input), kh, kw, sh, sw, ph, pw))
+    # Returns (output, indices) -- dummy indices
+    return result, torch.tensor([0])
+
+
+@register_op(torch.ops.aten.avg_pool2d.default)
+def _avg_pool2d(input, kernel_size, stride=None, padding=(0, 0), ceil_mode=False, count_include_pad=True, divisor_override=None):
+    if stride is None or len(stride) == 0:
+        stride = kernel_size
+    kh, kw = kernel_size[0], kernel_size[1] if len(kernel_size) > 1 else kernel_size[0]
+    sh, sw = stride[0], stride[1] if len(stride) > 1 else stride[0]
+    ph, pw = padding[0], padding[1] if len(padding) > 1 else padding[0]
+    return _wrap(gpu.avg_pool2d(_unwrap(input), kh, kw, sh, sw, ph, pw))
+
+
+# ============================================================
 # ApplegpuTensor class
 # ============================================================
 

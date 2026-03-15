@@ -45,6 +45,10 @@ from applegpu_runtime.applegpu_runtime import (
     sum,
     mean,
     attention_causal,
+    abs,
+    sign,
+    pow,
+    clamp,
     where_cond,
     masked_fill,
     triu,
@@ -62,6 +66,11 @@ from applegpu_runtime.applegpu_runtime import (
     pool_stats,
     pool_drain,
     set_pool_watermark,
+    conv1d,
+    conv2d,
+    batch_norm,
+    max_pool2d,
+    avg_pool2d,
 )
 
 __version__ = version()
@@ -214,6 +223,10 @@ __all__ = [
     "sum",
     "mean",
     "attention_causal",
+    "abs",
+    "sign",
+    "pow",
+    "clamp",
     "where_cond",
     "masked_fill",
     "triu",
@@ -236,4 +249,9 @@ __all__ = [
     "generate_text",
     "enable_torch_backend",
     "to_applegpu",
+    "conv1d",
+    "conv2d",
+    "batch_norm",
+    "max_pool2d",
+    "avg_pool2d",
 ]

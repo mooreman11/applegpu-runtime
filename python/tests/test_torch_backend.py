@@ -665,6 +665,53 @@ class TestAddmm:
         assert torch.ops.aten.addmm.default in SUPPORTED_OPS
 
 
+class TestCNNOps:
+    """CNN ops: conv1d, conv2d, batch_norm, max_pool2d, avg_pool2d."""
+
+    def test_conv1d_basic(self):
+        from applegpu_runtime.torch_backend import ApplegpuTensor
+        input = ApplegpuTensor.from_torch(torch.randn(1, 3, 10))
+        weight = ApplegpuTensor.from_torch(torch.randn(4, 3, 3))
+        result = gpu.conv1d(input._gpu_tensor, weight._gpu_tensor, stride=1, padding=0)
+        assert result.shape == [1, 4, 8]
+
+    def test_conv2d_basic(self):
+        from applegpu_runtime.torch_backend import ApplegpuTensor
+        input = ApplegpuTensor.from_torch(torch.randn(1, 3, 8, 8))
+        weight = ApplegpuTensor.from_torch(torch.randn(16, 3, 3, 3))
+        result = gpu.conv2d(input._gpu_tensor, weight._gpu_tensor, stride_h=1, stride_w=1, pad_h=1, pad_w=1)
+        assert result.shape == [1, 16, 8, 8]
+
+    def test_max_pool2d_basic(self):
+        from applegpu_runtime.torch_backend import ApplegpuTensor
+        input = ApplegpuTensor.from_torch(torch.randn(1, 3, 4, 4))
+        result = gpu.max_pool2d(input._gpu_tensor, kh=2, kw=2)
+        assert result.shape == [1, 3, 2, 2]
+
+    def test_avg_pool2d_basic(self):
+        from applegpu_runtime.torch_backend import ApplegpuTensor
+        input = ApplegpuTensor.from_torch(torch.randn(1, 3, 4, 4))
+        result = gpu.avg_pool2d(input._gpu_tensor, kh=2, kw=2)
+        assert result.shape == [1, 3, 2, 2]
+
+    def test_batch_norm_basic(self):
+        from applegpu_runtime.torch_backend import ApplegpuTensor
+        input = ApplegpuTensor.from_torch(torch.randn(1, 4, 2, 2))
+        mean = ApplegpuTensor.from_torch(torch.zeros(4))
+        var = ApplegpuTensor.from_torch(torch.ones(4))
+        weight = ApplegpuTensor.from_torch(torch.ones(4))
+        bias = ApplegpuTensor.from_torch(torch.zeros(4))
+        result = gpu.batch_norm(input._gpu_tensor, mean._gpu_tensor, var._gpu_tensor, weight._gpu_tensor, bias._gpu_tensor, eps=1e-5)
+        assert result.shape == [1, 4, 2, 2]
+
+    def test_conv2d_with_padding(self):
+        from applegpu_runtime.torch_backend import ApplegpuTensor
+        input = ApplegpuTensor.from_torch(torch.randn(2, 1, 5, 5))
+        weight = ApplegpuTensor.from_torch(torch.randn(8, 1, 3, 3))
+        result = gpu.conv2d(input._gpu_tensor, weight._gpu_tensor, stride_h=2, stride_w=2, pad_h=1, pad_w=1)
+        assert result.shape == [2, 8, 3, 3]
+
+
 class TestDispatchRegistry:
     """Test that the dispatch registry is wired correctly."""
 
