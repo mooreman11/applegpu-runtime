@@ -152,7 +152,7 @@ _Enable model training on Metal GPU. Currently inference-only._
 - [ ] **Backward ops for element-wise** — grad_add, grad_mul, grad_relu, grad_gelu, grad_exp, grad_log, grad_sqrt, grad_tanh, grad_abs, grad_sign
 - [ ] **Backward ops for matrix** — grad_matmul, grad_softmax, grad_layer_norm
 - [ ] **Backward ops for CNN** — grad_conv2d, grad_batch_norm, grad_max_pool2d, grad_avg_pool2d
-- [ ] **PyTorch autograd integration** — register backward ops via torch.autograd.Function
+- [x] **PyTorch autograd integration** — backward ops flow through __torch_dispatch__, MLP training verified
 - [ ] **Gradient accumulation** — in-place parameter updates
 - [ ] **Optimizer kernels** — SGD, Adam on Metal GPU
 
