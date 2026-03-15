@@ -1,7 +1,9 @@
 use std::io;
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 use applegpu_core::buffer::Buffer;
 use applegpu_core::device::Device;
@@ -277,9 +279,56 @@ fn handle_connection(shared: Arc<SharedState>, mut stream: UnixStream) {
     }
 }
 
+/// Default PID file path: ~/.applegpu/gpu-service.pid
+fn default_pid_path() -> String {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    format!("{}/.applegpu/gpu-service.pid", home)
+}
+
+/// Check if a PID file exists and whether the referenced process is still alive.
+/// If the process is alive, return an error (already running).
+/// If the PID file is stale (process dead), remove it and return Ok.
+/// If no PID file exists, return Ok.
+fn check_stale_pid(pid_path: &str) -> io::Result<()> {
+    if let Ok(content) = std::fs::read_to_string(pid_path) {
+        if let Ok(pid) = content.trim().parse::<i32>() {
+            // Check if process exists (signal 0 = no signal, just check)
+            let result = unsafe { libc::kill(pid, 0) };
+            if result == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::AddrInUse,
+                    format!("gpu-service already running (PID {})", pid),
+                ));
+            }
+        }
+        // Stale PID file — remove it
+        std::fs::remove_file(pid_path).ok();
+    }
+    Ok(())
+}
+
+/// Write the current process PID to the given path.
+fn write_pid_file(pid_path: &str) -> io::Result<()> {
+    if let Some(parent) = std::path::Path::new(pid_path).parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(pid_path, format!("{}", std::process::id()))
+}
+
+/// Remove the PID file (best-effort).
+fn remove_pid_file(pid_path: &str) {
+    std::fs::remove_file(pid_path).ok();
+}
+
 fn main() {
     let socket_path = std::env::var("APPLEGPU_SOCKET")
         .unwrap_or_else(|_| applegpu_core::ipc::default_socket_path());
+    let pid_path = std::env::var("APPLEGPU_PID_FILE")
+        .unwrap_or_else(|_| default_pid_path());
+
+    // Check for stale or active PID file before binding
+    check_stale_pid(&pid_path).expect("PID check failed");
+    write_pid_file(&pid_path).expect("Failed to write PID file");
 
     if let Some(parent) = std::path::Path::new(&socket_path).parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -294,18 +343,43 @@ fn main() {
         device,
     });
 
+    // Set up signal handling for graceful shutdown
+    let running = Arc::new(AtomicBool::new(true));
+    let r = running.clone();
+    ctrlc::set_handler(move || {
+        r.store(false, Ordering::SeqCst);
+    })
+    .expect("Error setting Ctrl-C handler");
+
     let listener = UnixListener::bind(&socket_path)
         .expect("Failed to bind Unix socket");
 
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
+    // Set a timeout so we can periodically check the shutdown flag
+    listener
+        .set_nonblocking(false)
+        .ok();
+
+    // Use a timeout-based accept loop so we can check the `running` flag
+    while running.load(Ordering::SeqCst) {
+        // Set a short timeout for each accept cycle
+        listener.set_nonblocking(true).ok();
+        match listener.accept() {
+            Ok((stream, _)) => {
+                stream.set_nonblocking(false).ok();
                 let shared = shared.clone();
                 thread::spawn(move || handle_connection(shared, stream));
+            }
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                // No pending connection — sleep briefly and retry
+                thread::sleep(Duration::from_millis(100));
             }
             Err(e) => eprintln!("Connection error: {}", e),
         }
     }
+
+    println!("Shutting down gpu-service...");
+    remove_pid_file(&pid_path);
+    let _ = std::fs::remove_file(&socket_path);
 }
 
 #[cfg(test)]
@@ -618,5 +692,101 @@ mod tests {
             let back = core_dtype_to_wire(core);
             assert_eq!(back, wire_val, "Roundtrip failed for wire dtype {}", wire_val);
         }
+    }
+
+    // --- PID file tests ---
+
+    #[test]
+    fn pid_file_created_on_write() {
+        let dir = std::env::temp_dir().join("applegpu_test_pid_create");
+        let _ = std::fs::remove_dir_all(&dir);
+        let pid_path = dir.join("gpu-service.pid");
+        let pid_str = pid_path.to_str().unwrap();
+
+        write_pid_file(pid_str).expect("Failed to write PID file");
+        assert!(pid_path.exists(), "PID file should exist after write");
+
+        let content = std::fs::read_to_string(&pid_path).unwrap();
+        let pid: u32 = content.trim().parse().expect("PID should be a number");
+        assert_eq!(pid, std::process::id());
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stale_pid_detection_cleans_up() {
+        let dir = std::env::temp_dir().join("applegpu_test_stale_pid");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pid_path = dir.join("gpu-service.pid");
+        let pid_str = pid_path.to_str().unwrap();
+
+        // Write a PID that almost certainly doesn't exist (very high number)
+        std::fs::write(&pid_path, "999999999").unwrap();
+        assert!(pid_path.exists());
+
+        // check_stale_pid should detect the stale PID and remove the file
+        check_stale_pid(pid_str).expect("Should succeed for stale PID");
+        assert!(!pid_path.exists(), "Stale PID file should be removed");
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn double_start_detection_returns_error() {
+        let dir = std::env::temp_dir().join("applegpu_test_double_start");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pid_path = dir.join("gpu-service.pid");
+        let pid_str = pid_path.to_str().unwrap();
+
+        // Write our own PID (which is definitely alive)
+        std::fs::write(&pid_path, format!("{}", std::process::id())).unwrap();
+
+        // check_stale_pid should return an error because the process is alive
+        let result = check_stale_pid(pid_str);
+        assert!(result.is_err(), "Should error when process is still alive");
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AddrInUse);
+        assert!(
+            err.to_string().contains("already running"),
+            "Error message should mention 'already running', got: {}",
+            err
+        );
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn check_stale_pid_no_file_is_ok() {
+        let dir = std::env::temp_dir().join("applegpu_test_no_pid");
+        let _ = std::fs::remove_dir_all(&dir);
+        let pid_path = dir.join("gpu-service.pid");
+        let pid_str = pid_path.to_str().unwrap();
+
+        // No PID file exists — should be fine
+        let result = check_stale_pid(pid_str);
+        assert!(result.is_ok(), "No PID file should be fine");
+    }
+
+    #[test]
+    fn remove_pid_file_cleans_up() {
+        let dir = std::env::temp_dir().join("applegpu_test_remove_pid");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pid_path = dir.join("gpu-service.pid");
+        let pid_str = pid_path.to_str().unwrap();
+
+        write_pid_file(pid_str).unwrap();
+        assert!(pid_path.exists());
+
+        remove_pid_file(pid_str);
+        assert!(!pid_path.exists(), "PID file should be removed after cleanup");
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -10,3 +10,5 @@ path = "src/main.rs"
 [dependencies]
 applegpu-core = { path = "../core" }
 applegpu-wire = { path = "../wire" }
+ctrlc = "3"
+libc = "0.2"
