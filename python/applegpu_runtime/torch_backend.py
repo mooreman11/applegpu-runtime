@@ -1134,6 +1134,58 @@ def _flatten(input, start_dim=0, end_dim=-1):
 
 
 # ============================================================
+# Backward ops (native Metal kernels)
+# ============================================================
+
+@register_op(torch.ops.aten._softmax_backward_data.default)
+def _op_softmax_backward(grad_output, output, dim, input_dtype):
+    """Softmax backward — native Metal kernel."""
+    go_gpu = _unwrap(grad_output)
+    out_gpu = _unwrap(output)
+    result = gpu.softmax_backward(go_gpu, out_gpu)
+    return _wrap(result)
+
+
+@register_op(torch.ops.aten.native_layer_norm_backward.default)
+def _op_layer_norm_backward(grad_output, input, normalized_shape, mean, rstd, weight, bias, output_mask):
+    """Layer norm backward — native Metal kernel for grad_input, CPU for grad_weight/grad_beta."""
+    go_gpu = _unwrap(grad_output)
+    input_gpu = _unwrap(input)
+    weight_gpu = _unwrap(weight) if weight is not None else None
+
+    # grad_input via native Metal kernel
+    if weight_gpu is not None:
+        grad_input = _wrap(gpu.layer_norm_backward(go_gpu, input_gpu, weight_gpu, 1e-5))
+    else:
+        # Without weight, layer_norm_backward may not be available — fallback
+        return NotImplemented
+
+    # grad_weight and grad_beta: compute on CPU (sum over batch dims)
+    # These are small tensors — not a performance bottleneck
+    go_cpu = grad_output.to_torch_cpu() if isinstance(grad_output, ApplegpuTensor) else grad_output
+    input_cpu = input.to_torch_cpu() if isinstance(input, ApplegpuTensor) else input
+
+    # Recompute normalized input
+    mean_val = input_cpu.mean(dim=-1, keepdim=True)
+    var_val = input_cpu.var(dim=-1, keepdim=True, unbiased=False)
+    x_norm = (input_cpu - mean_val) / torch.sqrt(var_val + 1e-5)
+
+    # Flatten batch dims for summation
+    flat_go = go_cpu.reshape(-1, normalized_shape[0])
+    flat_xnorm = x_norm.reshape(-1, normalized_shape[0])
+
+    grad_weight = (flat_go * flat_xnorm).sum(dim=0) if output_mask[1] else None
+    grad_bias = flat_go.sum(dim=0) if output_mask[2] else None
+
+    if grad_weight is not None:
+        grad_weight = ApplegpuTensor.from_torch(grad_weight)
+    if grad_bias is not None:
+        grad_bias = ApplegpuTensor.from_torch(grad_bias)
+
+    return grad_input, grad_weight, grad_bias
+
+
+# ============================================================
 # ApplegpuTensor class
 # ============================================================
 

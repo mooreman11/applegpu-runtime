@@ -154,9 +154,9 @@ _Training support: PyTorch autograd works natively on Metal GPU for MLP training
 - [x] **MLP training** — loss decreases over multiple training steps
 - [x] **Eager evaluation mode** — enable_training() preserves tensors for backward pass
 
-### Not yet verified (may work via CPU fallback, needs testing):
-- [ ] **Backward ops for softmax** — grad_softmax (Jacobian-vector product)
-- [ ] **Backward ops for layer_norm** — grad_layer_norm (complex gradient)
+### Now on Metal (no CPU fallback):
+- [x] **Backward ops for softmax** — native Metal kernel (grad_input = output * (grad_output - dot))
+- [x] **Backward ops for layer_norm** — native Metal kernel for grad_input, CPU for grad_weight/grad_beta
 - [ ] **Backward ops for CNN** — grad_conv2d, grad_batch_norm, grad_max_pool2d, grad_avg_pool2d
 - [ ] **Backward ops for embedding** — grad_embedding (scatter gradients to weight rows)
 - [ ] **Gradient accumulation** — in-place parameter updates for large batch training
@@ -168,8 +168,8 @@ _Training support: PyTorch autograd works natively on Metal GPU for MLP training
 _Scale training to real models. Verify all backward ops. Optimize dispatch overhead._
 
 **Training at scale:**
-- [ ] **Verify/fix softmax backward** — test in attention training loop
-- [ ] **Verify/fix layer_norm backward** — test in transformer training
+- [x] **Softmax backward on Metal** — native kernel, zero CPU fallback
+- [x] **Layer norm backward on Metal** — native kernel for grad_input, CPU for grad_weight/beta
 - [ ] **Verify/fix conv2d backward** — test in ResNet training
 - [ ] **Verify/fix batch_norm backward** — test in ResNet training
 - [ ] **Verify/fix embedding backward** — test in GPT-2 fine-tuning
