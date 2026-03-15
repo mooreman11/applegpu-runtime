@@ -1045,6 +1045,31 @@ fn layer_norm_backward(grad_output: &GpuTensor, input: &GpuTensor, gamma: &GpuTe
     Ok(GpuTensor { id, destroyed: Cell::new(false) })
 }
 
+#[pyfunction]
+fn conv2d_backward_input(grad_output: &GpuTensor, weight: &GpuTensor, in_h: usize, in_w: usize, stride_h: usize, stride_w: usize, pad_h: usize, pad_w: usize) -> PyResult<GpuTensor> {
+    let mut rt = RUNTIME_LAZY.lock().unwrap();
+    let id = applegpu_core::ops::conv2d_backward_input(&mut rt, grad_output.id, weight.id, in_h, in_w, (stride_h, stride_w), (pad_h, pad_w))
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(GpuTensor { id, destroyed: Cell::new(false) })
+}
+
+#[pyfunction]
+fn embedding_backward(grad_output: &GpuTensor, indices: &GpuTensor, num_weights: usize) -> PyResult<GpuTensor> {
+    let mut rt = RUNTIME_LAZY.lock().unwrap();
+    let id = applegpu_core::ops::embedding_backward(&mut rt, grad_output.id, indices.id, num_weights)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(GpuTensor { id, destroyed: Cell::new(false) })
+}
+
+#[pyfunction]
+#[pyo3(signature = (grad_output, weight, running_var, eps=1e-5))]
+fn batch_norm_backward(grad_output: &GpuTensor, weight: &GpuTensor, running_var: &GpuTensor, eps: f32) -> PyResult<GpuTensor> {
+    let mut rt = RUNTIME_LAZY.lock().unwrap();
+    let id = applegpu_core::ops::batch_norm_backward(&mut rt, grad_output.id, weight.id, running_var.id, eps)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(GpuTensor { id, destroyed: Cell::new(false) })
+}
+
 #[pymodule]
 fn applegpu_runtime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<GpuTensor>()?;
@@ -1120,5 +1145,8 @@ fn applegpu_runtime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(avg_pool2d, m)?)?;
     m.add_function(wrap_pyfunction!(softmax_backward, m)?)?;
     m.add_function(wrap_pyfunction!(layer_norm_backward, m)?)?;
+    m.add_function(wrap_pyfunction!(conv2d_backward_input, m)?)?;
+    m.add_function(wrap_pyfunction!(embedding_backward, m)?)?;
+    m.add_function(wrap_pyfunction!(batch_norm_backward, m)?)?;
     Ok(())
 }

@@ -740,3 +740,78 @@ class TestDispatchRegistry:
             result = torch.cos(a)
             assert any("not supported" in str(warning.message) for warning in w)
         assert isinstance(result, ApplegpuTensor)
+
+    def test_backward_ops_registered(self):
+        """Backward ops are in the dispatch table."""
+        from applegpu_runtime.torch_backend import SUPPORTED_OPS
+        assert torch.ops.aten.convolution_backward.default in SUPPORTED_OPS
+        assert torch.ops.aten.embedding_dense_backward.default in SUPPORTED_OPS
+        assert torch.ops.aten.native_batch_norm_backward.default in SUPPORTED_OPS
+
+
+# ============================================================
+# Backward op dispatch tests
+# ============================================================
+
+class TestBackwardOps:
+    """Tests for backward op dispatch to Metal."""
+
+    def test_conv2d_backward_dispatch(self):
+        """Conv2d backward dispatches grad_input on Metal."""
+        from applegpu_runtime.torch_backend import ApplegpuTensor
+        gpu.enable_training()
+        try:
+            x = ApplegpuTensor.from_torch(torch.randn(1, 3, 8, 8, requires_grad=True))
+            conv = torch.nn.Conv2d(3, 16, 3, padding=1, bias=False)
+            conv = gpu.to_applegpu(conv)
+            y = conv(x)
+            y.sum().backward()
+            assert x.grad is not None
+            assert x.grad.shape == (1, 3, 8, 8)
+        finally:
+            gpu.disable_training()
+
+    def test_embedding_backward_dispatch(self):
+        """Embedding backward dispatches on Metal."""
+        from applegpu_runtime.torch_backend import ApplegpuTensor
+        gpu.enable_training()
+        try:
+            emb = torch.nn.Embedding(10, 4)
+            emb = gpu.to_applegpu(emb)
+            idx = ApplegpuTensor.from_torch(torch.tensor([1, 3, 5]))
+            y = emb(idx)
+            y.sum().backward()
+            assert emb.weight.grad is not None
+        finally:
+            gpu.disable_training()
+
+    def test_all_backward_no_fallback(self):
+        """All backward ops should run on Metal (no CPU fallback warnings)."""
+        from applegpu_runtime.torch_backend import ApplegpuTensor, _warned_ops
+        gpu.enable_training()
+        _warned_ops.clear()
+        try:
+            with warnings.catch_warnings(record=True) as w:
+                warnings.simplefilter("always")
+
+                # Softmax backward
+                x = ApplegpuTensor.from_torch(torch.randn(4, 8, requires_grad=True))
+                y = torch.softmax(x, dim=-1)
+                y.sum().backward()
+
+                # Layer norm backward
+                x2 = ApplegpuTensor.from_torch(torch.randn(4, 8, requires_grad=True))
+                ln = torch.nn.LayerNorm(8)
+                ln = gpu.to_applegpu(ln)
+                y2 = ln(x2)
+                y2.sum().backward()
+
+                # Check no fallback warnings for backward ops
+                backward_fallbacks = [
+                    str(warning.message) for warning in w
+                    if "not supported" in str(warning.message)
+                    and "backward" in str(warning.message).lower()
+                ]
+                assert len(backward_fallbacks) == 0, f"Unexpected backward fallbacks: {backward_fallbacks}"
+        finally:
+            gpu.disable_training()

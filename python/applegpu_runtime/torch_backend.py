@@ -1185,6 +1185,79 @@ def _op_layer_norm_backward(grad_output, input, normalized_shape, mean, rstd, we
     return grad_input, grad_weight, grad_bias
 
 
+@register_op(torch.ops.aten.convolution_backward.default)
+def _op_conv_backward(grad_output, input, weight, bias_sizes, stride, padding, dilation, transposed, output_padding, groups, output_mask):
+    """Conv2d backward — grad_input on Metal, grad_weight/grad_bias on CPU."""
+    grad_input = None
+    grad_weight = None
+    grad_bias = None
+
+    if output_mask[0]:
+        # grad_input on Metal
+        in_shape = input.shape if isinstance(input, ApplegpuTensor) else input.shape
+        in_h, in_w = in_shape[-2], in_shape[-1]
+        sh, sw = stride[0], stride[1] if len(stride) > 1 else stride[0]
+        ph, pw = padding[0], padding[1] if len(padding) > 1 else padding[0]
+        grad_input = _wrap(gpu.conv2d_backward_input(
+            _unwrap(grad_output), _unwrap(weight),
+            int(in_h), int(in_w), int(sh), int(sw), int(ph), int(pw)
+        ))
+
+    if output_mask[1]:
+        # grad_weight on CPU (not hot path)
+        go_cpu = grad_output.to_torch_cpu() if isinstance(grad_output, ApplegpuTensor) else grad_output
+        in_cpu = input.to_torch_cpu() if isinstance(input, ApplegpuTensor) else input
+        w_cpu = weight.to_torch_cpu() if isinstance(weight, ApplegpuTensor) else weight
+        # Use PyTorch's CPU conv backward for weight gradient
+        grad_weight_cpu = torch.nn.grad.conv2d_weight(in_cpu, w_cpu.shape, go_cpu, stride=stride, padding=padding, dilation=dilation, groups=groups)
+        grad_weight = ApplegpuTensor.from_torch(grad_weight_cpu)
+
+    if output_mask[2] and bias_sizes is not None:
+        # grad_bias = sum of grad_output over batch and spatial dims
+        go_cpu = grad_output.to_torch_cpu() if isinstance(grad_output, ApplegpuTensor) else grad_output
+        grad_bias = ApplegpuTensor.from_torch(go_cpu.sum(dim=[0, 2, 3]))
+
+    return grad_input, grad_weight, grad_bias
+
+
+@register_op(torch.ops.aten.embedding_dense_backward.default)
+def _op_embedding_backward(grad_output, indices, num_weights, padding_idx, scale_grad_by_freq):
+    """Embedding backward — atomic scatter-add on Metal."""
+    idx_gpu = _unwrap(indices)
+    # Our embedding kernel requires Int32 indices; convert Int64 if needed
+    if idx_gpu.dtype == "int64":
+        idx_cpu = indices.to_torch_cpu() if isinstance(indices, ApplegpuTensor) else indices
+        idx_cpu = idx_cpu.to(torch.int32)
+        idx_gpu = gpu.from_torch(idx_cpu)
+    return _wrap(gpu.embedding_backward(_unwrap(grad_output), idx_gpu, int(num_weights)))
+
+
+@register_op(torch.ops.aten.native_batch_norm_backward.default)
+def _op_batch_norm_backward(grad_output, input, weight, running_mean, running_var, save_mean, save_invstd, train, eps, output_mask):
+    """Batch norm backward (inference mode) — grad_input on Metal."""
+    grad_input = None
+    grad_weight = None
+    grad_bias = None
+
+    if output_mask[0]:
+        grad_input = _wrap(gpu.batch_norm_backward(_unwrap(grad_output), _unwrap(weight), _unwrap(running_var), eps))
+
+    if output_mask[1]:
+        # grad_weight on CPU
+        go_cpu = grad_output.to_torch_cpu() if isinstance(grad_output, ApplegpuTensor) else grad_output
+        in_cpu = input.to_torch_cpu() if isinstance(input, ApplegpuTensor) else input
+        rm_cpu = running_mean.to_torch_cpu() if isinstance(running_mean, ApplegpuTensor) else running_mean
+        rv_cpu = running_var.to_torch_cpu() if isinstance(running_var, ApplegpuTensor) else running_var
+        x_norm = (in_cpu - rm_cpu.reshape(1, -1, 1, 1)) / torch.sqrt(rv_cpu.reshape(1, -1, 1, 1) + eps)
+        grad_weight = ApplegpuTensor.from_torch((go_cpu * x_norm).sum(dim=[0, 2, 3]))
+
+    if output_mask[2]:
+        go_cpu = grad_output.to_torch_cpu() if isinstance(grad_output, ApplegpuTensor) else grad_output
+        grad_bias = ApplegpuTensor.from_torch(go_cpu.sum(dim=[0, 2, 3]))
+
+    return grad_input, grad_weight, grad_bias
+
+
 # ============================================================
 # ApplegpuTensor class
 # ============================================================
