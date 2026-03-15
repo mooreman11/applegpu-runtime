@@ -55,11 +55,11 @@ enum ServiceManager {
 
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
-        socketPath.withCString { ptr in
-            withUnsafeMutablePointer(to: &addr.sun_path) { dest in
-                _ = memcpy(
-                    dest, ptr,
-                    min(Int(socketPath.count), MemoryLayout.size(ofValue: addr.sun_path) - 1))
+        let pathBytes = socketPath.utf8CString
+        let maxLen = MemoryLayout.size(ofValue: addr.sun_path) - 1
+        withUnsafeMutableBytes(of: &addr.sun_path) { dest in
+            for i in 0..<min(pathBytes.count, maxLen) {
+                dest[i] = UInt8(bitPattern: pathBytes[i])
             }
         }
 
@@ -77,6 +77,8 @@ enum ServiceManager {
             "/usr/local/bin/gpu-service",
             "\(home)/.applegpu/bin/gpu-service",
             // Development: cargo target
+            "\(cwd)/target/release/gpu-service",
+            "\(cwd)/target/debug/gpu-service",
             "\(cwd)/target/release/applegpu-service",
             "\(cwd)/target/debug/applegpu-service",
         ]
@@ -87,6 +89,7 @@ enum ServiceManager {
 enum GPUContainerError: Error, CustomStringConvertible {
     case serviceNotFound
     case serviceStartTimeout
+    case containerCliNotFound
 
     var description: String {
         switch self {
@@ -95,6 +98,8 @@ enum GPUContainerError: Error, CustomStringConvertible {
                 "gpu-service binary not found. Install it or build with: cargo build -p applegpu-service --release"
         case .serviceStartTimeout:
             return "gpu-service failed to start within 5 seconds"
+        case .containerCliNotFound:
+            return "Apple container CLI not found. Install with: brew install container"
         }
     }
 }

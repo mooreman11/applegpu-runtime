@@ -1,5 +1,4 @@
 import ArgumentParser
-import Containerization
 import Foundation
 
 struct Run: AsyncParsableCommand {
@@ -27,54 +26,62 @@ struct Run: AsyncParsableCommand {
         print("Ensuring gpu-service is running...")
         try await ServiceManager.ensureRunning(socketPath: socketPath)
 
-        // Configure container
-        // NOTE: The exact Containerization API depends on the framework version.
-        // The code below follows the patterns from the cctl example in the
-        // Containerization repository. Adapt as needed for API changes.
+        // Build the `container run` command
+        // Apple's `container` CLI handles image pull, VM creation, and process execution.
+        // We configure it with our gpu-service socket mount and environment.
+        var args: [String] = ["run"]
 
-        // TODO(macOS 26): Uncomment and adapt when Containerization framework is available.
-        //
-        // var config = LinuxContainer.Configuration()
-        // config.cpus = cpus
-        // config.memoryInBytes = UInt64(memory) * 1024 * 1024
-        //
-        // // Socket relay: host gpu-service -> container
-        // config.sockets = [
-        //     UnixSocketConfiguration(
-        //         source: URL(fileURLWithPath: socketPath),
-        //         destination: URL(fileURLWithPath: "/var/run/applegpu.sock"),
-        //         direction: .into
-        //     )
-        // ]
-        //
-        // // Environment
-        // config.process.environment["APPLEGPU_SOCKET"] = "/var/run/applegpu.sock"
-        // config.process.environment["PYTHONPATH"] = "/opt/applegpu"
-        //
-        // // Set command
-        // if !command.isEmpty {
-        //     config.process.arguments = command
-        // }
-        //
-        // // Image pull + container creation (check cctl example for correct API):
-        // let imageStore = try await ImageStore(...)
-        // let rootfs = try await imageStore.pull(image)
-        // let container = LinuxContainer(id: UUID().uuidString, rootfs: rootfs, config: config)
-        // try await container.start()
-        // let process = try await container.spawn(config.process)
-        // let exitStatus = try await process.wait()
+        // Resource limits
+        args += ["--cpus", "\(cpus)"]
+        args += ["--memory", "\(memory)M"]
+
+        // Mount the directory containing the gpu-service socket into the container
+        let socketDir = (socketPath as NSString).deletingLastPathComponent
+        let socketName = (socketPath as NSString).lastPathComponent
+        args += ["-v", "\(socketDir):/var/run/applegpu"]
+        args += ["--env", "APPLEGPU_SOCKET=/var/run/applegpu/\(socketName)"]
+
+        // Image
+        args += [image]
+
+        // Command — passed directly after image (no -- separator)
+        if !command.isEmpty {
+            // Strip leading "--" if present (from ArgumentParser passthrough)
+            let filtered = command.filter { $0 != "--" }
+            args += filtered
+        }
 
         print("Starting container from \(image)...")
         print("  CPUs: \(cpus), Memory: \(memory)MB")
         print("  GPU socket: /var/run/applegpu.sock")
-        print("")
-        print("NOTE: Container execution requires macOS 26+ with the Containerization framework.")
-        print("The container configuration is ready but execution is stubbed until macOS 26 is available.")
 
-        if !command.isEmpty {
-            print("  Command: \(command.joined(separator: " "))")
+        // Find container CLI
+        guard let containerBin = findContainerBinary() else {
+            throw GPUContainerError.containerCliNotFound
         }
 
-        print("Container exited")
+        // Execute
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: containerBin)
+        process.arguments = args
+        process.standardOutput = FileHandle.standardOutput
+        process.standardError = FileHandle.standardError
+        process.standardInput = FileHandle.standardInput
+
+        try process.run()
+        process.waitUntilExit()
+
+        let exitCode = process.terminationStatus
+        if exitCode != 0 {
+            throw ExitCode(exitCode)
+        }
+    }
+
+    private func findContainerBinary() -> String? {
+        let candidates = [
+            "/opt/homebrew/bin/container",
+            "/usr/local/bin/container",
+        ]
+        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
     }
 }
