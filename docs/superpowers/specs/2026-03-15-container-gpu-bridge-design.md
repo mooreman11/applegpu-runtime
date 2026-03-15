@@ -10,6 +10,15 @@ Containers running on macOS (via Apple Containerization Framework or Docker) can
 
 Phase 7a proved the serialization protocol and single-client IPC. Phase 7b upgrades this to production multi-tenancy with the transport layer containers actually use.
 
+### Key migration: stateless → stateful sessions
+
+Phase 7a's GPU service creates a **fresh `LazyRuntime` per request** — no state persists between requests. Phase 7b changes this fundamentally: the service maintains a **single shared `LazyRuntime`** that persists across all connections. Each connection is a **stateful session** where:
+- Tensors created by one eval request are available to subsequent requests from the same connection
+- Each connection owns its tensors via `ContainerId` — isolated from other connections
+- Disconnect triggers full cleanup of that connection's tensors and graph nodes
+
+This is required because the `Scheduler` needs a unified view of all containers for fair queuing, and the `BufferPool` should be shared for efficient GPU memory reuse.
+
 ## Target Container Runtimes
 
 | Runtime | Transport | How |
@@ -40,12 +49,14 @@ Phase 7a proved the serialization protocol and single-client IPC. Phase 7b upgra
 │   ├── thread-per-connection         │
 │   │    └── Session                  │
 │   │         ├── ContainerId         │
-│   │         ├── LazyRuntime (owned) │
 │   │         └── read/eval/respond   │
-│   ├── SharedState (Arc<Mutex<>>)    │
-│   │    ├── Scheduler                │
-│   │    ├── BufferPool               │
-│   │    └── Device                   │
+│   ├── SharedState (Arc<>)           │
+│   │    ├── Mutex<LazyRuntime>       │
+│   │    │    ├── Scheduler           │
+│   │    │    ├── BufferPool          │
+│   │    │    ├── Graph               │
+│   │    │    └── Tensors             │
+│   │    └── Device (Send+Sync)       │
 │   └── Metal GPU                     │
 └─────────────────────────────────────┘
 ```
@@ -67,9 +78,13 @@ The `Mutex<LazyRuntime>` pattern already exists in the Python layer and is prove
 
 **Decision: No authentication tokens. Connection = container.**
 
-- **Vsock**: Hypervisor-mediated — only VMs on this physical host can connect. The guest CID uniquely identifies the VM. No spoofing possible.
+- **Vsock**: Hypervisor-mediated — only VMs on this physical host can connect. No spoofing possible.
 - **Unix socket**: `SO_PEERCRED` provides the connecting process's UID/PID. Sufficient for local dev.
 - Each connection triggers `scheduler.register_container(config)` on connect and `scheduler.deregister_container(id)` on disconnect (including crashes).
+
+**Important: two separate ID spaces.** The guest CID (vsock transport-level identity) is distinct from the scheduler's `ContainerId`. The service assigns a new `ContainerId` via `scheduler.register_container()` on each connection, regardless of guest CID. Multiple connections from the same VM get different `ContainerId` values. The guest CID is logged for diagnostics but not used for scheduling.
+
+**Container ID stamping:** Incoming `EvalRequest` nodes have `container_id = ContainerId::DEFAULT` (set by the client). The service **rewrites** `node.container_id` to the session's assigned `ContainerId` before inserting into the shared graph. This ensures the scheduler can track and clean up per-container resources.
 
 ### Session lifecycle
 
@@ -81,13 +96,15 @@ connect → handshake → [eval_request → eval_response]* → disconnect
 ```
 Client sends:  [4 bytes] magic: b"AGHI"
                [4 bytes] version: 1u32
-               [4 bytes] max_memory_bytes: u32 (requested quota, 0 = default)
+               [8 bytes] max_memory_bytes: u64 (requested quota, 0 = default)
 
 Server sends:  [4 bytes] magic: b"AGHO"
-               [4 bytes] status: 0=ok, 1=rejected
+               [4 bytes] status: 0=ok, 1=rejected_quota, 2=rejected_capacity
                [8 bytes] container_id: u64
-               [4 bytes] granted_memory_bytes: u32
+               [8 bytes] granted_memory_bytes: u64
 ```
+
+Memory fields are `u64` to support Apple Silicon machines with 32GB-192GB unified memory.
 
 After handshake, the existing `EvalRequest`/`EvalResponse` protocol from Phase 7a is used unchanged.
 
@@ -101,14 +118,21 @@ On disconnect (clean or crash), the service:
 
 Apple's `Virtualization.framework` provides `VZVirtioSocketListener` for host-side vsock listening. This must be Swift code since the framework is Swift/ObjC only.
 
-The Swift layer exports a C ABI function:
+The Swift layer exports blocking C ABI functions that mirror the Unix socket pattern:
 ```c
-// Start listening for vsock connections on the given port.
-// Calls the provided callback with each accepted connection's file descriptor.
-void gpu_bridge_vsock_listen(uint32_t port, void (*on_accept)(int fd, uint32_t guest_cid));
+// Create a vsock listener on the given port. Returns opaque handle.
+// Requires a VZVirtualMachine handle (provided by the container framework).
+void* gpu_bridge_vsock_create_listener(void* vm_handle, uint32_t port);
+
+// Block until a guest connects. Returns a file descriptor for the connection
+// and writes the guest CID to *out_guest_cid. Returns -1 on error.
+int gpu_bridge_vsock_accept(void* listener, uint32_t* out_guest_cid);
+
+// Destroy the listener.
+void gpu_bridge_vsock_destroy_listener(void* listener);
 ```
 
-The Rust GPU service calls this via FFI. Each accepted connection yields a standard file descriptor that Rust can wrap in `std::os::unix::io::FromRawFd` and use with the existing `Read`/`Write` protocol code.
+**Design choice: blocking `accept` over callbacks.** `VZVirtioSocketListener` is delegate-based internally, but the Swift implementation bridges this to a blocking `accept()` call using a `DispatchSemaphore`. This gives Rust a familiar socket-like API — the service calls `gpu_bridge_vsock_accept()` in a loop on a dedicated thread, same as `UnixListener::accept()`. Each accepted connection yields a standard file descriptor that Rust wraps via `FromRawFd`.
 
 **Important**: `VZVirtioSocketListener` requires an active `VZVirtualMachine` instance to attach to. Since we are NOT managing VM lifecycle, the vsock listener must be attached to VM instances that the container framework creates. This means:
 - For Phase 7b, we implement and test the vsock transport code but **cannot run it end-to-end** without a container framework providing VMs.
@@ -182,12 +206,23 @@ This avoids code duplication and ensures the wire format is always in sync betwe
 
 ### 1. `crates/wire` — Shared wire protocol (new crate)
 
-**Contents extracted from `crates/core/src/serial.rs`:**
-- `EvalRequest`, `EvalResponse`, `TensorData` structs
-- `serialize()` / `deserialize()` methods
-- Handshake message types (`HandshakeRequest`, `HandshakeResponse`)
-- All op-type discriminants and conversion functions
+**Approach: wire-specific types with conversions, not extracted core types.**
+
+`crates/core`'s `OpKind` (43 variants), `OpNode`, `Shape`, `DType`, and `ContainerId` are tightly coupled to the execution engine. Rather than moving them into `crates/wire` (which would constrain their evolution), the wire crate defines its own serialization-focused types:
+
+**Wire types (defined in `crates/wire`):**
+- `WireOpKind` — `u32` discriminant enum (0-42) with per-variant payload fields (e.g., scale for ScalarMul, kernel source for Fused)
+- `WireOpNode` — `{ id: u64, op: WireOpKind, inputs: Vec<u64>, out_shape: Vec<usize>, out_dtype: u32 }`
+- `WireTensorData` — `{ id: u64, shape: Vec<usize>, dtype: u32, data: Vec<u8> }`
+- `EvalRequest` — `{ target_id: u64, tensors: Vec<WireTensorData>, nodes: Vec<WireOpNode> }`
+- `EvalResponse` — `Ok { tensor_id, shape, data } | Err(String)`
+- `HandshakeRequest` — `{ protocol_version: u32, requested_memory: u64 }`
+- `HandshakeResponse` — `{ status: u32, container_id: u64, granted_memory: u64 }`
 - Length-prefixed framing helpers: `write_message(stream, payload)`, `read_message(stream)`
+
+**Conversions (in `crates/core`):**
+- `impl From<&OpNode> for WireOpNode` and `impl TryFrom<WireOpNode> for OpNode` in `crates/core/src/serial.rs`
+- This keeps `crates/wire` free of core dependencies while ensuring the wire format stays in sync
 
 **No dependencies** beyond `std`. Compiles on Linux and macOS.
 
@@ -236,10 +271,12 @@ impl GpuClient {
 
 ```c
 // bridge.h additions
-void* gpu_bridge_vsock_create_listener(uint32_t port);
+void* gpu_bridge_vsock_create_listener(void* vm_handle, uint32_t port);
+int gpu_bridge_vsock_accept(void* listener, uint32_t* out_guest_cid);
 void gpu_bridge_vsock_destroy_listener(void* listener);
-int gpu_bridge_vsock_accept(void* listener);  // blocks, returns fd
 ```
+
+The Swift implementation wraps `VZVirtioSocketListener` with a delegate that queues accepted connections, and `gpu_bridge_vsock_accept` blocks on a `DispatchSemaphore` until a connection arrives.
 
 **Deferred to backlog:** Actual vsock listener requires a `VZVirtualMachine` to attach to. The Swift code will be structured to accept a VM handle, but the integration point with the container framework is out of scope.
 
@@ -265,14 +302,16 @@ int gpu_bridge_vsock_accept(void* listener);  // blocks, returns fd
 Client → Server:
   [4 bytes] magic: b"AGHI"
   [4 bytes] protocol_version: u32 = 1
-  [4 bytes] requested_memory: u32 (bytes, 0 = use default)
+  [8 bytes] requested_memory: u64 (bytes, 0 = use default)
 
 Server → Client:
   [4 bytes] magic: b"AGHO"
   [4 bytes] status: u32 (0=accepted, 1=rejected_quota, 2=rejected_capacity)
   [8 bytes] container_id: u64
-  [4 bytes] granted_memory: u32 (bytes)
+  [8 bytes] granted_memory: u64 (bytes)
 ```
+
+Memory fields are `u64` to support Apple Silicon machines with 32-192GB unified memory.
 
 ### Eval (unchanged from Phase 7a)
 
@@ -297,12 +336,21 @@ Server → Client: EvalResponse (magic b"AGPR")
 4. **Stress test**: 8 concurrent clients each sending 100 eval requests, verify no deadlocks, all results correct, memory freed on disconnect
 5. **Vsock transport**: Tested via Unix socketpair (identical byte-stream semantics) until container framework integration is available
 
+## Known Limitations
+
+- **Lock granularity**: The shared `Mutex<LazyRuntime>` serializes all GPU work through a single lock. The lock is held during eval (including Metal command buffer submission). This is correct but limits concurrency — CPU-side work (graph construction, fusion, buffer allocation) cannot proceed while another thread is evaluating. Acceptable for Phase 7b since the GPU is the bottleneck.
+- **Read timeouts**: The service blocks indefinitely on `read()` per connection. A hung client (neither sending nor disconnecting) permanently consumes a server thread.
+- **No connection limits**: No cap on concurrent connections; each spawns a thread.
+
 ## Backlog Items (deferred)
 
 - **Apple Containerization Framework integration** — attach vsock listener to framework-managed VMs
 - **Docker bind-mount documentation** — instructions for mounting the GPU service socket
 - **Client Python bindings** — PyO3 wrapper around `crates/client` for use inside containers
-- **Persistent tensor handles** — allow containers to keep tensors resident between eval requests (currently each request is independent)
+- **Persistent tensor handles** — allow containers to keep tensors resident between eval requests (the shared LazyRuntime naturally supports this, but the client API needs session-aware tensor ID management)
 - **TLS/authentication for TCP transport** — if TCP transport is ever added for remote containers
 - **Health check endpoint** — service status query for monitoring
 - **Metrics/observability** — per-container GPU utilization, queue depth, latency histograms
+- **Finer-grained locking** — split `Mutex<LazyRuntime>` into per-component locks (scheduler, buffer pool, graph) for better concurrency
+- **Read timeout / keepalive** — `SO_RCVTIMEO` on connections to reclaim threads from hung clients
+- **Connection limits** — max concurrent connections to prevent thread exhaustion (e.g., 64 max)
