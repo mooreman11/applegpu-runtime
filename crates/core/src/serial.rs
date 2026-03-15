@@ -6,7 +6,7 @@ use crate::tensor::{DType, Shape};
 
 const MAGIC_REQUEST: &[u8; 4] = b"AGPU";
 const MAGIC_RESPONSE: &[u8; 4] = b"AGPR";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 const OP_ADD: u32 = 0;
 const OP_SUB: u32 = 1;
@@ -67,7 +67,7 @@ fn op_to_discriminant(op: &OpKind) -> u32 {
         OpKind::Matmul => OP_MATMUL,
         OpKind::FusedElementwise { .. } => OP_FUSED,
         OpKind::Softmax => 11,
-        OpKind::Transpose => 12,
+        OpKind::Transpose { .. } => 12,
         OpKind::ScalarMul(_) => 13,
         OpKind::Gelu => 14,
         OpKind::LayerNorm { .. } => 15,
@@ -109,7 +109,11 @@ fn discriminant_to_op(d: u32, r: &mut impl Read) -> io::Result<OpKind> {
             Ok(OpKind::FusedElementwise { kernel_source, function_name })
         }
         11 => Ok(OpKind::Softmax),
-        12 => Ok(OpKind::Transpose),
+        12 => {
+            let dim0 = read_u32(r)? as usize;
+            let dim1 = read_u32(r)? as usize;
+            Ok(OpKind::Transpose { dim0, dim1 })
+        }
         13 => {
             let mut scale_bytes = [0u8; 4];
             r.read_exact(&mut scale_bytes)?;
@@ -203,6 +207,10 @@ impl EvalRequest {
                 write_u32(&mut buf, dim as u32).unwrap();
                 write_u64(&mut buf, start as u64).unwrap();
                 write_u64(&mut buf, end as u64).unwrap();
+            }
+            if let OpKind::Transpose { dim0, dim1 } = node.op {
+                write_u32(&mut buf, dim0 as u32).unwrap();
+                write_u32(&mut buf, dim1 as u32).unwrap();
             }
             if let OpKind::Concat { dim } = node.op {
                 write_u32(&mut buf, dim as u32).unwrap();

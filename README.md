@@ -115,7 +115,8 @@ v0.2.0. Current capabilities:
 - **Batched N-D ops** — matmul, softmax, softmax_causal, layer_norm, embedding, transpose, attention, and attention_causal all support arbitrary leading batch dimensions with broadcasting. One kernel dispatch handles all batch elements.
 - **Tensor manipulation** — reshape, slice, concat, add_bias (broadcast)
 - 25 GPU operations (f32 + f16): add, sub, mul, div, neg, relu, gelu, exp, log, sqrt, matmul, softmax, softmax_causal, layer_norm, transpose, scalar_mul, embedding, attention, attention_causal, reshape, slice, concat, add_bias, argmax + kernel fusion
-- 426 tests passing across all layers (221 Rust + 13 Swift + 192 Python)
+- **General transpose** — `gpu.transpose_dims(t, dim0, dim1)` for arbitrary dimension swaps, enabling batched multi-head attention via reshape + transpose
+- 433 tests passing across all layers (228 Rust + 13 Swift + 192 Python)
 
 ### NumPy & PyTorch Interop
 
