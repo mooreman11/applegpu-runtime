@@ -289,7 +289,7 @@ mod tests {
             id: 3,
             op: OpKind::Add,
             inputs: vec![1, 2],
-            out_shape: Shape::new(vec![4]),
+            out_shape: Shape::new(vec![4]).unwrap(),
             out_dtype: DType::Float32,
             container_id: ContainerId::DEFAULT,
         });
@@ -297,7 +297,7 @@ mod tests {
             id: 4,
             op: OpKind::Neg,
             inputs: vec![3],
-            out_shape: Shape::new(vec![4]),
+            out_shape: Shape::new(vec![4]).unwrap(),
             out_dtype: DType::Float32,
             container_id: ContainerId::DEFAULT,
         });
@@ -313,7 +313,7 @@ mod tests {
             id: 3,
             op: OpKind::Add,
             inputs: vec![1, 2],
-            out_shape: Shape::new(vec![4]),
+            out_shape: Shape::new(vec![4]).unwrap(),
             out_dtype: DType::Float32,
             container_id: ContainerId::DEFAULT,
         });
@@ -321,7 +321,7 @@ mod tests {
             id: 4,
             op: OpKind::Sub,
             inputs: vec![1, 2],
-            out_shape: Shape::new(vec![4]),
+            out_shape: Shape::new(vec![4]).unwrap(),
             out_dtype: DType::Float32,
             container_id: ContainerId::DEFAULT,
         });
@@ -329,7 +329,7 @@ mod tests {
             id: 5,
             op: OpKind::Mul,
             inputs: vec![3, 4],
-            out_shape: Shape::new(vec![4]),
+            out_shape: Shape::new(vec![4]).unwrap(),
             out_dtype: DType::Float32,
             container_id: ContainerId::DEFAULT,
         });
@@ -348,7 +348,7 @@ mod tests {
             id: 3,
             op: OpKind::Add,
             inputs: vec![1, 2],
-            out_shape: Shape::new(vec![4]),
+            out_shape: Shape::new(vec![4]).unwrap(),
             out_dtype: DType::Float32,
             container_id: ContainerId::DEFAULT,
         });
@@ -356,7 +356,7 @@ mod tests {
             id: 4,
             op: OpKind::Neg,
             inputs: vec![1],
-            out_shape: Shape::new(vec![4]),
+            out_shape: Shape::new(vec![4]).unwrap(),
             out_dtype: DType::Float32,
             container_id: ContainerId::DEFAULT,
         });
@@ -372,17 +372,17 @@ mod tests {
         let mut g = Graph::new();
         g.add_node(OpNode {
             id: 10, op: OpKind::Add, inputs: vec![1, 2],
-            out_shape: Shape::new(vec![4]), out_dtype: DType::Float32,
+            out_shape: Shape::new(vec![4]).unwrap(), out_dtype: DType::Float32,
             container_id: c1,
         });
         g.add_node(OpNode {
             id: 11, op: OpKind::Neg, inputs: vec![3],
-            out_shape: Shape::new(vec![4]), out_dtype: DType::Float32,
+            out_shape: Shape::new(vec![4]).unwrap(), out_dtype: DType::Float32,
             container_id: c2,
         });
         g.add_node(OpNode {
             id: 12, op: OpKind::Relu, inputs: vec![10],
-            out_shape: Shape::new(vec![4]), out_dtype: DType::Float32,
+            out_shape: Shape::new(vec![4]).unwrap(), out_dtype: DType::Float32,
             container_id: c1,
         });
 

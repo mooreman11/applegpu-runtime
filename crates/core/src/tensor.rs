@@ -1,3 +1,5 @@
+use crate::error::{GpuError, Result};
+
 /// Data type for tensor elements.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DType {
@@ -65,30 +67,146 @@ impl DType {
     }
 }
 
-/// Shape of a tensor (dimensions).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Shape(Vec<usize>);
+// ── Shape ───────────────────────────────────────────────────────────────────
+
+pub const MAX_DIMS: usize = 8;
+
+/// Fixed-size, stack-allocated shape. Copy semantics (72 bytes).
+#[derive(Debug, Clone, Copy)]
+pub struct Shape {
+    pub dims: [usize; MAX_DIMS],
+    ndim: usize,
+}
 
 impl Shape {
-    pub fn new(dims: Vec<usize>) -> Self {
-        Shape(dims)
+    pub fn new(dims: Vec<usize>) -> Result<Self> {
+        if dims.len() > MAX_DIMS {
+            return Err(GpuError::InvalidTensor(format!(
+                "Shape has {} dimensions, maximum is {}", dims.len(), MAX_DIMS
+            )));
+        }
+        let mut arr = [1usize; MAX_DIMS];
+        for (i, &d) in dims.iter().enumerate() {
+            arr[i] = d;
+        }
+        Ok(Shape { dims: arr, ndim: dims.len() })
     }
 
-    /// Number of dimensions.
-    pub fn ndim(&self) -> usize {
-        self.0.len()
+    pub fn scalar() -> Self {
+        Shape { dims: [1; MAX_DIMS], ndim: 0 }
     }
 
-    /// Total number of elements.
+    pub fn ndim(&self) -> usize { self.ndim }
+
+    pub fn dims(&self) -> &[usize] { &self.dims[..self.ndim] }
+
     pub fn numel(&self) -> usize {
-        self.0.iter().product()
+        self.dims[..self.ndim].iter().product::<usize>().max(1)
     }
 
-    /// Get dimensions as a slice.
-    pub fn dims(&self) -> &[usize] {
-        &self.0
+    pub fn broadcast_with(&self, other: &Shape) -> Result<Shape> {
+        let out_ndim = self.ndim.max(other.ndim);
+        let mut out_dims = [1usize; MAX_DIMS];
+        for i in 0..out_ndim {
+            let a = if i < self.ndim { self.dims[self.ndim - 1 - i] } else { 1 };
+            let b = if i < other.ndim { other.dims[other.ndim - 1 - i] } else { 1 };
+            if a == b {
+                out_dims[out_ndim - 1 - i] = a;
+            } else if a == 1 {
+                out_dims[out_ndim - 1 - i] = b;
+            } else if b == 1 {
+                out_dims[out_ndim - 1 - i] = a;
+            } else {
+                return Err(GpuError::InvalidTensor(format!(
+                    "Cannot broadcast shapes {:?} and {:?}: dim {} is {} vs {}",
+                    self.dims(), other.dims(), out_ndim - 1 - i, a, b
+                )));
+            }
+        }
+        Ok(Shape { dims: out_dims, ndim: out_ndim })
     }
 }
+
+impl PartialEq for Shape {
+    fn eq(&self, other: &Self) -> bool {
+        self.ndim == other.ndim && self.dims[..self.ndim] == other.dims[..other.ndim]
+    }
+}
+impl Eq for Shape {}
+
+impl std::hash::Hash for Shape {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.ndim.hash(state);
+        self.dims[..self.ndim].hash(state);
+    }
+}
+
+// ── TensorLayout ────────────────────────────────────────────────────────────
+
+/// Layout with element strides. Clone (not Copy — 136 bytes).
+#[derive(Debug, Clone)]
+pub struct TensorLayout {
+    pub shape: Shape,
+    strides: [usize; MAX_DIMS],
+}
+
+impl TensorLayout {
+    pub fn contiguous(shape: Shape) -> Self {
+        let mut strides = [0usize; MAX_DIMS];
+        if shape.ndim() > 0 {
+            strides[shape.ndim() - 1] = 1;
+            for i in (0..shape.ndim() - 1).rev() {
+                strides[i] = strides[i + 1] * shape.dims[i + 1];
+            }
+        }
+        TensorLayout { shape, strides }
+    }
+
+    pub fn is_contiguous(&self) -> bool {
+        if self.shape.ndim() == 0 { return true; }
+        let mut expected = 1;
+        for i in (0..self.shape.ndim()).rev() {
+            if self.strides[i] != expected { return false; }
+            expected *= self.shape.dims[i];
+        }
+        true
+    }
+
+    pub fn strides(&self) -> &[usize] {
+        &self.strides[..self.shape.ndim()]
+    }
+
+    pub fn transpose(&self, dim0: usize, dim1: usize) -> Self {
+        let mut new = self.clone();
+        new.shape.dims.swap(dim0, dim1);
+        new.strides.swap(dim0, dim1);
+        new
+    }
+
+    pub fn broadcast_strides_for(source: &Shape, target: &Shape) -> [usize; MAX_DIMS] {
+        let mut strides = [0usize; MAX_DIMS];
+        let src_contiguous = TensorLayout::contiguous(*source);
+        let offset = target.ndim() - source.ndim();
+        for i in 0..source.ndim() {
+            let target_i = i + offset;
+            if source.dims[i] == target.dims[target_i] {
+                strides[target_i] = src_contiguous.strides[i];
+            } else {
+                strides[target_i] = 0; // broadcast dim
+            }
+        }
+        strides
+    }
+}
+
+impl PartialEq for TensorLayout {
+    fn eq(&self, other: &Self) -> bool {
+        self.shape == other.shape && self.strides[..self.shape.ndim()] == other.strides[..other.shape.ndim()]
+    }
+}
+impl Eq for TensorLayout {}
+
+// ── TensorLocation ──────────────────────────────────────────────────────────
 
 /// Where a tensor's data lives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,11 +219,13 @@ pub enum TensorLocation {
     Shared,
 }
 
+// ── TensorMeta ──────────────────────────────────────────────────────────────
+
 /// Metadata for a virtual tensor (no data, just description).
 #[derive(Debug, Clone)]
 pub struct TensorMeta {
     pub id: u64,
-    pub shape: Shape,
+    pub layout: TensorLayout,
     pub dtype: DType,
     pub location: TensorLocation,
 }
@@ -113,13 +233,14 @@ pub struct TensorMeta {
 impl TensorMeta {
     /// Total size in bytes for the tensor data.
     pub fn size_bytes(&self) -> usize {
-        self.shape.numel() * self.dtype.size_bytes()
+        self.layout.shape.numel() * self.dtype.size_bytes()
     }
 }
 
+// ── Tensor ──────────────────────────────────────────────────────────────────
+
 use crate::buffer::Buffer;
 use crate::device::Device;
-use crate::error::Result;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static TENSOR_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -134,10 +255,12 @@ impl Tensor {
     /// Create a tensor from a pre-existing buffer and explicit ID.
     /// Used by the GPU service to reconstruct tensors from serialized data.
     pub fn from_raw(id: u64, shape: Vec<usize>, dtype: DType, buffer: Buffer) -> Self {
+        let shape = Shape::new(shape).unwrap();
+        let layout = TensorLayout::contiguous(shape);
         Tensor {
             meta: TensorMeta {
                 id,
-                shape: Shape::new(shape),
+                layout,
                 dtype,
                 location: TensorLocation::Shared,
             },
@@ -149,15 +272,17 @@ impl Tensor {
     pub fn from_data(device: &Device, shape: Vec<usize>, dtype: DType, data: &[u8]) -> Result<Self> {
         let expected = shape.iter().product::<usize>() * dtype.size_bytes();
         if data.len() != expected {
-            return Err(crate::error::GpuError::InvalidTensor(format!(
+            return Err(GpuError::InvalidTensor(format!(
                 "Shape {:?} with {:?} expects {} bytes but got {}",
                 shape, dtype, expected, data.len()
             )));
         }
         let buffer = Buffer::from_bytes(device, data)?;
         let id = TENSOR_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let shape = Shape::new(shape)?;
+        let layout = TensorLayout::contiguous(shape);
         Ok(Tensor {
-            meta: TensorMeta { id, shape: Shape::new(shape), dtype, location: TensorLocation::Shared },
+            meta: TensorMeta { id, layout, dtype, location: TensorLocation::Shared },
             buffer,
         })
     }
@@ -167,16 +292,22 @@ impl Tensor {
         let size_bytes = shape.iter().product::<usize>() * dtype.size_bytes();
         let buffer = Buffer::new(device, size_bytes)?;
         let id = TENSOR_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let shape = Shape::new(shape)?;
+        let layout = TensorLayout::contiguous(shape);
         Ok(Tensor {
-            meta: TensorMeta { id, shape: Shape::new(shape), dtype, location: TensorLocation::Shared },
+            meta: TensorMeta { id, layout, dtype, location: TensorLocation::Shared },
             buffer,
         })
     }
 
     /// Read tensor data as raw bytes. Uses logical size (not physical buffer size).
-    pub fn as_bytes(&self) -> &[u8] {
+    /// Returns error if tensor is non-contiguous.
+    pub fn as_bytes(&self) -> Result<&[u8]> {
+        if !self.meta.layout.is_contiguous() {
+            return Err(GpuError::InvalidTensor("as_bytes requires contiguous tensor".into()));
+        }
         let byte_count = self.meta.size_bytes();
-        unsafe { std::slice::from_raw_parts(self.buffer.contents(), byte_count) }
+        Ok(unsafe { std::slice::from_raw_parts(self.buffer.contents(), byte_count) })
     }
 
     /// Create a tensor from f32 data.
@@ -206,26 +337,34 @@ impl Tensor {
     }
 
     /// Read tensor data as f16 slice (zero-copy, returns raw u16 bit patterns).
-    pub fn as_f16_slice(&self) -> &[u16] {
+    /// Returns error if tensor is non-contiguous.
+    pub fn as_f16_slice(&self) -> Result<&[u16]> {
+        if !self.meta.layout.is_contiguous() {
+            return Err(GpuError::InvalidTensor("as_f16_slice requires contiguous tensor".into()));
+        }
         assert_eq!(
             self.meta.dtype,
             DType::Float16,
             "as_f16_slice called on non-f16 tensor"
         );
-        let count = self.meta.shape.numel();
-        unsafe { std::slice::from_raw_parts(self.buffer.contents() as *const u16, count) }
+        let count = self.meta.layout.shape.numel();
+        Ok(unsafe { std::slice::from_raw_parts(self.buffer.contents() as *const u16, count) })
     }
 
     /// Read tensor data as f32 slice (zero-copy).
     /// Uses the logical tensor size (from shape), not the physical buffer size.
-    pub fn as_f32_slice(&self) -> &[f32] {
+    /// Returns error if tensor is non-contiguous.
+    pub fn as_f32_slice(&self) -> Result<&[f32]> {
+        if !self.meta.layout.is_contiguous() {
+            return Err(GpuError::InvalidTensor("as_f32_slice requires contiguous tensor".into()));
+        }
         assert_eq!(
             self.meta.dtype,
             DType::Float32,
             "as_f32_slice called on non-f32 tensor"
         );
-        let count = self.meta.shape.numel();
-        unsafe { std::slice::from_raw_parts(self.buffer.contents() as *const f32, count) }
+        let count = self.meta.layout.shape.numel();
+        Ok(unsafe { std::slice::from_raw_parts(self.buffer.contents() as *const f32, count) })
     }
 
     /// Move the buffer out of this tensor without deallocating.
@@ -236,7 +375,7 @@ impl Tensor {
 
     /// Number of elements.
     pub fn numel(&self) -> usize {
-        self.meta.shape.numel()
+        self.meta.layout.shape.numel()
     }
 }
 
@@ -255,23 +394,24 @@ mod tests {
 
     #[test]
     fn shape_numel() {
-        let s = Shape::new(vec![2, 3, 4]);
+        let s = Shape::new(vec![2, 3, 4]).unwrap();
         assert_eq!(s.ndim(), 3);
         assert_eq!(s.numel(), 24);
     }
 
     #[test]
     fn shape_scalar() {
-        let s = Shape::new(vec![]);
+        let s = Shape::scalar();
         assert_eq!(s.ndim(), 0);
-        assert_eq!(s.numel(), 1); // product of empty = 1
+        assert_eq!(s.numel(), 1);
+        assert_eq!(s.dims(), &[]);
     }
 
     #[test]
     fn tensor_meta_size() {
         let meta = TensorMeta {
             id: 1,
-            shape: Shape::new(vec![32, 768]),
+            layout: TensorLayout::contiguous(Shape::new(vec![32, 768]).unwrap()),
             dtype: DType::Float32,
             location: TensorLocation::Device,
         };
@@ -286,10 +426,10 @@ mod tests {
         };
         let data = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
         let t = Tensor::from_f32(&device, vec![2, 3], &data).unwrap();
-        assert_eq!(t.meta.shape.dims(), &[2, 3]);
+        assert_eq!(t.meta.layout.shape.dims(), &[2, 3]);
         assert_eq!(t.meta.dtype, DType::Float32);
         assert_eq!(t.numel(), 6);
-        assert_eq!(t.as_f32_slice(), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        assert_eq!(t.as_f32_slice().unwrap(), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
     }
 
     #[test]
@@ -299,7 +439,7 @@ mod tests {
         let ptr = buf.contents() as *mut f32;
         unsafe { *ptr.add(0) = 1.0; *ptr.add(1) = 2.0; *ptr.add(2) = 3.0; *ptr.add(3) = 4.0; }
         let t = Tensor::from_raw(999, vec![4], DType::Float32, buf);
-        let slice = t.as_f32_slice();
+        let slice = t.as_f32_slice().unwrap();
         assert_eq!(slice.len(), 4);
         assert_eq!(slice, &[1.0, 2.0, 3.0, 4.0]);
     }
@@ -335,7 +475,7 @@ mod tests {
             Err(_) => return,
         };
         let t = Tensor::empty_f16(&device, vec![2, 3]).unwrap();
-        assert_eq!(t.meta.shape.dims(), &[2, 3]);
+        assert_eq!(t.meta.layout.shape.dims(), &[2, 3]);
         assert_eq!(t.meta.dtype, DType::Float16);
         assert_eq!(t.numel(), 6);
     }
@@ -355,7 +495,7 @@ mod tests {
         let t = Tensor::from_f16(&device, vec![2, 3], &raw).unwrap();
         assert_eq!(t.meta.dtype, DType::Float16);
         assert_eq!(t.numel(), 6);
-        let slice = t.as_f16_slice();
+        let slice = t.as_f16_slice().unwrap();
         assert_eq!(slice.len(), 6);
         for (i, &bits) in slice.iter().enumerate() {
             let got = f16::from_bits(bits).to_f32();
@@ -419,7 +559,7 @@ mod tests {
         let data: Vec<i32> = vec![42, -7, 100, 0];
         let bytes = unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, 16) };
         let t = Tensor::from_data(&device, vec![4], DType::Int32, bytes).unwrap();
-        assert_eq!(t.as_bytes(), bytes);
+        assert_eq!(t.as_bytes().unwrap(), bytes);
     }
 
     #[test]
@@ -451,5 +591,125 @@ mod tests {
         let t = Tensor::from_raw(42, vec![4], DType::Float16, buf);
         assert_eq!(t.meta.dtype, DType::Float16);
         assert_eq!(t.meta.id, 42);
+    }
+
+    // ── Shape tests ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_shape_2d() {
+        let s = Shape::new(vec![2, 3]).unwrap();
+        assert_eq!(s.ndim(), 2);
+        assert_eq!(s.dims(), &[2, 3]);
+        assert_eq!(s.numel(), 6);
+    }
+
+    #[test]
+    fn test_shape_3d() {
+        let s = Shape::new(vec![2, 3, 4]).unwrap();
+        assert_eq!(s.ndim(), 3);
+        assert_eq!(s.dims(), &[2, 3, 4]);
+        assert_eq!(s.numel(), 24);
+    }
+
+    #[test]
+    fn test_shape_1d() {
+        let s = Shape::new(vec![5]).unwrap();
+        assert_eq!(s.ndim(), 1);
+        assert_eq!(s.dims(), &[5]);
+        assert_eq!(s.numel(), 5);
+    }
+
+    #[test]
+    fn test_shape_exceeds_max_dims() {
+        let dims = vec![1; 9];
+        assert!(Shape::new(dims).is_err());
+    }
+
+    #[test]
+    fn test_shape_equality_ignores_padding() {
+        let a = Shape::new(vec![2, 3]).unwrap();
+        let b = Shape::new(vec![2, 3]).unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_shape_broadcast_bias() {
+        let a = Shape::new(vec![4, 3]).unwrap();
+        let b = Shape::new(vec![3]).unwrap();
+        let c = a.broadcast_with(&b).unwrap();
+        assert_eq!(c.dims(), &[4, 3]);
+    }
+
+    #[test]
+    fn test_shape_broadcast_3d() {
+        let a = Shape::new(vec![2, 1, 4]).unwrap();
+        let b = Shape::new(vec![3, 4]).unwrap();
+        let c = a.broadcast_with(&b).unwrap();
+        assert_eq!(c.dims(), &[2, 3, 4]);
+    }
+
+    #[test]
+    fn test_shape_broadcast_incompatible() {
+        let a = Shape::new(vec![2, 3]).unwrap();
+        let b = Shape::new(vec![4, 3]).unwrap();
+        assert!(a.broadcast_with(&b).is_err());
+    }
+
+    #[test]
+    fn test_shape_copy() {
+        let a = Shape::new(vec![2, 3]).unwrap();
+        let b = a; // Copy
+        assert_eq!(a, b);
+    }
+
+    // ── TensorLayout tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_contiguous_strides_2d() {
+        let shape = Shape::new(vec![2, 3]).unwrap();
+        let layout = TensorLayout::contiguous(shape);
+        assert_eq!(layout.strides(), &[3, 1]);
+        assert!(layout.is_contiguous());
+    }
+
+    #[test]
+    fn test_contiguous_strides_3d() {
+        let shape = Shape::new(vec![2, 3, 4]).unwrap();
+        let layout = TensorLayout::contiguous(shape);
+        assert_eq!(layout.strides(), &[12, 4, 1]);
+        assert!(layout.is_contiguous());
+    }
+
+    #[test]
+    fn test_contiguous_strides_1d() {
+        let shape = Shape::new(vec![5]).unwrap();
+        let layout = TensorLayout::contiguous(shape);
+        assert_eq!(layout.strides(), &[1]);
+        assert!(layout.is_contiguous());
+    }
+
+    #[test]
+    fn test_transpose_swaps_dims_and_strides() {
+        let shape = Shape::new(vec![2, 3]).unwrap();
+        let layout = TensorLayout::contiguous(shape).transpose(0, 1);
+        assert_eq!(layout.shape.dims(), &[3, 2]);
+        assert_eq!(layout.strides(), &[1, 3]);
+        assert!(!layout.is_contiguous());
+    }
+
+    #[test]
+    fn test_broadcast_strides() {
+        let src = Shape::new(vec![3]).unwrap();
+        let target = Shape::new(vec![4, 3]).unwrap();
+        let strides = TensorLayout::broadcast_strides_for(&src, &target);
+        assert_eq!(strides[..2], [0, 1]); // dim 0 broadcast (stride=0), dim 1 normal
+    }
+
+    #[test]
+    fn test_scalar_layout() {
+        let shape = Shape::scalar();
+        let layout = TensorLayout::contiguous(shape);
+        assert!(layout.is_contiguous());
+        assert_eq!(layout.strides(), &[]);
     }
 }

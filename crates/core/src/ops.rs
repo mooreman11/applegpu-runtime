@@ -28,15 +28,8 @@ fn lazy_binary_op(rt: &mut LazyRuntime, a_id: u64, b_id: u64, op: OpKind) -> Res
     let b_dtype = rt.dtype(b_id)?;
     validate_compute_dtype(b_dtype)?;
 
-    let a_shape = rt.shape(a_id)?;
-    let b_shape = rt.shape(b_id)?;
-
-    if a_shape != b_shape {
-        return Err(GpuError::InvalidTensor(format!(
-            "Shape mismatch: {:?} vs {:?}",
-            a_shape, b_shape
-        )));
-    }
+    let a_shape_vec = rt.shape(a_id)?;
+    let b_shape_vec = rt.shape(b_id)?;
 
     if a_dtype != b_dtype {
         return Err(GpuError::InvalidTensor(format!(
@@ -45,12 +38,16 @@ fn lazy_binary_op(rt: &mut LazyRuntime, a_id: u64, b_id: u64, op: OpKind) -> Res
         )));
     }
 
+    let a_shape_obj = Shape::new(a_shape_vec)?;
+    let b_shape_obj = Shape::new(b_shape_vec)?;
+    let out_shape = a_shape_obj.broadcast_with(&b_shape_obj)?;
+
     let out_id = next_id();
     rt.record_op(OpNode {
         id: out_id,
         op,
         inputs: vec![a_id, b_id],
-        out_shape: Shape::new(a_shape),
+        out_shape,
         out_dtype: a_dtype,
         container_id: ContainerId::DEFAULT,
     });
@@ -67,7 +64,7 @@ fn lazy_unary_op(rt: &mut LazyRuntime, input_id: u64, op: OpKind) -> Result<u64>
         id: out_id,
         op,
         inputs: vec![input_id],
-        out_shape: Shape::new(shape),
+        out_shape: Shape::new(shape)?,
         out_dtype,
         container_id: ContainerId::DEFAULT,
     });
@@ -149,7 +146,7 @@ pub fn matmul(rt: &mut LazyRuntime, a_id: u64, b_id: u64) -> Result<u64> {
         id: out_id,
         op: OpKind::Matmul,
         inputs: vec![a_id, b_id],
-        out_shape: Shape::new(vec![m, n]),
+        out_shape: Shape::new(vec![m, n])?,
         out_dtype: a_dtype,
         container_id: ContainerId::DEFAULT,
     });
@@ -171,7 +168,7 @@ pub fn softmax(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
         id: out_id,
         op: OpKind::Softmax,
         inputs: vec![input_id],
-        out_shape: Shape::new(shape),
+        out_shape: Shape::new(shape)?,
         out_dtype: dtype,
         container_id: ContainerId::DEFAULT,
     });
@@ -193,7 +190,7 @@ pub fn transpose(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
         id: out_id,
         op: OpKind::Transpose,
         inputs: vec![input_id],
-        out_shape: Shape::new(vec![shape[1], shape[0]]),
+        out_shape: Shape::new(vec![shape[1], shape[0]])?,
         out_dtype: dtype,
         container_id: ContainerId::DEFAULT,
     });
@@ -210,7 +207,7 @@ pub fn scalar_mul(rt: &mut LazyRuntime, input_id: u64, scale: f32) -> Result<u64
         id: out_id,
         op: OpKind::ScalarMul(scale),
         inputs: vec![input_id],
-        out_shape: Shape::new(shape),
+        out_shape: Shape::new(shape)?,
         out_dtype: dtype,
         container_id: ContainerId::DEFAULT,
     });
@@ -234,7 +231,7 @@ pub fn reshape(rt: &mut LazyRuntime, input_id: u64, new_shape: Vec<usize>) -> Re
         id: out_id,
         op: OpKind::Reshape { new_shape: new_shape.clone() },
         inputs: vec![input_id],
-        out_shape: Shape::new(new_shape),
+        out_shape: Shape::new(new_shape)?,
         out_dtype: dtype,
         container_id: ContainerId::DEFAULT,
     });
@@ -273,7 +270,7 @@ pub fn layer_norm(rt: &mut LazyRuntime, input_id: u64, gamma_id: u64, beta_id: u
         id: out_id,
         op: OpKind::LayerNorm { eps },
         inputs: vec![input_id, gamma_id, beta_id],
-        out_shape: Shape::new(input_shape),
+        out_shape: Shape::new(input_shape)?,
         out_dtype: input_dtype,
         container_id: ContainerId::DEFAULT,
     });
@@ -308,7 +305,7 @@ pub fn embedding(rt: &mut LazyRuntime, weights_id: u64, indices_id: u64) -> Resu
         id: out_id,
         op: OpKind::Embedding,
         inputs: vec![weights_id, indices_id],
-        out_shape: Shape::new(vec![seq_len, embed_dim]),
+        out_shape: Shape::new(vec![seq_len, embed_dim])?,
         out_dtype: weights_dtype,
         container_id: ContainerId::DEFAULT,
     });
@@ -346,7 +343,7 @@ pub fn slice(rt: &mut LazyRuntime, input_id: u64, dim: usize, start: usize, end:
         id: out_id,
         op: OpKind::Slice { dim, start, end },
         inputs: vec![input_id],
-        out_shape: Shape::new(out_shape),
+        out_shape: Shape::new(out_shape)?,
         out_dtype: dtype,
         container_id: ContainerId::DEFAULT,
     });
@@ -394,7 +391,7 @@ pub fn concat(rt: &mut LazyRuntime, a_id: u64, b_id: u64, dim: usize) -> Result<
         id: out_id,
         op: OpKind::Concat { dim },
         inputs: vec![a_id, b_id],
-        out_shape: Shape::new(out_shape),
+        out_shape: Shape::new(out_shape)?,
         out_dtype: a_dtype,
         container_id: ContainerId::DEFAULT,
     });
@@ -437,7 +434,7 @@ pub fn add_bias(rt: &mut LazyRuntime, input_id: u64, bias_id: u64) -> Result<u64
         id: out_id,
         op: OpKind::AddBias,
         inputs: vec![input_id, bias_id],
-        out_shape: Shape::new(input_shape),
+        out_shape: Shape::new(input_shape)?,
         out_dtype: input_dtype,
         container_id: ContainerId::DEFAULT,
     });
@@ -460,7 +457,7 @@ pub fn softmax_causal(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
         id: out_id,
         op: OpKind::SoftmaxCausal,
         inputs: vec![input_id],
-        out_shape: Shape::new(shape),
+        out_shape: Shape::new(shape)?,
         out_dtype: dtype,
         container_id: ContainerId::DEFAULT,
     });
@@ -489,7 +486,7 @@ pub fn argmax(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
         id: out_id,
         op: OpKind::Argmax,
         inputs: vec![input_id],
-        out_shape: Shape::new(out_shape),
+        out_shape: Shape::new(out_shape)?,
         out_dtype: DType::Int32,
         container_id: ContainerId::DEFAULT,
     });

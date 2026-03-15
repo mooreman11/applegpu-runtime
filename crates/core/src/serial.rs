@@ -261,11 +261,13 @@ impl EvalRequest {
             let _out_dtype = read_u32(&mut r)?;
 
             let op = discriminant_to_op(op_disc, &mut r)?;
+            let out_shape = Shape::new(out_shape)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
             nodes.push(OpNode {
                 id,
                 op,
                 inputs,
-                out_shape: Shape::new(out_shape),
+                out_shape,
                 out_dtype: DType::Float32,
                 container_id: ContainerId::DEFAULT,
             });
@@ -351,7 +353,7 @@ mod tests {
                     id: 42,
                     op: OpKind::Neg,
                     inputs: vec![1],
-                    out_shape: Shape::new(vec![4]),
+                    out_shape: Shape::new(vec![4]).unwrap(),
                     out_dtype: DType::Float32,
                     container_id: ContainerId::DEFAULT,
                 },
@@ -383,7 +385,7 @@ mod tests {
                         function_name: "test".to_string(),
                     },
                     inputs: vec![1, 2],
-                    out_shape: Shape::new(vec![4]),
+                    out_shape: Shape::new(vec![4]).unwrap(),
                     out_dtype: DType::Float32,
                     container_id: ContainerId::DEFAULT,
                 },
@@ -440,7 +442,7 @@ mod tests {
                     id: 5,
                     op: OpKind::Matmul,
                     inputs: vec![1, 2],
-                    out_shape: Shape::new(vec![2, 2]),
+                    out_shape: Shape::new(vec![2, 2]).unwrap(),
                     out_dtype: DType::Float32,
                     container_id: ContainerId::DEFAULT,
                 },

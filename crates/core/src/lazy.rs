@@ -85,7 +85,7 @@ impl LazyRuntime {
     /// Get shape of a tensor (materialized or pending).
     pub fn shape(&self, id: u64) -> Result<Vec<usize>> {
         if let Some(t) = self.tensors.get(&id) {
-            return Ok(t.meta.shape.dims().to_vec());
+            return Ok(t.meta.layout.shape.dims().to_vec());
         }
         if let Some(node) = self.graph.get_node(id) {
             return Ok(node.out_shape.dims().to_vec());
@@ -195,7 +195,7 @@ impl LazyRuntime {
             let out_buf = self.pool.acquire(device, out_size)?;
             let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
             let input = self.get_tensor(node.inputs[0])?;
-            let dims = input.meta.shape.dims();
+            let dims = input.meta.layout.shape.dims();
             let (rows, cols) = (dims[0], dims[1]);
             REGISTRY.dispatch_softmax_typed(device, dtype, &input.buffer, &out.buffer, rows, cols)?;
             return Ok(out);
@@ -205,7 +205,7 @@ impl LazyRuntime {
             let out_buf = self.pool.acquire(device, out_size)?;
             let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
             let input = self.get_tensor(node.inputs[0])?;
-            let dims = input.meta.shape.dims();
+            let dims = input.meta.layout.shape.dims();
             let (rows, cols) = (dims[0], dims[1]);
             REGISTRY.dispatch_transpose_typed(device, dtype, &input.buffer, &out.buffer, rows, cols)?;
             return Ok(out);
@@ -234,7 +234,7 @@ impl LazyRuntime {
             let input = self.get_tensor(node.inputs[0])?;
             let gamma = self.get_tensor(node.inputs[1])?;
             let beta = self.get_tensor(node.inputs[2])?;
-            let dims = input.meta.shape.dims();
+            let dims = input.meta.layout.shape.dims();
             let (rows, cols) = (dims[0], dims[1]);
             REGISTRY.dispatch_layer_norm_typed(device, dtype, &input.buffer, &gamma.buffer, &beta.buffer, &out.buffer, rows, cols, eps)?;
             return Ok(out);
@@ -245,8 +245,8 @@ impl LazyRuntime {
             let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
             let weights = self.get_tensor(node.inputs[0])?;
             let indices = self.get_tensor(node.inputs[1])?;
-            let seq_len = indices.meta.shape.dims()[0];
-            let embed_dim = weights.meta.shape.dims()[1];
+            let seq_len = indices.meta.layout.shape.dims()[0];
+            let embed_dim = weights.meta.layout.shape.dims()[1];
             REGISTRY.dispatch_embedding_typed(device, dtype, &weights.buffer, &indices.buffer, &out.buffer, seq_len, embed_dim)?;
             return Ok(out);
         }
@@ -277,7 +277,7 @@ impl LazyRuntime {
             let out_buf = self.pool.acquire(device, out_size)?;
             let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
             let input = self.get_tensor(node.inputs[0])?;
-            let in_dims = input.meta.shape.dims();
+            let in_dims = input.meta.layout.shape.dims();
             if dim == 0 {
                 let cols = in_dims[1];
                 let out_rows = node.out_shape.dims()[0];
@@ -296,7 +296,7 @@ impl LazyRuntime {
             let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
             let a = self.get_tensor(node.inputs[0])?;
             let b = self.get_tensor(node.inputs[1])?;
-            let a_dims = a.meta.shape.dims();
+            let a_dims = a.meta.layout.shape.dims();
             if dim == 0 {
                 let rows_a = a_dims[0];
                 let cols = a_dims[1];
@@ -305,7 +305,7 @@ impl LazyRuntime {
             } else {
                 let rows = a_dims[0];
                 let cols_a = a_dims[1];
-                let cols_b = b.meta.shape.dims()[1];
+                let cols_b = b.meta.layout.shape.dims()[1];
                 REGISTRY.dispatch_concat_dim1_typed(device, dtype, &a.buffer, &b.buffer, &out.buffer, rows, cols_a, cols_b)?;
             }
             return Ok(out);
@@ -316,7 +316,7 @@ impl LazyRuntime {
             let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
             let input = self.get_tensor(node.inputs[0])?;
             let bias = self.get_tensor(node.inputs[1])?;
-            let dims = input.meta.shape.dims();
+            let dims = input.meta.layout.shape.dims();
             let (rows, cols) = (dims[0], dims[1]);
             REGISTRY.dispatch_add_bias_typed(device, dtype, &input.buffer, &bias.buffer, &out.buffer, rows, cols)?;
             return Ok(out);
@@ -326,7 +326,7 @@ impl LazyRuntime {
             let out_buf = self.pool.acquire(device, out_size)?;
             let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
             let input = self.get_tensor(node.inputs[0])?;
-            let dims = input.meta.shape.dims();
+            let dims = input.meta.layout.shape.dims();
             let (rows, cols) = (dims[0], dims[1]);
             REGISTRY.dispatch_softmax_causal_typed(device, dtype, &input.buffer, &out.buffer, rows, cols)?;
             return Ok(out);
@@ -339,7 +339,7 @@ impl LazyRuntime {
             let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), DType::Int32, out_buf);
             let input = self.get_tensor(node.inputs[0])?;
             let input_dtype = input.meta.dtype;
-            let in_dims = input.meta.shape.dims();
+            let in_dims = input.meta.layout.shape.dims();
             let (rows, cols) = if in_dims.len() == 2 {
                 (in_dims[0], in_dims[1])
             } else {
@@ -367,8 +367,8 @@ impl LazyRuntime {
             let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
             let a = self.get_tensor(node.inputs[0])?;
             let b = self.get_tensor(node.inputs[1])?;
-            let a_dims = a.meta.shape.dims();
-            let b_dims = b.meta.shape.dims();
+            let a_dims = a.meta.layout.shape.dims();
+            let b_dims = b.meta.layout.shape.dims();
             let (m, k) = (a_dims[0], a_dims[1]);
             let n = b_dims[1];
             REGISTRY.dispatch_matmul_typed(device, dtype, &a.buffer, &b.buffer, &out.buffer, m, n, k)?;
@@ -425,14 +425,14 @@ impl LazyRuntime {
 
         if node.op.is_softmax() {
             let input = self.get_tensor(node.inputs[0])?;
-            let dims = input.meta.shape.dims();
+            let dims = input.meta.layout.shape.dims();
             let (rows, cols) = (dims[0], dims[1]);
             return REGISTRY.dispatch_softmax_typed_nb(device, dtype, queue, &input.buffer, &out.buffer, rows, cols);
         }
 
         if node.op.is_transpose() {
             let input = self.get_tensor(node.inputs[0])?;
-            let dims = input.meta.shape.dims();
+            let dims = input.meta.layout.shape.dims();
             let (rows, cols) = (dims[0], dims[1]);
             return REGISTRY.dispatch_transpose_typed_nb(device, dtype, queue, &input.buffer, &out.buffer, rows, cols);
         }
@@ -452,7 +452,7 @@ impl LazyRuntime {
             let input = self.get_tensor(node.inputs[0])?;
             let gamma = self.get_tensor(node.inputs[1])?;
             let beta = self.get_tensor(node.inputs[2])?;
-            let dims = input.meta.shape.dims();
+            let dims = input.meta.layout.shape.dims();
             let (rows, cols) = (dims[0], dims[1]);
             return REGISTRY.dispatch_layer_norm_typed_nb(device, dtype, queue, &input.buffer, &gamma.buffer, &beta.buffer, &out.buffer, rows, cols, eps);
         }
@@ -460,8 +460,8 @@ impl LazyRuntime {
         if node.op.is_embedding() {
             let weights = self.get_tensor(node.inputs[0])?;
             let indices = self.get_tensor(node.inputs[1])?;
-            let seq_len = indices.meta.shape.dims()[0];
-            let embed_dim = weights.meta.shape.dims()[1];
+            let seq_len = indices.meta.layout.shape.dims()[0];
+            let embed_dim = weights.meta.layout.shape.dims()[1];
             return REGISTRY.dispatch_embedding_typed_nb(device, dtype, queue, &weights.buffer, &indices.buffer, &out.buffer, seq_len, embed_dim);
         }
 
@@ -485,7 +485,7 @@ impl LazyRuntime {
 
         if let crate::graph::OpKind::Slice { dim, start, .. } = node.op {
             let input = self.get_tensor(node.inputs[0])?;
-            let in_dims = input.meta.shape.dims();
+            let in_dims = input.meta.layout.shape.dims();
             if dim == 0 {
                 let cols = in_dims[1];
                 let out_rows = node.out_shape.dims()[0];
@@ -501,7 +501,7 @@ impl LazyRuntime {
         if let crate::graph::OpKind::Concat { dim } = node.op {
             let a = self.get_tensor(node.inputs[0])?;
             let b = self.get_tensor(node.inputs[1])?;
-            let a_dims = a.meta.shape.dims();
+            let a_dims = a.meta.layout.shape.dims();
             if dim == 0 {
                 let rows_a = a_dims[0];
                 let cols = a_dims[1];
@@ -510,7 +510,7 @@ impl LazyRuntime {
             } else {
                 let rows = a_dims[0];
                 let cols_a = a_dims[1];
-                let cols_b = b.meta.shape.dims()[1];
+                let cols_b = b.meta.layout.shape.dims()[1];
                 return REGISTRY.dispatch_concat_dim1_typed_nb(device, dtype, queue, &a.buffer, &b.buffer, &out.buffer, rows, cols_a, cols_b);
             }
         }
@@ -518,14 +518,14 @@ impl LazyRuntime {
         if node.op.is_add_bias() {
             let input = self.get_tensor(node.inputs[0])?;
             let bias = self.get_tensor(node.inputs[1])?;
-            let dims = input.meta.shape.dims();
+            let dims = input.meta.layout.shape.dims();
             let (rows, cols) = (dims[0], dims[1]);
             return REGISTRY.dispatch_add_bias_typed_nb(device, dtype, queue, &input.buffer, &bias.buffer, &out.buffer, rows, cols);
         }
 
         if node.op.is_softmax_causal() {
             let input = self.get_tensor(node.inputs[0])?;
-            let dims = input.meta.shape.dims();
+            let dims = input.meta.layout.shape.dims();
             let (rows, cols) = (dims[0], dims[1]);
             return REGISTRY.dispatch_softmax_causal_typed_nb(device, dtype, queue, &input.buffer, &out.buffer, rows, cols);
         }
@@ -533,7 +533,7 @@ impl LazyRuntime {
         if node.op.is_argmax() {
             let input = self.get_tensor(node.inputs[0])?;
             let input_dtype = input.meta.dtype;
-            let in_dims = input.meta.shape.dims();
+            let in_dims = input.meta.layout.shape.dims();
             let (rows, cols) = if in_dims.len() == 2 {
                 (in_dims[0], in_dims[1])
             } else {
@@ -556,8 +556,8 @@ impl LazyRuntime {
         } else if node.op.is_matmul() {
             let a = self.get_tensor(node.inputs[0])?;
             let b = self.get_tensor(node.inputs[1])?;
-            let a_dims = a.meta.shape.dims();
-            let b_dims = b.meta.shape.dims();
+            let a_dims = a.meta.layout.shape.dims();
+            let b_dims = b.meta.layout.shape.dims();
             let (m, k) = (a_dims[0], a_dims[1]);
             let n = b_dims[1];
             REGISTRY.dispatch_matmul_typed_nb(device, dtype, queue, &a.buffer, &b.buffer, &out.buffer, m, n, k)
@@ -602,19 +602,19 @@ impl LazyRuntime {
     /// Read tensor data as raw bytes. Requires the tensor to be materialized.
     pub fn read_bytes(&self, id: u64) -> Result<Vec<u8>> {
         let t = self.get_tensor(id)?;
-        Ok(t.as_bytes().to_vec())
+        Ok(t.as_bytes()?.to_vec())
     }
 
     /// Read tensor data as f16 slice (raw u16 bit patterns). Requires the tensor to be materialized.
     pub fn read_f16(&self, id: u64) -> Result<Vec<u16>> {
         let t = self.get_tensor(id)?;
-        Ok(t.as_f16_slice().to_vec())
+        Ok(t.as_f16_slice()?.to_vec())
     }
 
     /// Read tensor data as f32 slice. Requires the tensor to be materialized.
     pub fn read_f32(&self, id: u64) -> Result<Vec<f32>> {
         let t = self.get_tensor(id)?;
-        Ok(t.as_f32_slice().to_vec())
+        Ok(t.as_f32_slice()?.to_vec())
     }
 
     /// Evaluate a tensor via the remote GPU service (VM backend).
@@ -638,11 +638,11 @@ impl LazyRuntime {
                     if !self.graph.has_node(input_id) && !needed_tensors.contains(&input_id) {
                         needed_tensors.insert(input_id);
                         if let Some(t) = self.tensors.get(&input_id) {
-                            let data = t.as_f32_slice();
+                            let data = t.as_f32_slice()?;
                             let bytes: Vec<u8> = data.iter().flat_map(|f| f.to_le_bytes()).collect();
                             tensor_data.push(crate::serial::TensorData {
                                 id: input_id,
-                                shape: t.meta.shape.dims().to_vec(),
+                                shape: t.meta.layout.shape.dims().to_vec(),
                                 dtype: t.meta.dtype,
                                 data: bytes,
                             });
@@ -806,7 +806,7 @@ mod tests {
             id: c_id,
             op: OpKind::Add,
             inputs: vec![a_id, b_id],
-            out_shape: Shape::new(vec![4]),
+            out_shape: Shape::new(vec![4]).unwrap(),
             out_dtype: DType::Float32,
             container_id: ContainerId::DEFAULT,
         });
@@ -838,7 +838,7 @@ mod tests {
             id: neg_id,
             op: OpKind::Neg,
             inputs: vec![a_id],
-            out_shape: Shape::new(vec![4]),
+            out_shape: Shape::new(vec![4]).unwrap(),
             out_dtype: DType::Float32,
             container_id: ContainerId::DEFAULT,
         });
@@ -848,7 +848,7 @@ mod tests {
             id: relu_id,
             op: OpKind::Relu,
             inputs: vec![neg_id],
-            out_shape: Shape::new(vec![4]),
+            out_shape: Shape::new(vec![4]).unwrap(),
             out_dtype: DType::Float32,
             container_id: ContainerId::DEFAULT,
         });

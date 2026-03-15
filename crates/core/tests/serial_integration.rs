@@ -21,8 +21,8 @@ fn serialize_and_execute_remotely_in_process() {
     let a_id = a.meta.id;
     let b_id = b.meta.id;
 
-    let a_bytes: Vec<u8> = a.as_f32_slice().iter().flat_map(|f| f.to_le_bytes()).collect();
-    let b_bytes: Vec<u8> = b.as_f32_slice().iter().flat_map(|f| f.to_le_bytes()).collect();
+    let a_bytes: Vec<u8> = a.as_f32_slice().unwrap().iter().flat_map(|f| f.to_le_bytes()).collect();
+    let b_bytes: Vec<u8> = b.as_f32_slice().unwrap().iter().flat_map(|f| f.to_le_bytes()).collect();
 
     client_rt.insert_tensor(a).unwrap();
     client_rt.insert_tensor(b).unwrap();
@@ -80,8 +80,8 @@ fn serialize_matmul_remotely() {
     let a_id = a.meta.id;
     let b_id = b.meta.id;
 
-    let a_bytes: Vec<u8> = a.as_f32_slice().iter().flat_map(|f| f.to_le_bytes()).collect();
-    let b_bytes: Vec<u8> = b.as_f32_slice().iter().flat_map(|f| f.to_le_bytes()).collect();
+    let a_bytes: Vec<u8> = a.as_f32_slice().unwrap().iter().flat_map(|f| f.to_le_bytes()).collect();
+    let b_bytes: Vec<u8> = b.as_f32_slice().unwrap().iter().flat_map(|f| f.to_le_bytes()).collect();
 
     client_rt.insert_tensor(a).unwrap();
     client_rt.insert_tensor(b).unwrap();
