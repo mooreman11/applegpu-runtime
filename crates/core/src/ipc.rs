@@ -11,6 +11,7 @@ pub fn default_socket_path() -> String {
 }
 
 /// Send an eval request to the GPU service and receive the result.
+#[deprecated(since = "0.8.0", note = "Use applegpu-client crate instead")]
 pub fn eval_remote(socket_path: &str, request: &EvalRequest) -> Result<EvalResponse> {
     let mut stream = UnixStream::connect(socket_path)
         .map_err(|e| GpuError::ComputeFailed(format!(
