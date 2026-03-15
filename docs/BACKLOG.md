@@ -124,40 +124,37 @@ _Almost everything on the roadmap is blocked by 2D-only tensors. This is the arc
 - [ ] **Gather/scatter** — index-based tensor operations
 - [ ] **More models** — GPT-2 medium/large, other architectures
 
+## v0.4.0 — SHIPPED
+_38 GPU ops, PyTorch device backend with nn.Module migration, CNN support._
+
+### All v0.4.0 GPU ops: DONE
+- [x] sum, mean, where, masked_fill, conv1d, conv2d, batch_norm, max_pool2d, avg_pool2d, pow, abs, sign, clamp, gather, index_select, triu, tril
+- [x] PyTorch device backend with `gpu.to_applegpu(model)` for nn.Module migration
+- [x] 40+ aten ops dispatched to Metal via __torch_dispatch__
+
 ## Up Next
 
-### v0.4.0: Expand PyTorch device backend coverage
-_The device backend dispatches 25+ ops but real models need more. Add the missing ops that cause CPU fallbacks._
-
-**New GPU ops needed (Metal kernels):** ALL DONE
-- [x] **sum / mean** — reduction ops
-- [x] **where / masked_fill** — conditional ops
-- [x] **conv1d / conv2d** — convolution kernels
-- [x] **batch_norm** — inference-mode normalization
-- [x] **max_pool2d / avg_pool2d** — pooling layers
-- [x] **linear (fused matmul + bias)** — handled via aten.addmm dispatch
-- [x] **pow** — element-wise power
-- [x] **abs / sign / clamp** — element-wise math
-- [x] **gather / index_select** — advanced indexing (scatter deferred to CPU fallback)
-- [x] **triu / tril** — triangular ops
+### v0.5.0: Production readiness
+_Make the device backend robust for real-world PyTorch workloads._
 
 **PyTorch device backend improvements:**
-- [ ] **model.to("applegpu")** — full nn.Module parameter migration (requires proper storage backend)
+- [ ] **Native model.to("applegpu")** — proper PrivateUse1 storage backend (no manual to_applegpu needed)
 - [ ] **Reduce CPU fallback ops** — trace real models, implement the top fallback ops
 - [ ] **Direct data_ptr() transfer** — bypass NumPy for tensor conversion (performance)
 - [ ] **torch.compile() support** — register as a torch.compile backend for graph-level optimization
+- [ ] **scatter GPU kernel** — currently CPU fallback only
 
 **Training support:**
 - [ ] **PyTorch autograd integration** — backward ops for all forward ops
 - [ ] **Gradient accumulation** — in-place ops for parameter updates
 - [ ] **Optimizer kernels** — SGD, Adam on GPU
 
-### More models
+**Model targets:**
+- [ ] **ResNet-18/50** — test with conv2d + batch_norm + max_pool (all ops ready)
 - [ ] **GPT-2 medium/large** — test with larger model variants
 - [ ] **BERT** — encoder-only transformer
-- [ ] **ResNet** — requires conv2d, batch_norm, max_pool (see ops above)
-- [ ] **Whisper / audio models** — requires conv1d
-- [ ] **Stable Diffusion** — requires conv2d, group_norm, attention
+- [ ] **Whisper / audio models** — requires conv1d (ready)
+- [ ] **Stable Diffusion** — requires conv2d + group_norm + attention
 
 ## Further Backlog
 

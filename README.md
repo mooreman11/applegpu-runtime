@@ -120,7 +120,7 @@ make test-python   # uv run pytest -v
 
 ## Status
 
-v0.3.0. Current capabilities:
+v0.4.0. Current capabilities:
 
 - **Two backends** — MLX-native (direct Metal) and VM (IPC to GPU service process)
 - **VM backend** — graph serialization over Unix sockets to a standalone `gpu-service` binary
@@ -146,7 +146,9 @@ v0.3.0. Current capabilities:
 - **General transpose** — `gpu.transpose_dims(t, dim0, dim1)` for arbitrary dimension swaps, enabling batched multi-head attention via reshape + transpose
 - **PyTorch device backend** — `gpu.enable_torch_backend()` + `gpu.to_applegpu(model)` moves nn.Module parameters to Metal GPU. `ApplegpuTensor` with `__torch_dispatch__` routes 27+ aten ops to Metal. CPU fallback with warnings for unsupported ops.
 - **Text generation sampling** — temperature, top-k, and top-p (nucleus) sampling for diverse, coherent output
-- 505 tests passing across all layers (234 Rust + 13 Swift + 258 Python)
+- **CNN ops** — conv1d, conv2d, batch_norm, max_pool2d, avg_pool2d for ResNet and similar architectures
+- **Math ops** — abs, sign, pow, clamp, where, masked_fill, triu, tril, gather, index_select, sum, mean
+- 546 tests passing across all layers (265 Rust + 13 Swift + 268 Python)
 
 ### NumPy & PyTorch Interop
 
