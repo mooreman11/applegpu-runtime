@@ -132,29 +132,39 @@ _38 GPU ops, PyTorch device backend with nn.Module migration, CNN support._
 - [x] PyTorch device backend with `gpu.to_applegpu(model)` for nn.Module migration
 - [x] 40+ aten ops dispatched to Metal via __torch_dispatch__
 
+## v0.5.0 — SHIPPED
+_Model validation: GPT-2 (small/medium/large), ResNet-18, BERT all run on Metal._
+
+### Validated models:
+- [x] **GPT-2 small** — 0.09s/token with KV cache + batched attention
+- [x] **GPT-2 medium** — 0.31s/token (345M params, 24 layers)
+- [x] **GPT-2 large** — 1.38s/token (774M params, 36 layers)
+- [x] **ResNet-18** — CNN inference, output matches CPU within tolerance
+- [x] **BERT** — encoder inference, output matches CPU
+- [x] **Examples directory** — 4 demo scripts with CLI args
+
 ## Up Next
 
-### v0.5.0: Production readiness
-_Make the device backend robust for real-world PyTorch workloads._
+### v0.6.0: Training support (autograd)
+_Enable model training on Metal GPU. Currently inference-only._
 
-**PyTorch device backend improvements:**
-- [ ] **Native model.to("applegpu")** — proper PrivateUse1 storage backend (no manual to_applegpu needed)
-- [ ] **Reduce CPU fallback ops** — trace real models, implement the top fallback ops
-- [ ] **Direct data_ptr() transfer** — bypass NumPy for tensor conversion (performance)
-- [ ] **torch.compile() support** — register as a torch.compile backend for graph-level optimization
-- [ ] **scatter GPU kernel** — currently CPU fallback only
+**Autograd:**
+- [ ] **Backward ops for element-wise** — grad_add, grad_mul, grad_relu, grad_gelu, grad_exp, grad_log, grad_sqrt, grad_tanh, grad_abs, grad_sign
+- [ ] **Backward ops for matrix** — grad_matmul, grad_softmax, grad_layer_norm
+- [ ] **Backward ops for CNN** — grad_conv2d, grad_batch_norm, grad_max_pool2d, grad_avg_pool2d
+- [ ] **PyTorch autograd integration** — register backward ops via torch.autograd.Function
+- [ ] **Gradient accumulation** — in-place parameter updates
+- [ ] **Optimizer kernels** — SGD, Adam on Metal GPU
 
-**Training support:**
-- [ ] **PyTorch autograd integration** — backward ops for all forward ops
-- [ ] **Gradient accumulation** — in-place ops for parameter updates
-- [ ] **Optimizer kernels** — SGD, Adam on GPU
+**Performance:**
+- [ ] **torch.compile() support** — graph-level fusion, eliminate Python dispatch overhead
+- [ ] **Direct data_ptr() transfer** — bypass NumPy for tensor conversion
+- [ ] **Native model.to("applegpu")** — proper PrivateUse1 storage backend
 
-**Model targets:**
-- [x] **ResNet-18** — runs end-to-end on Metal GPU, output matches CPU within tolerance
-- [x] **GPT-2 medium/large** — both run end-to-end (medium: 0.31s/token, large: 1.38s/token)
-- [x] **BERT** — runs end-to-end on Metal GPU, output matches CPU
-- [ ] **Whisper / audio models** — requires conv1d (ready)
-- [ ] **Stable Diffusion** — requires conv2d + group_norm + attention
+**More models:**
+- [ ] **Whisper** — audio model with conv1d
+- [ ] **Stable Diffusion** — requires group_norm (new kernel)
+- [ ] **Training validation** — fine-tune GPT-2 small on a text corpus
 
 ## Further Backlog
 

@@ -16,25 +16,17 @@ Swift Compat Layer ←  Metal, AVF (Apple Virtualization Framework)
    Metal GPU
 ```
 
-### Backends
-
-- **MLX-native** (default) — direct Metal GPU execution, maximum performance
-- **AVF VM** — VM-isolated execution with snapshots, DDP, and multi-node simulation
-
 ## Install
 
 ```bash
 # Prerequisites: Rust, Swift (Xcode), uv
 make setup
-
-# Run all tests
-make test
-
-# Install as editable Python package
 uv run maturin develop
 ```
 
 ## PyTorch Device Backend
+
+Run standard PyTorch models on Metal GPU — no model code changes needed.
 
 ```python
 import torch
@@ -42,7 +34,7 @@ import applegpu_runtime as gpu
 
 gpu.enable_torch_backend()
 
-# Move a model to Metal GPU — parameters dispatch through Metal
+# Move any nn.Module to Metal GPU
 model = torch.nn.Sequential(
     torch.nn.Linear(64, 128),
     torch.nn.ReLU(),
@@ -53,171 +45,94 @@ model = gpu.to_applegpu(model)
 # Forward pass runs on Metal GPU
 from applegpu_runtime.torch_backend import ApplegpuTensor
 x = ApplegpuTensor.from_torch(torch.randn(32, 64))
-output = model(x)             # matmul + bias + relu on Metal
+output = model(x)              # matmul + bias + relu on Metal
 result = output.to_torch_cpu() # back to CPU when needed
 ```
 
-## GPT-2 Inference
+**Validated models:** GPT-2 (small/medium/large), ResNet-18, BERT
+
+## GPT-2 Text Generation
 
 ```python
 import applegpu_runtime as gpu
 
-# One line: load GPT-2, tokenize, run forward pass, generate text
 output = gpu.run_model("gpt2", "The meaning of life is", max_tokens=50,
                        temperature=0.8, top_k=50, top_p=0.9)
 print(output)
 ```
 
-## Quick Start
+## Low-Level API
 
 ```python
 import applegpu_runtime as gpu
 
 gpu.init_backend()
 
-# Create tensors (data lives on GPU via shared memory)
 a = gpu.tensor([1.0, 2.0, 3.0, 4.0], shape=[2, 2])
 b = gpu.tensor([5.0, 6.0, 7.0, 8.0], shape=[2, 2])
 
-# Operators are lazy — they build a computation graph
+# Lazy operators build a computation graph
 c = a + b              # no GPU work yet
 d = a @ b              # still just graph nodes
 e = (c * a).relu()     # chain freely
 
 # Computation happens on materialization
 e.to_list()            # evaluates the entire chain on the GPU
-e.shape                # [2, 2]
-repr(e)                # GpuTensor(id=..., shape=[2, 2], materialized)
-
-# All Python operators work
-c = a + b              # element-wise add
-c = a - b              # element-wise sub
-c = a * b              # element-wise mul
-c = a / b              # element-wise div
-c = a @ b              # matrix multiply
-c = -a                 # negation
-
-# Methods for unary ops
-c = a.relu()
-c = a.exp()
-c = a.log()
-c = a.sqrt()
-
-# Lifecycle
-c.eval()               # explicit materialization
-gpu.destroy(c)         # explicit cleanup (or let GC handle it)
 ```
+
+## Capabilities
+
+### 38 GPU Operations (f32 + f16, all N-D)
+
+| Category | Ops |
+|----------|-----|
+| Element-wise | add, sub, mul, div, neg, relu, gelu, exp, log, sqrt, abs, sign, pow, clamp, tanh |
+| Reduction | softmax, softmax_causal, argmax, sum, mean |
+| Matrix | matmul (batched), layer_norm, embedding, attention, attention_causal |
+| Shape | reshape, slice, concat, add_bias, transpose, transpose_dims |
+| Conditional | where, masked_fill, triu, tril |
+| Indexing | gather, index_select |
+| CNN | conv1d, conv2d, batch_norm, max_pool2d, avg_pool2d |
+
+All ops support N-D tensors (up to 8 dimensions) with NumPy-style broadcasting and kernel fusion.
+
+### Infrastructure
+
+- **PyTorch device backend** — `ApplegpuTensor` with `__torch_dispatch__`, 40+ aten ops routed to Metal, CPU fallback with warnings
+- **Multi-container scheduler** — priority-based fair queuing with per-container resource quotas
+- **Persistent memory pool** — power-of-two bucketed buffer reuse with watermark eviction
+- **Command buffer batching** — non-blocking GPU dispatch, single wait per eval
+- **N-D tensors** — stride-based MSL kernels, NumPy-style broadcasting
+- **Multi-dtype** — 10 types (float16/32/64, int8/16/32/64, uint8/32, bool) with NumPy/PyTorch roundtrip
+- **Kernel fusion** — auto-detect element-wise chains, generate fused MSL at runtime
+- **Two backends** — MLX-native (direct Metal) and VM (IPC to GPU service)
+
+### Performance
+
+| Model | Tokens/sec | Notes |
+|-------|-----------|-------|
+| GPT-2 small (124M) | ~11 tok/s | KV cache + batched multi-head attention |
+| GPT-2 medium (345M) | ~3 tok/s | 24 layers, 1024 dims |
+| GPT-2 large (774M) | ~0.7 tok/s | 36 layers, 1280 dims |
+
+### Test Coverage
+
+549 tests across all layers (265 Rust + 13 Swift + 271 Python)
+
+## Examples
+
+See [`examples/`](examples/) for standalone demo scripts:
+- `gpt2_generate.py` — text generation with sampling
+- `resnet_inference.py` — CNN classification with benchmarking
+- `bert_inference.py` — transformer encoder inference
+- `pytorch_device_backend.py` — MLP, broadcasting, multi-dtype
 
 ## Development
 
-This project uses **TDD** across all three layers:
+TDD across all three layers:
 
 ```bash
 make test-rust     # cargo test -p applegpu-core
 make test-swift    # cd swift && swift test
 make test-python   # uv run pytest -v
-```
-
-## Status
-
-v0.4.0. Current capabilities:
-
-- **Two backends** — MLX-native (direct Metal) and VM (IPC to GPU service process)
-- **VM backend** — graph serialization over Unix sockets to a standalone `gpu-service` binary
-- **Kernel fusion** — auto-detects element-wise chains, generates fused MSL kernels at runtime
-- **GpuTensor class** with Python operators (`+`, `-`, `*`, `/`, `@`, unary `-`) and auto-cleanup
-- **Scaled dot-product attention** — `gpu.attention(Q, K, V)` with proper 1/sqrt(d_k) scaling
-- **Multi-container scheduler** — priority-based fair queuing with per-container resource quotas, deficit-based scheduling, starvation prevention, and pause/resume support
-- **Persistent memory pool** — power-of-two bucketed buffer reuse with watermark eviction, reducing Metal allocation churn for iterative workloads
-- **NumPy interop** — `gpu.from_numpy(arr)` and `tensor.to_numpy()` for seamless data interchange with the Python ecosystem
-- **PyTorch interop** — `gpu.from_torch(tensor)` and `tensor.to_torch()` for bidirectional data exchange with PyTorch
-- **Multi-dtype support** — 10 data types (float16, float32, float64, int8, int16, int32, int64, uint8, uint32, bool) with full NumPy/PyTorch roundtrip, native half-precision kernels at 2x throughput on Apple Silicon, f32 accumulation for matmul/softmax, dtype-aware fusion
-- **Command buffer batching** — non-blocking GPU dispatch with single wait per eval, eliminating per-op GPU stalls in chain evaluations
-- **Resource limits** — configurable max tensor size, total GPU memory, and tensor count via `gpu.set_limits()` or env vars, enforced per-container and globally
-- **Lazy execution** — ops build a DAG, computation deferred until materialization
-- **Transformer ops** — GELU, LayerNorm (with affine), Embedding (Int32), softmax_causal, attention_causal, argmax
-- **GPT-2 inference** — `gpu.run_model("gpt2", "Hello", max_tokens=50)` with top-k/top-p sampling, KV cache, batched multi-head attention
-- **N-D tensors (up to 8 dimensions)** — stride-based MSL kernels, NumPy-style broadcasting for all element-wise ops, N-D reshape, 3D/4D tensor creation and roundtrip via NumPy
-- **Batched N-D ops** — matmul, softmax, softmax_causal, layer_norm, embedding, transpose, attention, and attention_causal all support arbitrary leading batch dimensions with broadcasting. One kernel dispatch handles all batch elements.
-- **Tensor manipulation** — reshape, slice, concat, add_bias (broadcast)
-- **Conditional ops** — `where_cond(cond, x, y)` ternary select with N-D broadcasting, `masked_fill(input, mask, value)` with embedded scalar
-- **Triangular ops** — `triu(input, diagonal)` and `tril(input, diagonal)` with batched 3D dispatch and diagonal offset
-- 33 GPU operations (f32 + f16): add, sub, mul, div, neg, relu, gelu, exp, log, sqrt, abs, sign, pow, clamp, where, masked_fill, triu, tril, matmul, softmax, softmax_causal, layer_norm, transpose, scalar_mul, embedding, attention, attention_causal, reshape, slice, concat, add_bias, argmax, sum, mean + kernel fusion
-- **General transpose** — `gpu.transpose_dims(t, dim0, dim1)` for arbitrary dimension swaps, enabling batched multi-head attention via reshape + transpose
-- **PyTorch device backend** — `gpu.enable_torch_backend()` + `gpu.to_applegpu(model)` moves nn.Module parameters to Metal GPU. `ApplegpuTensor` with `__torch_dispatch__` routes 27+ aten ops to Metal. CPU fallback with warnings for unsupported ops.
-- **Text generation sampling** — temperature, top-k, and top-p (nucleus) sampling for diverse, coherent output
-- **CNN ops** — conv1d, conv2d, batch_norm, max_pool2d, avg_pool2d for ResNet and similar architectures
-- **Math ops** — abs, sign, pow, clamp, where, masked_fill, triu, tril, gather, index_select, sum, mean
-- 546 tests passing across all layers (265 Rust + 13 Swift + 268 Python)
-
-### NumPy & PyTorch Interop
-
-```python
-import numpy as np
-import torch
-import applegpu_runtime as gpu
-
-gpu.init_backend()
-
-# NumPy → GPU → NumPy
-arr = np.random.randn(128, 64).astype(np.float32)
-t = gpu.from_numpy(arr)
-result = t.to_numpy()  # shape preserved
-
-# PyTorch → GPU → PyTorch
-x = torch.randn(128, 64)
-t = gpu.from_torch(x)
-result = t.to_torch()  # returns torch.Tensor
-
-# Mix: PyTorch data, GPU compute, NumPy output
-q = gpu.from_torch(torch.randn(32, 64))
-k = gpu.from_torch(torch.randn(32, 64))
-v = gpu.from_torch(torch.randn(32, 64))
-out = gpu.attention(q, k, v)
-result = out.to_numpy()  # [32, 64] attention output
-```
-
-### Multi-Container Scheduler
-
-```python
-import applegpu_runtime as gpu
-gpu.init_backend()
-
-# Register containers with resource quotas and priorities
-high = gpu.register_container(priority="high", max_memory_mb=256, max_tensors=500, max_pending=50)
-low = gpu.register_container(priority="low", max_memory_mb=128, max_tensors=200, max_pending=20)
-
-# Create lazy tensors and submit jobs to containers
-a = gpu.tensor([1.0, 2.0, 3.0], shape=[3])
-b = gpu.tensor([4.0, 5.0, 6.0], shape=[3])
-c = a + b  # lazy
-
-job_id = gpu.submit_job(high, c)        # submit to high-priority container
-gpu.run_next()                          # executes highest-priority job
-print(gpu.job_status(job_id))           # "completed"
-print(gpu.container_usage(high))        # (bytes_used, tensor_count)
-
-# Pause/resume containers
-gpu.pause_container(low)                # paused container's jobs are skipped
-gpu.resume_container(low)
-
-# Cleanup
-gpu.deregister_container(high)
-gpu.deregister_container(low)
-```
-
-### VM Backend Usage
-
-```bash
-# Terminal 1: Start GPU service
-cargo run -p applegpu-service
-
-# Terminal 2: Use VM backend
-APPLEGPU_BACKEND=vm python3 -c "
-import applegpu_runtime as gpu
-gpu.init_backend()
-a = gpu.tensor([1.0, 2.0, 3.0], shape=[3])
-b = gpu.tensor([10.0, 20.0, 30.0], shape=[3])
-print((a + b).to_list())  # [11.0, 22.0, 33.0] — executed on GPU service
-"
 ```
