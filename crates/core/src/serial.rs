@@ -90,6 +90,11 @@ fn op_to_discriminant(op: &OpKind) -> u32 {
         OpKind::Tril { .. } => 32,
         OpKind::Gather { .. } => 33,
         OpKind::IndexSelect { .. } => 34,
+        OpKind::Conv1d { .. } => 35,
+        OpKind::Conv2d { .. } => 36,
+        OpKind::BatchNorm { .. } => 37,
+        OpKind::MaxPool2d { .. } => 38,
+        OpKind::AvgPool2d { .. } => 39,
     }
 }
 
@@ -199,6 +204,41 @@ fn discriminant_to_op(d: u32, r: &mut impl Read) -> io::Result<OpKind> {
             let dim = read_u32(r)? as usize;
             Ok(OpKind::IndexSelect { dim })
         }
+        35 => {
+            let stride = read_u64(r)? as usize;
+            let padding = read_u64(r)? as usize;
+            Ok(OpKind::Conv1d { stride, padding })
+        }
+        36 => {
+            let s0 = read_u64(r)? as usize;
+            let s1 = read_u64(r)? as usize;
+            let p0 = read_u64(r)? as usize;
+            let p1 = read_u64(r)? as usize;
+            Ok(OpKind::Conv2d { stride: (s0, s1), padding: (p0, p1) })
+        }
+        37 => {
+            let mut eps_bytes = [0u8; 4];
+            r.read_exact(&mut eps_bytes)?;
+            Ok(OpKind::BatchNorm { eps: f32::from_le_bytes(eps_bytes) })
+        }
+        38 => {
+            let k0 = read_u64(r)? as usize;
+            let k1 = read_u64(r)? as usize;
+            let s0 = read_u64(r)? as usize;
+            let s1 = read_u64(r)? as usize;
+            let p0 = read_u64(r)? as usize;
+            let p1 = read_u64(r)? as usize;
+            Ok(OpKind::MaxPool2d { kernel_size: (k0, k1), stride: (s0, s1), padding: (p0, p1) })
+        }
+        39 => {
+            let k0 = read_u64(r)? as usize;
+            let k1 = read_u64(r)? as usize;
+            let s0 = read_u64(r)? as usize;
+            let s1 = read_u64(r)? as usize;
+            let p0 = read_u64(r)? as usize;
+            let p1 = read_u64(r)? as usize;
+            Ok(OpKind::AvgPool2d { kernel_size: (k0, k1), stride: (s0, s1), padding: (p0, p1) })
+        }
         _ => Err(io::Error::new(io::ErrorKind::InvalidData, format!("Unknown op type: {}", d))),
     }
 }
@@ -288,6 +328,35 @@ impl EvalRequest {
             }
             if let OpKind::IndexSelect { dim } = node.op {
                 write_u32(&mut buf, dim as u32).unwrap();
+            }
+            if let OpKind::Conv1d { stride, padding } = node.op {
+                write_u64(&mut buf, stride as u64).unwrap();
+                write_u64(&mut buf, padding as u64).unwrap();
+            }
+            if let OpKind::Conv2d { stride, padding } = node.op {
+                write_u64(&mut buf, stride.0 as u64).unwrap();
+                write_u64(&mut buf, stride.1 as u64).unwrap();
+                write_u64(&mut buf, padding.0 as u64).unwrap();
+                write_u64(&mut buf, padding.1 as u64).unwrap();
+            }
+            if let OpKind::BatchNorm { eps } = node.op {
+                buf.write_all(&eps.to_le_bytes()).unwrap();
+            }
+            if let OpKind::MaxPool2d { kernel_size, stride, padding } = node.op {
+                write_u64(&mut buf, kernel_size.0 as u64).unwrap();
+                write_u64(&mut buf, kernel_size.1 as u64).unwrap();
+                write_u64(&mut buf, stride.0 as u64).unwrap();
+                write_u64(&mut buf, stride.1 as u64).unwrap();
+                write_u64(&mut buf, padding.0 as u64).unwrap();
+                write_u64(&mut buf, padding.1 as u64).unwrap();
+            }
+            if let OpKind::AvgPool2d { kernel_size, stride, padding } = node.op {
+                write_u64(&mut buf, kernel_size.0 as u64).unwrap();
+                write_u64(&mut buf, kernel_size.1 as u64).unwrap();
+                write_u64(&mut buf, stride.0 as u64).unwrap();
+                write_u64(&mut buf, stride.1 as u64).unwrap();
+                write_u64(&mut buf, padding.0 as u64).unwrap();
+                write_u64(&mut buf, padding.1 as u64).unwrap();
             }
         }
 

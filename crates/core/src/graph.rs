@@ -70,6 +70,12 @@ pub enum OpKind {
     Gather { dim: usize },
     // Select rows/columns by 1D index tensor
     IndexSelect { dim: usize },
+    // CNN ops
+    Conv1d { stride: usize, padding: usize },
+    Conv2d { stride: (usize, usize), padding: (usize, usize) },
+    BatchNorm { eps: f32 },
+    MaxPool2d { kernel_size: (usize, usize), stride: (usize, usize), padding: (usize, usize) },
+    AvgPool2d { kernel_size: (usize, usize), stride: (usize, usize), padding: (usize, usize) },
 }
 
 impl OpKind {
@@ -111,6 +117,11 @@ impl OpKind {
             OpKind::Tril { .. } => "tril_f32",
             OpKind::Gather { dim } => if *dim == 0 { "gather_dim0_f32" } else { "gather_dim1_f32" },
             OpKind::IndexSelect { dim } => if *dim == 0 { "index_select_dim0_f32" } else { "index_select_dim1_f32" },
+            OpKind::Conv1d { .. } => "conv1d_f32",
+            OpKind::Conv2d { .. } => "conv2d_f32",
+            OpKind::BatchNorm { .. } => "batch_norm_f32",
+            OpKind::MaxPool2d { .. } => "max_pool2d_f32",
+            OpKind::AvgPool2d { .. } => "avg_pool2d_f32",
         }
     }
 
@@ -226,6 +237,26 @@ impl OpKind {
 
     pub fn is_index_select(&self) -> bool {
         matches!(self, OpKind::IndexSelect { .. })
+    }
+
+    pub fn is_conv1d(&self) -> bool {
+        matches!(self, OpKind::Conv1d { .. })
+    }
+
+    pub fn is_conv2d(&self) -> bool {
+        matches!(self, OpKind::Conv2d { .. })
+    }
+
+    pub fn is_batch_norm(&self) -> bool {
+        matches!(self, OpKind::BatchNorm { .. })
+    }
+
+    pub fn is_max_pool2d(&self) -> bool {
+        matches!(self, OpKind::MaxPool2d { .. })
+    }
+
+    pub fn is_avg_pool2d(&self) -> bool {
+        matches!(self, OpKind::AvgPool2d { .. })
     }
 }
 

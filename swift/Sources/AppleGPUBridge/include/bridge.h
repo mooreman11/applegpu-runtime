@@ -635,4 +635,34 @@ void* gpu_bridge_compute_triangular_nb(
     int32_t diagonal
 );
 
+// Generic 3D dispatch for CNN ops
+int32_t gpu_bridge_compute_3d(
+    GPUComputeHandle* compute,
+    const GPUBufferHandle* const* input_buffers,
+    uint32_t buffer_count,
+    GPUBufferHandle* output,
+    const uint32_t* uint_params,
+    uint32_t uint_param_count,
+    const float* float_params,
+    uint32_t float_param_count,
+    uint32_t grid_x,
+    uint32_t grid_y,
+    uint32_t grid_z
+);
+
+void* gpu_bridge_compute_3d_nb(
+    GPUComputeHandle* compute,
+    void* queue,
+    const GPUBufferHandle* const* input_buffers,
+    uint32_t buffer_count,
+    GPUBufferHandle* output,
+    const uint32_t* uint_params,
+    uint32_t uint_param_count,
+    const float* float_params,
+    uint32_t float_param_count,
+    uint32_t grid_x,
+    uint32_t grid_y,
+    uint32_t grid_z
+);
+
 #endif

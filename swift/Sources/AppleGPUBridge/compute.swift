@@ -2817,3 +2817,146 @@ public func gpuBridgeComputeFusedNDNB(
 
     return Unmanaged.passRetained(commandBuffer as AnyObject).toOpaque()
 }
+
+// MARK: - Generic 3D dispatch for CNN ops (conv, pool, batch_norm)
+
+/// Generic 3D dispatch: N input buffers + 1 output buffer + uint32 params + float params + 3D grid.
+/// Buffer layout: input[0]..input[N-1] at index 0..N-1, output at index N,
+/// uint params as individual setBytes at index N+1..N+upc, float params at N+1+upc..
+@_cdecl("gpu_bridge_compute_3d")
+public func gpuBridgeCompute3D(
+    _ computePtr: UnsafeMutableRawPointer?,
+    _ inputBuffers: UnsafePointer<UnsafeRawPointer?>?,
+    _ bufferCount: UInt32,
+    _ outputPtr: UnsafeMutableRawPointer?,
+    _ uintParams: UnsafePointer<UInt32>?,
+    _ uintParamCount: UInt32,
+    _ floatParams: UnsafePointer<Float>?,
+    _ floatParamCount: UInt32,
+    _ gridX: UInt32,
+    _ gridY: UInt32,
+    _ gridZ: UInt32
+) -> Int32 {
+    guard let computePtr = computePtr,
+          let inputBuffers = inputBuffers,
+          let outputPtr = outputPtr else { return -1 }
+
+    let compute = Unmanaged<GPUCompute>.fromOpaque(computePtr).takeUnretainedValue()
+    let bufOut = Unmanaged<GPUBuffer>.fromOpaque(outputPtr).takeUnretainedValue()
+
+    let n = Int(bufferCount)
+    let gx = Int(gridX), gy = Int(gridY), gz = Int(gridZ)
+    if gx == 0 || gy == 0 || gz == 0 { return 0 }
+
+    guard let commandBuffer = compute.commandQueue.makeCommandBuffer(),
+          let encoder = commandBuffer.makeComputeCommandEncoder() else { return -1 }
+
+    encoder.setComputePipelineState(compute.pipelineState)
+
+    // Input data buffers: buffer(0)..buffer(n-1)
+    for i in 0..<n {
+        guard let bufPtr = inputBuffers[i] else { return -1 }
+        let buf = Unmanaged<GPUBuffer>.fromOpaque(bufPtr).takeUnretainedValue()
+        encoder.setBuffer(buf.buffer, offset: 0, index: i)
+    }
+    // Output buffer: buffer(n)
+    encoder.setBuffer(bufOut.buffer, offset: 0, index: n)
+
+    // uint32 params: each as individual setBytes
+    let upc = Int(uintParamCount)
+    if let params = uintParams, upc > 0 {
+        for i in 0..<upc {
+            var val = params[i]
+            encoder.setBytes(&val, length: MemoryLayout<UInt32>.size, index: n + 1 + i)
+        }
+    }
+
+    // float params: each as individual setBytes continuing after uint params
+    let fpc = Int(floatParamCount)
+    if let fparams = floatParams, fpc > 0 {
+        for i in 0..<fpc {
+            var val = fparams[i]
+            encoder.setBytes(&val, length: MemoryLayout<Float>.size, index: n + 1 + upc + i)
+        }
+    }
+
+    let w = compute.pipelineState.threadExecutionWidth
+    let h = max(compute.pipelineState.maxTotalThreadsPerThreadgroup / w, 1)
+    let threadsPerGroup = MTLSize(width: min(w, gx), height: min(h, gy), depth: 1)
+    let gridSize = MTLSize(width: gx, height: gy, depth: gz)
+
+    encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadsPerGroup)
+    encoder.endEncoding()
+    commandBuffer.commit()
+    commandBuffer.waitUntilCompleted()
+
+    return commandBuffer.status == .completed ? 0 : -1
+}
+
+@_cdecl("gpu_bridge_compute_3d_nb")
+public func gpuBridgeCompute3DNB(
+    _ computePtr: UnsafeMutableRawPointer?,
+    _ queuePtr: UnsafeMutableRawPointer?,
+    _ inputBuffers: UnsafePointer<UnsafeRawPointer?>?,
+    _ bufferCount: UInt32,
+    _ outputPtr: UnsafeMutableRawPointer?,
+    _ uintParams: UnsafePointer<UInt32>?,
+    _ uintParamCount: UInt32,
+    _ floatParams: UnsafePointer<Float>?,
+    _ floatParamCount: UInt32,
+    _ gridX: UInt32,
+    _ gridY: UInt32,
+    _ gridZ: UInt32
+) -> UnsafeMutableRawPointer? {
+    guard let computePtr = computePtr,
+          let queuePtr = queuePtr,
+          let inputBuffers = inputBuffers,
+          let outputPtr = outputPtr else { return nil }
+
+    let compute = Unmanaged<GPUCompute>.fromOpaque(computePtr).takeUnretainedValue()
+    let queue = Unmanaged<MTLCommandQueue>.fromOpaque(queuePtr).takeUnretainedValue()
+    let bufOut = Unmanaged<GPUBuffer>.fromOpaque(outputPtr).takeUnretainedValue()
+
+    let n = Int(bufferCount)
+    let gx = Int(gridX), gy = Int(gridY), gz = Int(gridZ)
+    if gx == 0 || gy == 0 || gz == 0 { return nil }
+
+    guard let commandBuffer = queue.makeCommandBuffer(),
+          let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
+
+    encoder.setComputePipelineState(compute.pipelineState)
+
+    for i in 0..<n {
+        guard let bufPtr = inputBuffers[i] else { return nil }
+        let buf = Unmanaged<GPUBuffer>.fromOpaque(bufPtr).takeUnretainedValue()
+        encoder.setBuffer(buf.buffer, offset: 0, index: i)
+    }
+    encoder.setBuffer(bufOut.buffer, offset: 0, index: n)
+
+    let upc = Int(uintParamCount)
+    if let params = uintParams, upc > 0 {
+        for i in 0..<upc {
+            var val = params[i]
+            encoder.setBytes(&val, length: MemoryLayout<UInt32>.size, index: n + 1 + i)
+        }
+    }
+
+    let fpc = Int(floatParamCount)
+    if let fparams = floatParams, fpc > 0 {
+        for i in 0..<fpc {
+            var val = fparams[i]
+            encoder.setBytes(&val, length: MemoryLayout<Float>.size, index: n + 1 + upc + i)
+        }
+    }
+
+    let w = compute.pipelineState.threadExecutionWidth
+    let h = max(compute.pipelineState.maxTotalThreadsPerThreadgroup / w, 1)
+    let threadsPerGroup = MTLSize(width: min(w, gx), height: min(h, gy), depth: 1)
+    let gridSize = MTLSize(width: gx, height: gy, depth: gz)
+
+    encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadsPerGroup)
+    encoder.endEncoding()
+    commandBuffer.commit()
+
+    return Unmanaged.passRetained(commandBuffer as AnyObject).toOpaque()
+}

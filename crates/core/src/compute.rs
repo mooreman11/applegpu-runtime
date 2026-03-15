@@ -1269,6 +1269,219 @@ kernel void scalar_mul_f16(
 }
 "#;
 
+// ── CNN kernel sources ─────────────────────────────────────────────────────
+
+/// Conv1d MSL kernel. Buffer layout: input(0), weight(1), output(2),
+/// then uint params: batch(3), in_channels(4), out_channels(5), in_length(6),
+/// out_length(7), kernel_size(8), stride(9), padding(10).
+pub(crate) const CONV1D_KERNEL_SOURCE: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void conv1d_f32(
+    device const float* input [[buffer(0)]],
+    device const float* weight [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    constant uint& batch [[buffer(3)]],
+    constant uint& in_channels [[buffer(4)]],
+    constant uint& out_channels [[buffer(5)]],
+    constant uint& in_length [[buffer(6)]],
+    constant uint& out_length [[buffer(7)]],
+    constant uint& kernel_size [[buffer(8)]],
+    constant uint& stride [[buffer(9)]],
+    constant uint& padding [[buffer(10)]],
+    uint3 gid [[thread_position_in_grid]]
+) {
+    uint o = gid.x;
+    uint oc = gid.y;
+    uint b = gid.z;
+    if (o >= out_length || oc >= out_channels || b >= batch) return;
+
+    float sum = 0.0f;
+    for (uint ic = 0; ic < in_channels; ic++) {
+        for (uint k = 0; k < kernel_size; k++) {
+            int in_pos = int(o * stride + k) - int(padding);
+            if (in_pos >= 0 && uint(in_pos) < in_length) {
+                sum += input[b * in_channels * in_length + ic * in_length + in_pos]
+                     * weight[oc * in_channels * kernel_size + ic * kernel_size + k];
+            }
+        }
+    }
+    output[b * out_channels * out_length + oc * out_length + o] = sum;
+}
+"#;
+
+/// Conv2d MSL kernel. Buffer layout: input(0), weight(1), output(2),
+/// then uint params: batch(3), in_channels(4), out_channels(5), in_h(6), in_w(7),
+/// out_h(8), out_w(9), kh(10), kw(11), stride_h(12), stride_w(13), pad_h(14), pad_w(15).
+pub(crate) const CONV2D_KERNEL_SOURCE: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void conv2d_f32(
+    device const float* input [[buffer(0)]],
+    device const float* weight [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    constant uint& batch [[buffer(3)]],
+    constant uint& in_channels [[buffer(4)]],
+    constant uint& out_channels [[buffer(5)]],
+    constant uint& in_h [[buffer(6)]],
+    constant uint& in_w [[buffer(7)]],
+    constant uint& out_h [[buffer(8)]],
+    constant uint& out_w [[buffer(9)]],
+    constant uint& kh [[buffer(10)]],
+    constant uint& kw [[buffer(11)]],
+    constant uint& stride_h [[buffer(12)]],
+    constant uint& stride_w [[buffer(13)]],
+    constant uint& pad_h [[buffer(14)]],
+    constant uint& pad_w [[buffer(15)]],
+    uint3 gid [[thread_position_in_grid]]
+) {
+    uint ow = gid.x;
+    uint combined = gid.y;
+    uint b = gid.z;
+    uint oc = combined % out_channels;
+    uint oh = combined / out_channels;
+    if (ow >= out_w || oh >= out_h || b >= batch) return;
+
+    float sum = 0.0f;
+    for (uint ic = 0; ic < in_channels; ic++) {
+        for (uint i = 0; i < kh; i++) {
+            for (uint j = 0; j < kw; j++) {
+                int ih = int(oh * stride_h + i) - int(pad_h);
+                int iw = int(ow * stride_w + j) - int(pad_w);
+                if (ih >= 0 && uint(ih) < in_h && iw >= 0 && uint(iw) < in_w) {
+                    sum += input[b * in_channels * in_h * in_w + ic * in_h * in_w + ih * in_w + iw]
+                         * weight[oc * in_channels * kh * kw + ic * kh * kw + i * kw + j];
+                }
+            }
+        }
+    }
+    output[b * out_channels * out_h * out_w + oc * out_h * out_w + oh * out_w + ow] = sum;
+}
+"#;
+
+/// BatchNorm MSL kernel. Buffer layout: input(0), mean(1), var(2), weight(3), bias(4), output(5),
+/// then uint params: batch(6), channels(7), spatial(8), then float param: eps(9).
+pub(crate) const BATCH_NORM_KERNEL_SOURCE: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void batch_norm_f32(
+    device const float* input [[buffer(0)]],
+    device const float* mean [[buffer(1)]],
+    device const float* var_ [[buffer(2)]],
+    device const float* weight [[buffer(3)]],
+    device const float* bias [[buffer(4)]],
+    device float* output [[buffer(5)]],
+    constant uint& batch [[buffer(6)]],
+    constant uint& channels [[buffer(7)]],
+    constant uint& spatial [[buffer(8)]],
+    constant float& eps [[buffer(9)]],
+    uint3 gid [[thread_position_in_grid]]
+) {
+    uint s = gid.x;
+    uint c = gid.y;
+    uint b = gid.z;
+    if (s >= spatial || c >= channels || b >= batch) return;
+
+    uint idx = b * channels * spatial + c * spatial + s;
+    float inv_std = 1.0f / sqrt(var_[c] + eps);
+    output[idx] = (input[idx] - mean[c]) * inv_std * weight[c] + bias[c];
+}
+"#;
+
+/// MaxPool2d MSL kernel. Buffer layout: input(0), output(1),
+/// then uint params: batch(2), channels(3), in_h(4), in_w(5), out_h(6), out_w(7),
+/// kh(8), kw(9), stride_h(10), stride_w(11), pad_h(12), pad_w(13).
+pub(crate) const MAX_POOL2D_KERNEL_SOURCE: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void max_pool2d_f32(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    constant uint& batch [[buffer(2)]],
+    constant uint& channels [[buffer(3)]],
+    constant uint& in_h [[buffer(4)]],
+    constant uint& in_w [[buffer(5)]],
+    constant uint& out_h [[buffer(6)]],
+    constant uint& out_w [[buffer(7)]],
+    constant uint& kh [[buffer(8)]],
+    constant uint& kw [[buffer(9)]],
+    constant uint& stride_h [[buffer(10)]],
+    constant uint& stride_w [[buffer(11)]],
+    constant uint& pad_h [[buffer(12)]],
+    constant uint& pad_w [[buffer(13)]],
+    uint3 gid [[thread_position_in_grid]]
+) {
+    uint ow = gid.x;
+    uint combined = gid.y;
+    uint b = gid.z;
+    uint c = combined % channels;
+    uint oh = combined / channels;
+    if (ow >= out_w || oh >= out_h || b >= batch) return;
+
+    float max_val = -1e30f;
+    for (uint i = 0; i < kh; i++) {
+        for (uint j = 0; j < kw; j++) {
+            int ih = int(oh * stride_h + i) - int(pad_h);
+            int iw = int(ow * stride_w + j) - int(pad_w);
+            if (ih >= 0 && uint(ih) < in_h && iw >= 0 && uint(iw) < in_w) {
+                float val = input[b * channels * in_h * in_w + c * in_h * in_w + ih * in_w + iw];
+                max_val = max(max_val, val);
+            }
+        }
+    }
+    output[b * channels * out_h * out_w + c * out_h * out_w + oh * out_w + ow] = max_val;
+}
+"#;
+
+/// AvgPool2d MSL kernel. Same buffer layout as max_pool2d.
+pub(crate) const AVG_POOL2D_KERNEL_SOURCE: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void avg_pool2d_f32(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    constant uint& batch [[buffer(2)]],
+    constant uint& channels [[buffer(3)]],
+    constant uint& in_h [[buffer(4)]],
+    constant uint& in_w [[buffer(5)]],
+    constant uint& out_h [[buffer(6)]],
+    constant uint& out_w [[buffer(7)]],
+    constant uint& kh [[buffer(8)]],
+    constant uint& kw [[buffer(9)]],
+    constant uint& stride_h [[buffer(10)]],
+    constant uint& stride_w [[buffer(11)]],
+    constant uint& pad_h [[buffer(12)]],
+    constant uint& pad_w [[buffer(13)]],
+    uint3 gid [[thread_position_in_grid]]
+) {
+    uint ow = gid.x;
+    uint combined = gid.y;
+    uint b = gid.z;
+    uint c = combined % channels;
+    uint oh = combined / channels;
+    if (ow >= out_w || oh >= out_h || b >= batch) return;
+
+    float sum = 0.0f;
+    uint count = 0;
+    for (uint i = 0; i < kh; i++) {
+        for (uint j = 0; j < kw; j++) {
+            int ih = int(oh * stride_h + i) - int(pad_h);
+            int iw = int(ow * stride_w + j) - int(pad_w);
+            if (ih >= 0 && uint(ih) < in_h && iw >= 0 && uint(iw) < in_w) {
+                sum += input[b * channels * in_h * in_w + c * in_h * in_w + ih * in_w + iw];
+                count++;
+            }
+        }
+    }
+    output[b * channels * out_h * out_w + c * out_h * out_w + oh * out_w + ow] = count > 0 ? sum / float(count) : 0.0f;
+}
+"#;
+
 /// A Metal compute pipeline. Wraps command queue + pipeline state.
 pub struct ComputePipeline {
     handle: *mut ffi::GPUComputeHandle,
@@ -2491,6 +2704,72 @@ impl ComputePipeline {
         };
         if cb.is_null() { Err(GpuError::ComputeFailed("Non-blocking triangular dispatch failed".to_string())) } else { Ok(cb) }
     }
+
+    // ── Generic 3D dispatch for CNN ops ──────────────────────────────────
+
+    /// Generic 3D dispatch: variable input buffers + output + uint/float params + 3D grid.
+    pub fn dispatch_3d(
+        &self,
+        input_buffers: &[&Buffer],
+        buf_out: &Buffer,
+        uint_params: &[u32],
+        float_params: &[f32],
+        grid: (u32, u32, u32),
+    ) -> Result<()> {
+        let ptrs: Vec<*const ffi::GPUBufferHandle> = input_buffers
+            .iter()
+            .map(|b| b.raw_handle() as *const _)
+            .collect();
+        let result = unsafe {
+            ffi::gpu_bridge_compute_3d(
+                self.handle,
+                ptrs.as_ptr(),
+                ptrs.len() as u32,
+                buf_out.raw_handle(),
+                uint_params.as_ptr(),
+                uint_params.len() as u32,
+                float_params.as_ptr(),
+                float_params.len() as u32,
+                grid.0,
+                grid.1,
+                grid.2,
+            )
+        };
+        if result == 0 { Ok(()) } else { Err(GpuError::ComputeFailed("3D dispatch failed".to_string())) }
+    }
+
+    /// Non-blocking generic 3D dispatch.
+    pub fn dispatch_3d_nb(
+        &self,
+        queue: *mut std::ffi::c_void,
+        input_buffers: &[&Buffer],
+        buf_out: &Buffer,
+        uint_params: &[u32],
+        float_params: &[f32],
+        grid: (u32, u32, u32),
+    ) -> Result<*mut std::ffi::c_void> {
+        let ptrs: Vec<*const ffi::GPUBufferHandle> = input_buffers
+            .iter()
+            .map(|b| b.raw_handle() as *const _)
+            .collect();
+        let cb = unsafe {
+            ffi::gpu_bridge_compute_3d_nb(
+                self.handle,
+                queue,
+                ptrs.as_ptr(),
+                ptrs.len() as u32,
+                buf_out.raw_handle(),
+                uint_params.as_ptr(),
+                uint_params.len() as u32,
+                float_params.as_ptr(),
+                float_params.len() as u32,
+                grid.0,
+                grid.1,
+                grid.2,
+            )
+        };
+        if cb.is_null() { Err(GpuError::ComputeFailed("Non-blocking 3D dispatch failed".to_string())) } else { Ok(cb) }
+    }
 }
 
 impl Drop for ComputePipeline {
@@ -2612,6 +2891,11 @@ impl KernelRegistry {
                     "gather_dim1_f32" => GATHER_DIM1_KERNEL_SOURCE,
                     "index_select_dim0_f32" => INDEX_SELECT_DIM0_KERNEL_SOURCE,
                     "index_select_dim1_f32" => INDEX_SELECT_DIM1_KERNEL_SOURCE,
+                    "conv1d_f32" => CONV1D_KERNEL_SOURCE,
+                    "conv2d_f32" => CONV2D_KERNEL_SOURCE,
+                    "batch_norm_f32" => BATCH_NORM_KERNEL_SOURCE,
+                    "max_pool2d_f32" => MAX_POOL2D_KERNEL_SOURCE,
+                    "avg_pool2d_f32" => AVG_POOL2D_KERNEL_SOURCE,
                     _ => BINARY_KERNEL_SOURCE,
                 };
                 (source, base_name.to_string())
@@ -3419,6 +3703,39 @@ impl KernelRegistry {
         let (source, func) = Self::resolve_kernel("index_select_dim1_f32", dtype);
         let pipeline = self.get_or_create(device, source, &func)?;
         pipeline.dispatch_index_select_dim1_nb(queue, buf_input, buf_indices, buf_out, rows, in_cols, num_indices)
+    }
+
+    // ── CNN ops dispatch (generic 3D) ────────────────────────────────────
+
+    pub fn dispatch_cnn_3d(
+        &self,
+        device: &Device,
+        kernel_source: &str,
+        function_name: &str,
+        input_buffers: &[&Buffer],
+        buf_out: &Buffer,
+        uint_params: &[u32],
+        float_params: &[f32],
+        grid: (u32, u32, u32),
+    ) -> Result<()> {
+        let pipeline = self.get_or_create(device, kernel_source, function_name)?;
+        pipeline.dispatch_3d(input_buffers, buf_out, uint_params, float_params, grid)
+    }
+
+    pub fn dispatch_cnn_3d_nb(
+        &self,
+        device: &Device,
+        kernel_source: &str,
+        function_name: &str,
+        queue: *mut std::ffi::c_void,
+        input_buffers: &[&Buffer],
+        buf_out: &Buffer,
+        uint_params: &[u32],
+        float_params: &[f32],
+        grid: (u32, u32, u32),
+    ) -> Result<*mut std::ffi::c_void> {
+        let pipeline = self.get_or_create(device, kernel_source, function_name)?;
+        pipeline.dispatch_3d_nb(queue, input_buffers, buf_out, uint_params, float_params, grid)
     }
 }
 

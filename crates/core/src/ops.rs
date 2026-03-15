@@ -939,6 +939,235 @@ pub fn index_select(rt: &mut LazyRuntime, input_id: u64, dim: usize, index_id: u
     Ok(out_id)
 }
 
+// ── CNN ops ─────────────────────────────────────────────────────────────────
+
+/// 1D convolution.
+/// input: [batch, in_channels, length], weight: [out_channels, in_channels, kernel_size]
+/// output: [batch, out_channels, out_length]
+pub fn conv1d(rt: &mut LazyRuntime, input_id: u64, weight_id: u64, stride: usize, padding: usize) -> Result<u64> {
+    let in_dtype = rt.dtype(input_id)?;
+    validate_compute_dtype(in_dtype)?;
+    let w_dtype = rt.dtype(weight_id)?;
+    if in_dtype != w_dtype {
+        return Err(GpuError::InvalidTensor(format!(
+            "conv1d dtype mismatch: {:?} vs {:?}", in_dtype, w_dtype
+        )));
+    }
+
+    let in_shape = rt.shape(input_id)?;
+    let w_shape = rt.shape(weight_id)?;
+
+    if in_shape.len() != 3 {
+        return Err(GpuError::InvalidTensor(format!(
+            "conv1d input must be 3D [B,C,L], got {:?}", in_shape
+        )));
+    }
+    if w_shape.len() != 3 {
+        return Err(GpuError::InvalidTensor(format!(
+            "conv1d weight must be 3D [OC,IC,K], got {:?}", w_shape
+        )));
+    }
+    if in_shape[1] != w_shape[1] {
+        return Err(GpuError::InvalidTensor(format!(
+            "conv1d in_channels mismatch: input {} vs weight {}", in_shape[1], w_shape[1]
+        )));
+    }
+
+    let batch = in_shape[0];
+    let in_length = in_shape[2];
+    let out_channels = w_shape[0];
+    let kernel_size = w_shape[2];
+
+    if in_length + 2 * padding < kernel_size {
+        return Err(GpuError::InvalidTensor(
+            "conv1d: input too small for given kernel_size and padding".to_string()
+        ));
+    }
+    let out_length = (in_length + 2 * padding - kernel_size) / stride + 1;
+
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op: OpKind::Conv1d { stride, padding },
+        inputs: vec![input_id, weight_id],
+        out_shape: Shape::new(vec![batch, out_channels, out_length])?,
+        out_dtype: in_dtype,
+        container_id: ContainerId::DEFAULT,
+    });
+    Ok(out_id)
+}
+
+/// 2D convolution.
+/// input: [batch, in_channels, height, width], weight: [out_channels, in_channels, kh, kw]
+/// output: [batch, out_channels, out_h, out_w]
+pub fn conv2d(rt: &mut LazyRuntime, input_id: u64, weight_id: u64, stride: (usize, usize), padding: (usize, usize)) -> Result<u64> {
+    let in_dtype = rt.dtype(input_id)?;
+    validate_compute_dtype(in_dtype)?;
+    let w_dtype = rt.dtype(weight_id)?;
+    if in_dtype != w_dtype {
+        return Err(GpuError::InvalidTensor(format!(
+            "conv2d dtype mismatch: {:?} vs {:?}", in_dtype, w_dtype
+        )));
+    }
+
+    let in_shape = rt.shape(input_id)?;
+    let w_shape = rt.shape(weight_id)?;
+
+    if in_shape.len() != 4 {
+        return Err(GpuError::InvalidTensor(format!(
+            "conv2d input must be 4D [B,C,H,W], got {:?}", in_shape
+        )));
+    }
+    if w_shape.len() != 4 {
+        return Err(GpuError::InvalidTensor(format!(
+            "conv2d weight must be 4D [OC,IC,KH,KW], got {:?}", w_shape
+        )));
+    }
+    if in_shape[1] != w_shape[1] {
+        return Err(GpuError::InvalidTensor(format!(
+            "conv2d in_channels mismatch: input {} vs weight {}", in_shape[1], w_shape[1]
+        )));
+    }
+
+    let batch = in_shape[0];
+    let in_h = in_shape[2];
+    let in_w = in_shape[3];
+    let out_channels = w_shape[0];
+    let kh = w_shape[2];
+    let kw = w_shape[3];
+
+    if in_h + 2 * padding.0 < kh || in_w + 2 * padding.1 < kw {
+        return Err(GpuError::InvalidTensor(
+            "conv2d: input too small for given kernel_size and padding".to_string()
+        ));
+    }
+    let out_h = (in_h + 2 * padding.0 - kh) / stride.0 + 1;
+    let out_w = (in_w + 2 * padding.1 - kw) / stride.1 + 1;
+
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op: OpKind::Conv2d { stride, padding },
+        inputs: vec![input_id, weight_id],
+        out_shape: Shape::new(vec![batch, out_channels, out_h, out_w])?,
+        out_dtype: in_dtype,
+        container_id: ContainerId::DEFAULT,
+    });
+    Ok(out_id)
+}
+
+/// Batch normalization (inference mode).
+/// input: [batch, channels, ...], mean/var/weight/bias: [channels]
+pub fn batch_norm(rt: &mut LazyRuntime, input_id: u64, mean_id: u64, var_id: u64, weight_id: u64, bias_id: u64, eps: f32) -> Result<u64> {
+    let in_dtype = rt.dtype(input_id)?;
+    validate_compute_dtype(in_dtype)?;
+
+    let in_shape = rt.shape(input_id)?;
+    if in_shape.len() < 2 {
+        return Err(GpuError::InvalidTensor(format!(
+            "batch_norm input must be >= 2D, got {:?}", in_shape
+        )));
+    }
+    let channels = in_shape[1];
+
+    // Validate all param shapes are [channels]
+    for (name, id) in &[("mean", mean_id), ("var", var_id), ("weight", weight_id), ("bias", bias_id)] {
+        let s = rt.shape(*id)?;
+        let d = rt.dtype(*id)?;
+        if d != in_dtype {
+            return Err(GpuError::InvalidTensor(format!(
+                "batch_norm {} dtype {:?} != input dtype {:?}", name, d, in_dtype
+            )));
+        }
+        if s != vec![channels] {
+            return Err(GpuError::InvalidTensor(format!(
+                "batch_norm {} shape {:?} must be [{}]", name, s, channels
+            )));
+        }
+    }
+
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op: OpKind::BatchNorm { eps },
+        inputs: vec![input_id, mean_id, var_id, weight_id, bias_id],
+        out_shape: Shape::new(in_shape)?,
+        out_dtype: in_dtype,
+        container_id: ContainerId::DEFAULT,
+    });
+    Ok(out_id)
+}
+
+/// Max pooling 2D.
+/// input: [batch, channels, height, width]
+pub fn max_pool2d(rt: &mut LazyRuntime, input_id: u64, kernel_size: (usize, usize), stride: (usize, usize), padding: (usize, usize)) -> Result<u64> {
+    let dtype = rt.dtype(input_id)?;
+    validate_compute_dtype(dtype)?;
+
+    let in_shape = rt.shape(input_id)?;
+    if in_shape.len() != 4 {
+        return Err(GpuError::InvalidTensor(format!(
+            "max_pool2d input must be 4D [B,C,H,W], got {:?}", in_shape
+        )));
+    }
+
+    let in_h = in_shape[2];
+    let in_w = in_shape[3];
+    if in_h + 2 * padding.0 < kernel_size.0 || in_w + 2 * padding.1 < kernel_size.1 {
+        return Err(GpuError::InvalidTensor(
+            "max_pool2d: input too small for given kernel_size and padding".to_string()
+        ));
+    }
+    let out_h = (in_h + 2 * padding.0 - kernel_size.0) / stride.0 + 1;
+    let out_w = (in_w + 2 * padding.1 - kernel_size.1) / stride.1 + 1;
+
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op: OpKind::MaxPool2d { kernel_size, stride, padding },
+        inputs: vec![input_id],
+        out_shape: Shape::new(vec![in_shape[0], in_shape[1], out_h, out_w])?,
+        out_dtype: dtype,
+        container_id: ContainerId::DEFAULT,
+    });
+    Ok(out_id)
+}
+
+/// Average pooling 2D.
+/// input: [batch, channels, height, width]
+pub fn avg_pool2d(rt: &mut LazyRuntime, input_id: u64, kernel_size: (usize, usize), stride: (usize, usize), padding: (usize, usize)) -> Result<u64> {
+    let dtype = rt.dtype(input_id)?;
+    validate_compute_dtype(dtype)?;
+
+    let in_shape = rt.shape(input_id)?;
+    if in_shape.len() != 4 {
+        return Err(GpuError::InvalidTensor(format!(
+            "avg_pool2d input must be 4D [B,C,H,W], got {:?}", in_shape
+        )));
+    }
+
+    let in_h = in_shape[2];
+    let in_w = in_shape[3];
+    if in_h + 2 * padding.0 < kernel_size.0 || in_w + 2 * padding.1 < kernel_size.1 {
+        return Err(GpuError::InvalidTensor(
+            "avg_pool2d: input too small for given kernel_size and padding".to_string()
+        ));
+    }
+    let out_h = (in_h + 2 * padding.0 - kernel_size.0) / stride.0 + 1;
+    let out_w = (in_w + 2 * padding.1 - kernel_size.1) / stride.1 + 1;
+
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op: OpKind::AvgPool2d { kernel_size, stride, padding },
+        inputs: vec![input_id],
+        out_shape: Shape::new(vec![in_shape[0], in_shape[1], out_h, out_w])?,
+        out_dtype: dtype,
+        container_id: ContainerId::DEFAULT,
+    });
+    Ok(out_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2652,5 +2881,307 @@ mod tests {
         rt.insert_tensor(input).unwrap();
         rt.insert_tensor(indices).unwrap();
         assert!(index_select(&mut rt, i_id, 0, idx_id).is_err());
+    }
+
+    // ── CNN ops tests ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_conv1d() {
+        // input: [1,1,5], weight: [1,1,3], stride=1, pad=0 -> [1,1,3]
+        // input = [1,2,3,4,5], weight = [1,1,1]
+        // out[0] = 1*1 + 2*1 + 3*1 = 6
+        // out[1] = 2*1 + 3*1 + 4*1 = 9
+        // out[2] = 3*1 + 4*1 + 5*1 = 12
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        let input = Tensor::from_f32(&device, vec![1, 1, 5], &[1.0, 2.0, 3.0, 4.0, 5.0]).unwrap();
+        let weight = Tensor::from_f32(&device, vec![1, 1, 3], &[1.0, 1.0, 1.0]).unwrap();
+        let in_id = input.meta.id;
+        let w_id = weight.meta.id;
+        rt.insert_tensor(input).unwrap();
+        rt.insert_tensor(weight).unwrap();
+
+        let out_id = conv1d(&mut rt, in_id, w_id, 1, 0).unwrap();
+        assert_eq!(rt.shape(out_id).unwrap(), vec![1, 1, 3]);
+
+        rt.eval(&device, out_id).unwrap();
+        let result = rt.read_f32(out_id).unwrap();
+        assert_eq!(result, &[6.0, 9.0, 12.0]);
+    }
+
+    #[test]
+    fn test_conv1d_stride2() {
+        // input: [1,1,6], weight: [1,1,3], stride=2, pad=0 -> [1,1,2]
+        // out_length = (6 + 0 - 3) / 2 + 1 = 2
+        // out[0] = 1+2+3 = 6, out[1] = 3+4+5 = 12
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        let input = Tensor::from_f32(&device, vec![1, 1, 6], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
+        let weight = Tensor::from_f32(&device, vec![1, 1, 3], &[1.0, 1.0, 1.0]).unwrap();
+        let in_id = input.meta.id;
+        let w_id = weight.meta.id;
+        rt.insert_tensor(input).unwrap();
+        rt.insert_tensor(weight).unwrap();
+
+        let out_id = conv1d(&mut rt, in_id, w_id, 2, 0).unwrap();
+        assert_eq!(rt.shape(out_id).unwrap(), vec![1, 1, 2]);
+
+        rt.eval(&device, out_id).unwrap();
+        let result = rt.read_f32(out_id).unwrap();
+        assert_eq!(result, &[6.0, 12.0]);
+    }
+
+    #[test]
+    fn test_conv1d_multichannel() {
+        // input: [1,2,3], weight: [1,2,2], stride=1, pad=0 -> [1,1,2]
+        // 2 input channels, 1 output channel, kernel_size=2
+        // input ch0 = [1,2,3], ch1 = [4,5,6]
+        // weight ch0 = [1,0], ch1 = [0,1]
+        // out[0] = 1*1 + 2*0 + 4*0 + 5*1 = 6
+        // out[1] = 2*1 + 3*0 + 5*0 + 6*1 = 8
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        let input = Tensor::from_f32(&device, vec![1, 2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
+        let weight = Tensor::from_f32(&device, vec![1, 2, 2], &[1.0, 0.0, 0.0, 1.0]).unwrap();
+        let in_id = input.meta.id;
+        let w_id = weight.meta.id;
+        rt.insert_tensor(input).unwrap();
+        rt.insert_tensor(weight).unwrap();
+
+        let out_id = conv1d(&mut rt, in_id, w_id, 1, 0).unwrap();
+        assert_eq!(rt.shape(out_id).unwrap(), vec![1, 1, 2]);
+
+        rt.eval(&device, out_id).unwrap();
+        let result = rt.read_f32(out_id).unwrap();
+        assert_eq!(result, &[6.0, 8.0]);
+    }
+
+    #[test]
+    fn test_conv1d_shape_validation() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        // Input must be 3D
+        let input_2d = Tensor::from_f32(&device, vec![2, 3], &[1.0; 6]).unwrap();
+        let weight = Tensor::from_f32(&device, vec![1, 3, 2], &[1.0; 6]).unwrap();
+        let in_id = input_2d.meta.id;
+        let w_id = weight.meta.id;
+        rt.insert_tensor(input_2d).unwrap();
+        rt.insert_tensor(weight).unwrap();
+        assert!(conv1d(&mut rt, in_id, w_id, 1, 0).is_err());
+
+        // in_channels mismatch
+        let input = Tensor::from_f32(&device, vec![1, 2, 5], &[1.0; 10]).unwrap();
+        let weight2 = Tensor::from_f32(&device, vec![1, 3, 2], &[1.0; 6]).unwrap();
+        let in_id = input.meta.id;
+        let w_id = weight2.meta.id;
+        rt.insert_tensor(input).unwrap();
+        rt.insert_tensor(weight2).unwrap();
+        assert!(conv1d(&mut rt, in_id, w_id, 1, 0).is_err());
+    }
+
+    #[test]
+    fn test_conv2d() {
+        // input: [1,1,3,3], weight: [1,1,2,2], stride=1, pad=0 -> [1,1,2,2]
+        // input = [[1,2,3],[4,5,6],[7,8,9]]
+        // weight = [[1,0],[0,1]]
+        // out[0,0] = 1*1 + 2*0 + 4*0 + 5*1 = 6
+        // out[0,1] = 2*1 + 3*0 + 5*0 + 6*1 = 8
+        // out[1,0] = 4*1 + 5*0 + 7*0 + 8*1 = 12
+        // out[1,1] = 5*1 + 6*0 + 8*0 + 9*1 = 14
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        let input = Tensor::from_f32(&device, vec![1, 1, 3, 3],
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]).unwrap();
+        let weight = Tensor::from_f32(&device, vec![1, 1, 2, 2],
+            &[1.0, 0.0, 0.0, 1.0]).unwrap();
+        let in_id = input.meta.id;
+        let w_id = weight.meta.id;
+        rt.insert_tensor(input).unwrap();
+        rt.insert_tensor(weight).unwrap();
+
+        let out_id = conv2d(&mut rt, in_id, w_id, (1, 1), (0, 0)).unwrap();
+        assert_eq!(rt.shape(out_id).unwrap(), vec![1, 1, 2, 2]);
+
+        rt.eval(&device, out_id).unwrap();
+        let result = rt.read_f32(out_id).unwrap();
+        assert_eq!(result, &[6.0, 8.0, 12.0, 14.0]);
+    }
+
+    #[test]
+    fn test_conv2d_all_ones() {
+        // input: [1,1,3,3] all ones, weight: [1,1,2,2] all ones -> out = 4.0 for all
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        let input = Tensor::from_f32(&device, vec![1, 1, 3, 3], &[1.0; 9]).unwrap();
+        let weight = Tensor::from_f32(&device, vec![1, 1, 2, 2], &[1.0; 4]).unwrap();
+        let in_id = input.meta.id;
+        let w_id = weight.meta.id;
+        rt.insert_tensor(input).unwrap();
+        rt.insert_tensor(weight).unwrap();
+
+        let out_id = conv2d(&mut rt, in_id, w_id, (1, 1), (0, 0)).unwrap();
+        rt.eval(&device, out_id).unwrap();
+        let result = rt.read_f32(out_id).unwrap();
+        assert_eq!(result, &[4.0, 4.0, 4.0, 4.0]);
+    }
+
+    #[test]
+    fn test_conv2d_shape_validation() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        // Input must be 4D
+        let input_3d = Tensor::from_f32(&device, vec![1, 1, 3], &[1.0; 3]).unwrap();
+        let weight = Tensor::from_f32(&device, vec![1, 1, 2, 2], &[1.0; 4]).unwrap();
+        let in_id = input_3d.meta.id;
+        let w_id = weight.meta.id;
+        rt.insert_tensor(input_3d).unwrap();
+        rt.insert_tensor(weight).unwrap();
+        assert!(conv2d(&mut rt, in_id, w_id, (1, 1), (0, 0)).is_err());
+    }
+
+    #[test]
+    fn test_batch_norm() {
+        // input: [1,2,3] (batch=1, channels=2, spatial=3)
+        // channel 0: [1,2,3] with mean=2, var=1, weight=1, bias=0
+        //   -> normalized: [(1-2)/sqrt(1+1e-5)*1+0, (2-2)/..., (3-2)/...]
+        //   = [-1/sqrt(1.00001), 0, 1/sqrt(1.00001)]
+        //   ~ [-0.99999, 0.0, 0.99999]
+        // channel 1: [4,5,6] with mean=5, var=1, weight=2, bias=1
+        //   -> normalized: [(4-5)/sqrt(1+1e-5)*2+1, (5-5)*2+1, (6-5)*2+1]
+        //   = [-2/sqrt(1.00001)+1, 1, 2/sqrt(1.00001)+1]
+        //   ~ [-1.0, 1.0, 3.0]
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        let input = Tensor::from_f32(&device, vec![1, 2, 3],
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
+        let mean = Tensor::from_f32(&device, vec![2], &[2.0, 5.0]).unwrap();
+        let var = Tensor::from_f32(&device, vec![2], &[1.0, 1.0]).unwrap();
+        let weight = Tensor::from_f32(&device, vec![2], &[1.0, 2.0]).unwrap();
+        let bias = Tensor::from_f32(&device, vec![2], &[0.0, 1.0]).unwrap();
+        let in_id = input.meta.id;
+        let m_id = mean.meta.id;
+        let v_id = var.meta.id;
+        let w_id = weight.meta.id;
+        let b_id = bias.meta.id;
+        rt.insert_tensor(input).unwrap();
+        rt.insert_tensor(mean).unwrap();
+        rt.insert_tensor(var).unwrap();
+        rt.insert_tensor(weight).unwrap();
+        rt.insert_tensor(bias).unwrap();
+
+        let out_id = batch_norm(&mut rt, in_id, m_id, v_id, w_id, b_id, 1e-5).unwrap();
+        assert_eq!(rt.shape(out_id).unwrap(), vec![1, 2, 3]);
+
+        rt.eval(&device, out_id).unwrap();
+        let result = rt.read_f32(out_id).unwrap();
+        // Channel 0: [-1, 0, 1] (approx)
+        assert!((result[0] - (-1.0)).abs() < 0.001, "got {}", result[0]);
+        assert!((result[1] - 0.0).abs() < 0.001, "got {}", result[1]);
+        assert!((result[2] - 1.0).abs() < 0.001, "got {}", result[2]);
+        // Channel 1: [-1, 1, 3] (approx)
+        assert!((result[3] - (-1.0)).abs() < 0.001, "got {}", result[3]);
+        assert!((result[4] - 1.0).abs() < 0.001, "got {}", result[4]);
+        assert!((result[5] - 3.0).abs() < 0.001, "got {}", result[5]);
+    }
+
+    #[test]
+    fn test_batch_norm_shape_validation() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        // Input must be >= 2D
+        let input_1d = Tensor::from_f32(&device, vec![3], &[1.0; 3]).unwrap();
+        let mean = Tensor::from_f32(&device, vec![3], &[0.0; 3]).unwrap();
+        let var = Tensor::from_f32(&device, vec![3], &[1.0; 3]).unwrap();
+        let w = Tensor::from_f32(&device, vec![3], &[1.0; 3]).unwrap();
+        let b = Tensor::from_f32(&device, vec![3], &[0.0; 3]).unwrap();
+        let ids: Vec<u64> = vec![input_1d.meta.id, mean.meta.id, var.meta.id, w.meta.id, b.meta.id];
+        rt.insert_tensor(input_1d).unwrap();
+        rt.insert_tensor(mean).unwrap();
+        rt.insert_tensor(var).unwrap();
+        rt.insert_tensor(w).unwrap();
+        rt.insert_tensor(b).unwrap();
+        assert!(batch_norm(&mut rt, ids[0], ids[1], ids[2], ids[3], ids[4], 1e-5).is_err());
+    }
+
+    #[test]
+    fn test_max_pool2d() {
+        // input: [1,1,4,4], kernel=2, stride=2, pad=0 -> [1,1,2,2]
+        // [[1,2,3,4],[5,6,7,8],[9,10,11,12],[13,14,15,16]]
+        // pool[0,0] = max(1,2,5,6) = 6
+        // pool[0,1] = max(3,4,7,8) = 8
+        // pool[1,0] = max(9,10,13,14) = 14
+        // pool[1,1] = max(11,12,15,16) = 16
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        let data: Vec<f32> = (1..=16).map(|x| x as f32).collect();
+        let input = Tensor::from_f32(&device, vec![1, 1, 4, 4], &data).unwrap();
+        let in_id = input.meta.id;
+        rt.insert_tensor(input).unwrap();
+
+        let out_id = max_pool2d(&mut rt, in_id, (2, 2), (2, 2), (0, 0)).unwrap();
+        assert_eq!(rt.shape(out_id).unwrap(), vec![1, 1, 2, 2]);
+
+        rt.eval(&device, out_id).unwrap();
+        let result = rt.read_f32(out_id).unwrap();
+        assert_eq!(result, &[6.0, 8.0, 14.0, 16.0]);
+    }
+
+    #[test]
+    fn test_max_pool2d_shape_validation() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        // Input must be 4D
+        let input_3d = Tensor::from_f32(&device, vec![1, 4, 4], &[1.0; 16]).unwrap();
+        let in_id = input_3d.meta.id;
+        rt.insert_tensor(input_3d).unwrap();
+        assert!(max_pool2d(&mut rt, in_id, (2, 2), (2, 2), (0, 0)).is_err());
+    }
+
+    #[test]
+    fn test_avg_pool2d() {
+        // input: [1,1,4,4], kernel=2, stride=2, pad=0 -> [1,1,2,2]
+        // pool[0,0] = avg(1,2,5,6) = 3.5
+        // pool[0,1] = avg(3,4,7,8) = 5.5
+        // pool[1,0] = avg(9,10,13,14) = 11.5
+        // pool[1,1] = avg(11,12,15,16) = 13.5
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        let data: Vec<f32> = (1..=16).map(|x| x as f32).collect();
+        let input = Tensor::from_f32(&device, vec![1, 1, 4, 4], &data).unwrap();
+        let in_id = input.meta.id;
+        rt.insert_tensor(input).unwrap();
+
+        let out_id = avg_pool2d(&mut rt, in_id, (2, 2), (2, 2), (0, 0)).unwrap();
+        assert_eq!(rt.shape(out_id).unwrap(), vec![1, 1, 2, 2]);
+
+        rt.eval(&device, out_id).unwrap();
+        let result = rt.read_f32(out_id).unwrap();
+        assert!((result[0] - 3.5).abs() < 0.001);
+        assert!((result[1] - 5.5).abs() < 0.001);
+        assert!((result[2] - 11.5).abs() < 0.001);
+        assert!((result[3] - 13.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_avg_pool2d_shape_validation() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        let input_3d = Tensor::from_f32(&device, vec![1, 4, 4], &[1.0; 16]).unwrap();
+        let in_id = input_3d.meta.id;
+        rt.insert_tensor(input_3d).unwrap();
+        assert!(avg_pool2d(&mut rt, in_id, (2, 2), (2, 2), (0, 0)).is_err());
     }
 }

@@ -378,6 +378,152 @@ impl LazyRuntime {
             return Ok(out);
         }
 
+        // ── CNN ops ────────────────────────────────────────────────────────
+
+        if let crate::graph::OpKind::Conv1d { stride, padding } = node.op {
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+            let input = self.get_tensor(node.inputs[0])?;
+            let weight = self.get_tensor(node.inputs[1])?;
+            let in_dims = input.meta.layout.shape.dims();
+            let w_dims = weight.meta.layout.shape.dims();
+            let out_dims = node.out_shape.dims();
+            let uint_params: Vec<u32> = vec![
+                in_dims[0] as u32,  // batch
+                in_dims[1] as u32,  // in_channels
+                w_dims[0] as u32,   // out_channels
+                in_dims[2] as u32,  // in_length
+                out_dims[2] as u32, // out_length
+                w_dims[2] as u32,   // kernel_size
+                stride as u32,
+                padding as u32,
+            ];
+            REGISTRY.dispatch_cnn_3d(
+                device, crate::compute::CONV1D_KERNEL_SOURCE, "conv1d_f32",
+                &[&input.buffer, &weight.buffer], &out.buffer,
+                &uint_params, &[], (out_dims[2] as u32, w_dims[0] as u32, in_dims[0] as u32),
+            )?;
+            return Ok(out);
+        }
+
+        if let crate::graph::OpKind::Conv2d { stride, padding } = node.op {
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+            let input = self.get_tensor(node.inputs[0])?;
+            let weight = self.get_tensor(node.inputs[1])?;
+            let in_dims = input.meta.layout.shape.dims();
+            let w_dims = weight.meta.layout.shape.dims();
+            let out_dims = node.out_shape.dims();
+            let uint_params: Vec<u32> = vec![
+                in_dims[0] as u32,  // batch
+                in_dims[1] as u32,  // in_channels
+                w_dims[0] as u32,   // out_channels
+                in_dims[2] as u32,  // in_h
+                in_dims[3] as u32,  // in_w
+                out_dims[2] as u32, // out_h
+                out_dims[3] as u32, // out_w
+                w_dims[2] as u32,   // kh
+                w_dims[3] as u32,   // kw
+                stride.0 as u32,    // stride_h
+                stride.1 as u32,    // stride_w
+                padding.0 as u32,   // pad_h
+                padding.1 as u32,   // pad_w
+            ];
+            // Grid: (out_w, out_h * out_channels, batch)
+            let grid_y = out_dims[2] as u32 * w_dims[0] as u32;
+            REGISTRY.dispatch_cnn_3d(
+                device, crate::compute::CONV2D_KERNEL_SOURCE, "conv2d_f32",
+                &[&input.buffer, &weight.buffer], &out.buffer,
+                &uint_params, &[], (out_dims[3] as u32, grid_y, in_dims[0] as u32),
+            )?;
+            return Ok(out);
+        }
+
+        if let crate::graph::OpKind::BatchNorm { eps } = node.op {
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+            let input = self.get_tensor(node.inputs[0])?;
+            let mean = self.get_tensor(node.inputs[1])?;
+            let var = self.get_tensor(node.inputs[2])?;
+            let weight = self.get_tensor(node.inputs[3])?;
+            let bias = self.get_tensor(node.inputs[4])?;
+            let in_dims = input.meta.layout.shape.dims();
+            let batch = in_dims[0];
+            let channels = in_dims[1];
+            let spatial: usize = in_dims[2..].iter().product();
+            let uint_params: Vec<u32> = vec![
+                batch as u32,
+                channels as u32,
+                spatial as u32,
+            ];
+            let float_params: Vec<f32> = vec![eps];
+            REGISTRY.dispatch_cnn_3d(
+                device, crate::compute::BATCH_NORM_KERNEL_SOURCE, "batch_norm_f32",
+                &[&input.buffer, &mean.buffer, &var.buffer, &weight.buffer, &bias.buffer],
+                &out.buffer, &uint_params, &float_params,
+                (spatial as u32, channels as u32, batch as u32),
+            )?;
+            return Ok(out);
+        }
+
+        if let crate::graph::OpKind::MaxPool2d { kernel_size, stride, padding } = node.op {
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+            let input = self.get_tensor(node.inputs[0])?;
+            let in_dims = input.meta.layout.shape.dims();
+            let out_dims = node.out_shape.dims();
+            let uint_params: Vec<u32> = vec![
+                in_dims[0] as u32,  // batch
+                in_dims[1] as u32,  // channels
+                in_dims[2] as u32,  // in_h
+                in_dims[3] as u32,  // in_w
+                out_dims[2] as u32, // out_h
+                out_dims[3] as u32, // out_w
+                kernel_size.0 as u32,
+                kernel_size.1 as u32,
+                stride.0 as u32,
+                stride.1 as u32,
+                padding.0 as u32,
+                padding.1 as u32,
+            ];
+            let grid_y = out_dims[2] as u32 * in_dims[1] as u32;
+            REGISTRY.dispatch_cnn_3d(
+                device, crate::compute::MAX_POOL2D_KERNEL_SOURCE, "max_pool2d_f32",
+                &[&input.buffer], &out.buffer,
+                &uint_params, &[], (out_dims[3] as u32, grid_y, in_dims[0] as u32),
+            )?;
+            return Ok(out);
+        }
+
+        if let crate::graph::OpKind::AvgPool2d { kernel_size, stride, padding } = node.op {
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+            let input = self.get_tensor(node.inputs[0])?;
+            let in_dims = input.meta.layout.shape.dims();
+            let out_dims = node.out_shape.dims();
+            let uint_params: Vec<u32> = vec![
+                in_dims[0] as u32,  // batch
+                in_dims[1] as u32,  // channels
+                in_dims[2] as u32,  // in_h
+                in_dims[3] as u32,  // in_w
+                out_dims[2] as u32, // out_h
+                out_dims[3] as u32, // out_w
+                kernel_size.0 as u32,
+                kernel_size.1 as u32,
+                stride.0 as u32,
+                stride.1 as u32,
+                padding.0 as u32,
+                padding.1 as u32,
+            ];
+            let grid_y = out_dims[2] as u32 * in_dims[1] as u32;
+            REGISTRY.dispatch_cnn_3d(
+                device, crate::compute::AVG_POOL2D_KERNEL_SOURCE, "avg_pool2d_f32",
+                &[&input.buffer], &out.buffer,
+                &uint_params, &[], (out_dims[3] as u32, grid_y, in_dims[0] as u32),
+            )?;
+            return Ok(out);
+        }
+
         if let crate::graph::OpKind::Gather { dim } = node.op {
             let out_buf = self.pool.acquire(device, out_size)?;
             let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
@@ -777,6 +923,106 @@ impl LazyRuntime {
             let seq_len = indices.meta.layout.shape.numel();
             let embed_dim = weights.meta.layout.shape.dims()[1];
             return REGISTRY.dispatch_embedding_typed_nb(device, dtype, queue, &weights.buffer, &indices.buffer, &out.buffer, seq_len, embed_dim);
+        }
+
+        // ── CNN ops (non-blocking) ──────────────────────────────────────
+
+        if let crate::graph::OpKind::Conv1d { stride, padding } = node.op {
+            let input = self.get_tensor(node.inputs[0])?;
+            let weight = self.get_tensor(node.inputs[1])?;
+            let in_dims = input.meta.layout.shape.dims();
+            let w_dims = weight.meta.layout.shape.dims();
+            let out_dims = node.out_shape.dims();
+            let uint_params: Vec<u32> = vec![
+                in_dims[0] as u32, in_dims[1] as u32, w_dims[0] as u32,
+                in_dims[2] as u32, out_dims[2] as u32, w_dims[2] as u32,
+                stride as u32, padding as u32,
+            ];
+            return REGISTRY.dispatch_cnn_3d_nb(
+                device, crate::compute::CONV1D_KERNEL_SOURCE, "conv1d_f32", queue,
+                &[&input.buffer, &weight.buffer], &out.buffer,
+                &uint_params, &[], (out_dims[2] as u32, w_dims[0] as u32, in_dims[0] as u32),
+            );
+        }
+
+        if let crate::graph::OpKind::Conv2d { stride, padding } = node.op {
+            let input = self.get_tensor(node.inputs[0])?;
+            let weight = self.get_tensor(node.inputs[1])?;
+            let in_dims = input.meta.layout.shape.dims();
+            let w_dims = weight.meta.layout.shape.dims();
+            let out_dims = node.out_shape.dims();
+            let uint_params: Vec<u32> = vec![
+                in_dims[0] as u32, in_dims[1] as u32, w_dims[0] as u32,
+                in_dims[2] as u32, in_dims[3] as u32,
+                out_dims[2] as u32, out_dims[3] as u32,
+                w_dims[2] as u32, w_dims[3] as u32,
+                stride.0 as u32, stride.1 as u32,
+                padding.0 as u32, padding.1 as u32,
+            ];
+            let grid_y = out_dims[2] as u32 * w_dims[0] as u32;
+            return REGISTRY.dispatch_cnn_3d_nb(
+                device, crate::compute::CONV2D_KERNEL_SOURCE, "conv2d_f32", queue,
+                &[&input.buffer, &weight.buffer], &out.buffer,
+                &uint_params, &[], (out_dims[3] as u32, grid_y, in_dims[0] as u32),
+            );
+        }
+
+        if let crate::graph::OpKind::BatchNorm { eps } = node.op {
+            let input = self.get_tensor(node.inputs[0])?;
+            let mean = self.get_tensor(node.inputs[1])?;
+            let var = self.get_tensor(node.inputs[2])?;
+            let weight = self.get_tensor(node.inputs[3])?;
+            let bias = self.get_tensor(node.inputs[4])?;
+            let in_dims = input.meta.layout.shape.dims();
+            let batch = in_dims[0];
+            let channels = in_dims[1];
+            let spatial: usize = in_dims[2..].iter().product();
+            let uint_params: Vec<u32> = vec![batch as u32, channels as u32, spatial as u32];
+            let float_params: Vec<f32> = vec![eps];
+            return REGISTRY.dispatch_cnn_3d_nb(
+                device, crate::compute::BATCH_NORM_KERNEL_SOURCE, "batch_norm_f32", queue,
+                &[&input.buffer, &mean.buffer, &var.buffer, &weight.buffer, &bias.buffer],
+                &out.buffer, &uint_params, &float_params,
+                (spatial as u32, channels as u32, batch as u32),
+            );
+        }
+
+        if let crate::graph::OpKind::MaxPool2d { kernel_size, stride, padding } = node.op {
+            let input = self.get_tensor(node.inputs[0])?;
+            let in_dims = input.meta.layout.shape.dims();
+            let out_dims = node.out_shape.dims();
+            let uint_params: Vec<u32> = vec![
+                in_dims[0] as u32, in_dims[1] as u32, in_dims[2] as u32, in_dims[3] as u32,
+                out_dims[2] as u32, out_dims[3] as u32,
+                kernel_size.0 as u32, kernel_size.1 as u32,
+                stride.0 as u32, stride.1 as u32,
+                padding.0 as u32, padding.1 as u32,
+            ];
+            let grid_y = out_dims[2] as u32 * in_dims[1] as u32;
+            return REGISTRY.dispatch_cnn_3d_nb(
+                device, crate::compute::MAX_POOL2D_KERNEL_SOURCE, "max_pool2d_f32", queue,
+                &[&input.buffer], &out.buffer,
+                &uint_params, &[], (out_dims[3] as u32, grid_y, in_dims[0] as u32),
+            );
+        }
+
+        if let crate::graph::OpKind::AvgPool2d { kernel_size, stride, padding } = node.op {
+            let input = self.get_tensor(node.inputs[0])?;
+            let in_dims = input.meta.layout.shape.dims();
+            let out_dims = node.out_shape.dims();
+            let uint_params: Vec<u32> = vec![
+                in_dims[0] as u32, in_dims[1] as u32, in_dims[2] as u32, in_dims[3] as u32,
+                out_dims[2] as u32, out_dims[3] as u32,
+                kernel_size.0 as u32, kernel_size.1 as u32,
+                stride.0 as u32, stride.1 as u32,
+                padding.0 as u32, padding.1 as u32,
+            ];
+            let grid_y = out_dims[2] as u32 * in_dims[1] as u32;
+            return REGISTRY.dispatch_cnn_3d_nb(
+                device, crate::compute::AVG_POOL2D_KERNEL_SOURCE, "avg_pool2d_f32", queue,
+                &[&input.buffer], &out.buffer,
+                &uint_params, &[], (out_dims[3] as u32, grid_y, in_dims[0] as u32),
+            );
         }
 
         if let crate::graph::OpKind::Gather { dim } = node.op {

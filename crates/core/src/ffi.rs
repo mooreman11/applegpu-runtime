@@ -660,6 +660,36 @@ extern "C" {
         cols: u32,
         diagonal: i32,
     ) -> *mut std::ffi::c_void;
+
+    // Generic 3D dispatch for CNN ops
+    pub fn gpu_bridge_compute_3d(
+        compute: *mut GPUComputeHandle,
+        input_buffers: *const *const GPUBufferHandle,
+        buffer_count: u32,
+        output: *mut GPUBufferHandle,
+        uint_params: *const u32,
+        uint_param_count: u32,
+        float_params: *const f32,
+        float_param_count: u32,
+        grid_x: u32,
+        grid_y: u32,
+        grid_z: u32,
+    ) -> i32;
+
+    pub fn gpu_bridge_compute_3d_nb(
+        compute: *mut GPUComputeHandle,
+        queue: *mut std::ffi::c_void,
+        input_buffers: *const *const GPUBufferHandle,
+        buffer_count: u32,
+        output: *mut GPUBufferHandle,
+        uint_params: *const u32,
+        uint_param_count: u32,
+        float_params: *const f32,
+        float_param_count: u32,
+        grid_x: u32,
+        grid_y: u32,
+        grid_z: u32,
+    ) -> *mut std::ffi::c_void;
 }
 
 #[cfg(test)]
