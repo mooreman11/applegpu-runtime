@@ -72,6 +72,8 @@ from applegpu_runtime.applegpu_runtime import (
     batch_norm,
     max_pool2d,
     avg_pool2d,
+    softmax_backward,
+    layer_norm_backward,
 )
 
 __version__ = version()
@@ -274,4 +276,6 @@ __all__ = [
     "batch_norm",
     "max_pool2d",
     "avg_pool2d",
+    "softmax_backward",
+    "layer_norm_backward",
 ]

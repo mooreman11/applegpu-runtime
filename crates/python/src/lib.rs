@@ -1028,6 +1028,23 @@ fn set_pool_watermark(mb: usize) -> PyResult<()> {
     Ok(())
 }
 
+#[pyfunction]
+fn softmax_backward(grad_output: &GpuTensor, output: &GpuTensor) -> PyResult<GpuTensor> {
+    let mut rt = RUNTIME_LAZY.lock().unwrap();
+    let id = applegpu_core::ops::softmax_backward(&mut rt, grad_output.id, output.id)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(GpuTensor { id, destroyed: Cell::new(false) })
+}
+
+#[pyfunction]
+#[pyo3(signature = (grad_output, input, gamma, eps=1e-5))]
+fn layer_norm_backward(grad_output: &GpuTensor, input: &GpuTensor, gamma: &GpuTensor, eps: f32) -> PyResult<GpuTensor> {
+    let mut rt = RUNTIME_LAZY.lock().unwrap();
+    let id = applegpu_core::ops::layer_norm_backward(&mut rt, grad_output.id, input.id, gamma.id, eps)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(GpuTensor { id, destroyed: Cell::new(false) })
+}
+
 #[pymodule]
 fn applegpu_runtime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<GpuTensor>()?;
@@ -1101,5 +1118,7 @@ fn applegpu_runtime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(batch_norm, m)?)?;
     m.add_function(wrap_pyfunction!(max_pool2d, m)?)?;
     m.add_function(wrap_pyfunction!(avg_pool2d, m)?)?;
+    m.add_function(wrap_pyfunction!(softmax_backward, m)?)?;
+    m.add_function(wrap_pyfunction!(layer_norm_backward, m)?)?;
     Ok(())
 }
