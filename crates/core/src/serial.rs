@@ -582,6 +582,11 @@ impl From<&OpKind> for WireOpKind {
                 WireOpKind::AvgPool2d { kernel_size: *kernel_size, stride: *stride, padding: *padding }
             }
             OpKind::Tanh => WireOpKind::Tanh,
+            OpKind::SoftmaxBackward => WireOpKind::SoftmaxBackward,
+            OpKind::LayerNormBackward { eps } => WireOpKind::LayerNormBackward { eps: *eps },
+            OpKind::Conv2dBackwardInput { stride, padding } => WireOpKind::Conv2dBackwardInput { stride: *stride, padding: *padding },
+            OpKind::EmbeddingBackward => WireOpKind::EmbeddingBackward,
+            OpKind::BatchNormBackward { eps } => WireOpKind::BatchNormBackward { eps: *eps },
         }
     }
 }
@@ -650,13 +655,11 @@ pub fn wire_op_to_core(wire: &WireOpKind) -> OpKind {
             OpKind::AvgPool2d { kernel_size: *kernel_size, stride: *stride, padding: *padding }
         }
         WireOpKind::Tanh => OpKind::Tanh,
-        // Backward ops exist in wire protocol but not yet in OpKind on this branch.
-        // Map to closest forward op for now; will be 1:1 once OpKind adds backward variants.
-        WireOpKind::SoftmaxBackward => OpKind::Softmax,
-        WireOpKind::LayerNormBackward { eps } => OpKind::LayerNorm { eps: *eps },
-        WireOpKind::Conv2dBackwardInput { stride, padding } => OpKind::Conv2d { stride: *stride, padding: *padding },
-        WireOpKind::EmbeddingBackward => OpKind::Embedding,
-        WireOpKind::BatchNormBackward { eps } => OpKind::BatchNorm { eps: *eps },
+        WireOpKind::SoftmaxBackward => OpKind::SoftmaxBackward,
+        WireOpKind::LayerNormBackward { eps } => OpKind::LayerNormBackward { eps: *eps },
+        WireOpKind::Conv2dBackwardInput { stride, padding } => OpKind::Conv2dBackwardInput { stride: *stride, padding: *padding },
+        WireOpKind::EmbeddingBackward => OpKind::EmbeddingBackward,
+        WireOpKind::BatchNormBackward { eps } => OpKind::BatchNormBackward { eps: *eps },
     }
 }
 
