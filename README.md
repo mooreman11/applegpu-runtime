@@ -140,7 +140,9 @@ v0.3.0. Current capabilities:
 - **N-D tensors (up to 8 dimensions)** — stride-based MSL kernels, NumPy-style broadcasting for all element-wise ops, N-D reshape, 3D/4D tensor creation and roundtrip via NumPy
 - **Batched N-D ops** — matmul, softmax, softmax_causal, layer_norm, embedding, transpose, attention, and attention_causal all support arbitrary leading batch dimensions with broadcasting. One kernel dispatch handles all batch elements.
 - **Tensor manipulation** — reshape, slice, concat, add_bias (broadcast)
-- 25 GPU operations (f32 + f16): add, sub, mul, div, neg, relu, gelu, exp, log, sqrt, matmul, softmax, softmax_causal, layer_norm, transpose, scalar_mul, embedding, attention, attention_causal, reshape, slice, concat, add_bias, argmax + kernel fusion
+- **Conditional ops** — `where_cond(cond, x, y)` ternary select with N-D broadcasting, `masked_fill(input, mask, value)` with embedded scalar
+- **Triangular ops** — `triu(input, diagonal)` and `tril(input, diagonal)` with batched 3D dispatch and diagonal offset
+- 33 GPU operations (f32 + f16): add, sub, mul, div, neg, relu, gelu, exp, log, sqrt, abs, sign, pow, clamp, where, masked_fill, triu, tril, matmul, softmax, softmax_causal, layer_norm, transpose, scalar_mul, embedding, attention, attention_causal, reshape, slice, concat, add_bias, argmax, sum, mean + kernel fusion
 - **General transpose** — `gpu.transpose_dims(t, dim0, dim1)` for arbitrary dimension swaps, enabling batched multi-head attention via reshape + transpose
 - **PyTorch device backend** — `gpu.enable_torch_backend()` + `gpu.to_applegpu(model)` moves nn.Module parameters to Metal GPU. `ApplegpuTensor` with `__torch_dispatch__` routes 27+ aten ops to Metal. CPU fallback with warnings for unsupported ops.
 - **Text generation sampling** — temperature, top-k, and top-p (nucleus) sampling for diverse, coherent output
