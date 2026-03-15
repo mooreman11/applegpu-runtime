@@ -151,8 +151,8 @@ _Make the device backend robust for real-world PyTorch workloads._
 
 **Model targets:**
 - [x] **ResNet-18** — runs end-to-end on Metal GPU, output matches CPU within tolerance
-- [ ] **GPT-2 medium/large** — test with larger model variants
-- [ ] **BERT** — encoder-only transformer
+- [x] **GPT-2 medium/large** — both run end-to-end (medium: 0.31s/token, large: 1.38s/token)
+- [x] **BERT** — runs end-to-end on Metal GPU, output matches CPU
 - [ ] **Whisper / audio models** — requires conv1d (ready)
 - [ ] **Stable Diffusion** — requires conv2d + group_norm + attention
 
