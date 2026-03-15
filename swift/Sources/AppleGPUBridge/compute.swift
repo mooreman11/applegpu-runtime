@@ -1484,3 +1484,231 @@ public func gpuBridgeComputeAddBiasNB(
     commandBuffer.commit()
     return Unmanaged.passRetained(commandBuffer as AnyObject).toOpaque()
 }
+
+// MARK: - N-D stride-based element-wise dispatch
+
+@_cdecl("gpu_bridge_compute_binary_nd")
+public func gpuBridgeComputeBinaryND(
+    _ computePtr: UnsafeMutableRawPointer?,
+    _ bufAPtr: UnsafeRawPointer?,
+    _ bufBPtr: UnsafeRawPointer?,
+    _ bufOutPtr: UnsafeMutableRawPointer?,
+    _ aStrides: UnsafePointer<UInt32>?,
+    _ bStrides: UnsafePointer<UInt32>?,
+    _ outShape: UnsafePointer<UInt32>?,
+    _ ndim: UInt32,
+    _ numel: UInt32
+) -> Int32 {
+    guard let computePtr = computePtr,
+          let bufAPtr = bufAPtr,
+          let bufBPtr = bufBPtr,
+          let bufOutPtr = bufOutPtr,
+          let aStrides = aStrides,
+          let bStrides = bStrides,
+          let outShape = outShape else { return -1 }
+
+    let compute = Unmanaged<GPUCompute>.fromOpaque(computePtr).takeUnretainedValue()
+    let bufA = Unmanaged<GPUBuffer>.fromOpaque(bufAPtr).takeUnretainedValue()
+    let bufB = Unmanaged<GPUBuffer>.fromOpaque(bufBPtr).takeUnretainedValue()
+    let bufOut = Unmanaged<GPUBuffer>.fromOpaque(bufOutPtr).takeUnretainedValue()
+
+    let count = Int(numel)
+    if count == 0 { return 0 }
+
+    guard let commandBuffer = compute.commandQueue.makeCommandBuffer(),
+          let encoder = commandBuffer.makeComputeCommandEncoder() else { return -1 }
+
+    encoder.setComputePipelineState(compute.pipelineState)
+    encoder.setBuffer(bufA.buffer, offset: 0, index: 0)
+    encoder.setBuffer(bufB.buffer, offset: 0, index: 1)
+    encoder.setBuffer(bufOut.buffer, offset: 0, index: 2)
+
+    let arrayBytes = MemoryLayout<UInt32>.size * 8
+    encoder.setBytes(aStrides, length: arrayBytes, index: 3)
+    encoder.setBytes(bStrides, length: arrayBytes, index: 4)
+    encoder.setBytes(outShape, length: arrayBytes, index: 5)
+    var nd = ndim
+    encoder.setBytes(&nd, length: MemoryLayout<UInt32>.size, index: 6)
+    var n = numel
+    encoder.setBytes(&n, length: MemoryLayout<UInt32>.size, index: 7)
+
+    let threadGroupSize = min(compute.pipelineState.maxTotalThreadsPerThreadgroup, count)
+    let threadGroups = (count + threadGroupSize - 1) / threadGroupSize
+
+    encoder.dispatchThreadgroups(
+        MTLSize(width: threadGroups, height: 1, depth: 1),
+        threadsPerThreadgroup: MTLSize(width: threadGroupSize, height: 1, depth: 1)
+    )
+    encoder.endEncoding()
+    commandBuffer.commit()
+    commandBuffer.waitUntilCompleted()
+
+    return commandBuffer.status == .completed ? 0 : -1
+}
+
+@_cdecl("gpu_bridge_compute_binary_nd_nb")
+public func gpuBridgeComputeBinaryNDNB(
+    _ computePtr: UnsafeMutableRawPointer?,
+    _ queuePtr: UnsafeMutableRawPointer?,
+    _ bufAPtr: UnsafeRawPointer?,
+    _ bufBPtr: UnsafeRawPointer?,
+    _ bufOutPtr: UnsafeMutableRawPointer?,
+    _ aStrides: UnsafePointer<UInt32>?,
+    _ bStrides: UnsafePointer<UInt32>?,
+    _ outShape: UnsafePointer<UInt32>?,
+    _ ndim: UInt32,
+    _ numel: UInt32
+) -> UnsafeMutableRawPointer? {
+    guard let computePtr = computePtr,
+          let queuePtr = queuePtr,
+          let bufAPtr = bufAPtr,
+          let bufBPtr = bufBPtr,
+          let bufOutPtr = bufOutPtr,
+          let aStrides = aStrides,
+          let bStrides = bStrides,
+          let outShape = outShape else { return nil }
+
+    let compute = Unmanaged<GPUCompute>.fromOpaque(computePtr).takeUnretainedValue()
+    let queue = Unmanaged<MTLCommandQueue>.fromOpaque(queuePtr).takeUnretainedValue()
+    let bufA = Unmanaged<GPUBuffer>.fromOpaque(bufAPtr).takeUnretainedValue()
+    let bufB = Unmanaged<GPUBuffer>.fromOpaque(bufBPtr).takeUnretainedValue()
+    let bufOut = Unmanaged<GPUBuffer>.fromOpaque(bufOutPtr).takeUnretainedValue()
+
+    let count = Int(numel)
+    if count == 0 { return nil }
+
+    guard let commandBuffer = queue.makeCommandBuffer(),
+          let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
+
+    encoder.setComputePipelineState(compute.pipelineState)
+    encoder.setBuffer(bufA.buffer, offset: 0, index: 0)
+    encoder.setBuffer(bufB.buffer, offset: 0, index: 1)
+    encoder.setBuffer(bufOut.buffer, offset: 0, index: 2)
+
+    let arrayBytes = MemoryLayout<UInt32>.size * 8
+    encoder.setBytes(aStrides, length: arrayBytes, index: 3)
+    encoder.setBytes(bStrides, length: arrayBytes, index: 4)
+    encoder.setBytes(outShape, length: arrayBytes, index: 5)
+    var nd = ndim
+    encoder.setBytes(&nd, length: MemoryLayout<UInt32>.size, index: 6)
+    var n = numel
+    encoder.setBytes(&n, length: MemoryLayout<UInt32>.size, index: 7)
+
+    let threadGroupSize = min(compute.pipelineState.maxTotalThreadsPerThreadgroup, count)
+    let threadGroups = (count + threadGroupSize - 1) / threadGroupSize
+
+    encoder.dispatchThreadgroups(
+        MTLSize(width: threadGroups, height: 1, depth: 1),
+        threadsPerThreadgroup: MTLSize(width: threadGroupSize, height: 1, depth: 1)
+    )
+    encoder.endEncoding()
+    commandBuffer.commit()
+
+    return Unmanaged.passRetained(commandBuffer as AnyObject).toOpaque()
+}
+
+@_cdecl("gpu_bridge_compute_unary_nd")
+public func gpuBridgeComputeUnaryND(
+    _ computePtr: UnsafeMutableRawPointer?,
+    _ bufInPtr: UnsafeRawPointer?,
+    _ bufOutPtr: UnsafeMutableRawPointer?,
+    _ inStrides: UnsafePointer<UInt32>?,
+    _ outShape: UnsafePointer<UInt32>?,
+    _ ndim: UInt32,
+    _ numel: UInt32
+) -> Int32 {
+    guard let computePtr = computePtr,
+          let bufInPtr = bufInPtr,
+          let bufOutPtr = bufOutPtr,
+          let inStrides = inStrides,
+          let outShape = outShape else { return -1 }
+
+    let compute = Unmanaged<GPUCompute>.fromOpaque(computePtr).takeUnretainedValue()
+    let bufIn = Unmanaged<GPUBuffer>.fromOpaque(bufInPtr).takeUnretainedValue()
+    let bufOut = Unmanaged<GPUBuffer>.fromOpaque(bufOutPtr).takeUnretainedValue()
+
+    let count = Int(numel)
+    if count == 0 { return 0 }
+
+    guard let commandBuffer = compute.commandQueue.makeCommandBuffer(),
+          let encoder = commandBuffer.makeComputeCommandEncoder() else { return -1 }
+
+    encoder.setComputePipelineState(compute.pipelineState)
+    encoder.setBuffer(bufIn.buffer, offset: 0, index: 0)
+    encoder.setBuffer(bufOut.buffer, offset: 0, index: 1)
+
+    let arrayBytes = MemoryLayout<UInt32>.size * 8
+    encoder.setBytes(inStrides, length: arrayBytes, index: 2)
+    encoder.setBytes(outShape, length: arrayBytes, index: 3)
+    var nd = ndim
+    encoder.setBytes(&nd, length: MemoryLayout<UInt32>.size, index: 4)
+    var n = numel
+    encoder.setBytes(&n, length: MemoryLayout<UInt32>.size, index: 5)
+
+    let threadGroupSize = min(compute.pipelineState.maxTotalThreadsPerThreadgroup, count)
+    let threadGroups = (count + threadGroupSize - 1) / threadGroupSize
+
+    encoder.dispatchThreadgroups(
+        MTLSize(width: threadGroups, height: 1, depth: 1),
+        threadsPerThreadgroup: MTLSize(width: threadGroupSize, height: 1, depth: 1)
+    )
+    encoder.endEncoding()
+    commandBuffer.commit()
+    commandBuffer.waitUntilCompleted()
+
+    return commandBuffer.status == .completed ? 0 : -1
+}
+
+@_cdecl("gpu_bridge_compute_unary_nd_nb")
+public func gpuBridgeComputeUnaryNDNB(
+    _ computePtr: UnsafeMutableRawPointer?,
+    _ queuePtr: UnsafeMutableRawPointer?,
+    _ bufInPtr: UnsafeRawPointer?,
+    _ bufOutPtr: UnsafeMutableRawPointer?,
+    _ inStrides: UnsafePointer<UInt32>?,
+    _ outShape: UnsafePointer<UInt32>?,
+    _ ndim: UInt32,
+    _ numel: UInt32
+) -> UnsafeMutableRawPointer? {
+    guard let computePtr = computePtr,
+          let queuePtr = queuePtr,
+          let bufInPtr = bufInPtr,
+          let bufOutPtr = bufOutPtr,
+          let inStrides = inStrides,
+          let outShape = outShape else { return nil }
+
+    let compute = Unmanaged<GPUCompute>.fromOpaque(computePtr).takeUnretainedValue()
+    let queue = Unmanaged<MTLCommandQueue>.fromOpaque(queuePtr).takeUnretainedValue()
+    let bufIn = Unmanaged<GPUBuffer>.fromOpaque(bufInPtr).takeUnretainedValue()
+    let bufOut = Unmanaged<GPUBuffer>.fromOpaque(bufOutPtr).takeUnretainedValue()
+
+    let count = Int(numel)
+    if count == 0 { return nil }
+
+    guard let commandBuffer = queue.makeCommandBuffer(),
+          let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
+
+    encoder.setComputePipelineState(compute.pipelineState)
+    encoder.setBuffer(bufIn.buffer, offset: 0, index: 0)
+    encoder.setBuffer(bufOut.buffer, offset: 0, index: 1)
+
+    let arrayBytes = MemoryLayout<UInt32>.size * 8
+    encoder.setBytes(inStrides, length: arrayBytes, index: 2)
+    encoder.setBytes(outShape, length: arrayBytes, index: 3)
+    var nd = ndim
+    encoder.setBytes(&nd, length: MemoryLayout<UInt32>.size, index: 4)
+    var n = numel
+    encoder.setBytes(&n, length: MemoryLayout<UInt32>.size, index: 5)
+
+    let threadGroupSize = min(compute.pipelineState.maxTotalThreadsPerThreadgroup, count)
+    let threadGroups = (count + threadGroupSize - 1) / threadGroupSize
+
+    encoder.dispatchThreadgroups(
+        MTLSize(width: threadGroups, height: 1, depth: 1),
+        threadsPerThreadgroup: MTLSize(width: threadGroupSize, height: 1, depth: 1)
+    )
+    encoder.endEncoding()
+    commandBuffer.commit()
+
+    return Unmanaged.passRetained(commandBuffer as AnyObject).toOpaque()
+}

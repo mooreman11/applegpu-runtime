@@ -369,6 +369,54 @@ extern "C" {
         output: *mut GPUBufferHandle,
         element_count: u64,
     ) -> *mut std::ffi::c_void;
+
+    // ── N-D stride-based element-wise dispatch ──────────────────────────
+
+    pub fn gpu_bridge_compute_binary_nd(
+        compute: *mut GPUComputeHandle,
+        buf_a: *const GPUBufferHandle,
+        buf_b: *const GPUBufferHandle,
+        buf_out: *mut GPUBufferHandle,
+        a_strides: *const u32,
+        b_strides: *const u32,
+        out_shape: *const u32,
+        ndim: u32,
+        numel: u32,
+    ) -> i32;
+
+    pub fn gpu_bridge_compute_binary_nd_nb(
+        compute: *mut GPUComputeHandle,
+        queue: *mut std::ffi::c_void,
+        buf_a: *const GPUBufferHandle,
+        buf_b: *const GPUBufferHandle,
+        buf_out: *mut GPUBufferHandle,
+        a_strides: *const u32,
+        b_strides: *const u32,
+        out_shape: *const u32,
+        ndim: u32,
+        numel: u32,
+    ) -> *mut std::ffi::c_void;
+
+    pub fn gpu_bridge_compute_unary_nd(
+        compute: *mut GPUComputeHandle,
+        buf_input: *const GPUBufferHandle,
+        buf_out: *mut GPUBufferHandle,
+        in_strides: *const u32,
+        out_shape: *const u32,
+        ndim: u32,
+        numel: u32,
+    ) -> i32;
+
+    pub fn gpu_bridge_compute_unary_nd_nb(
+        compute: *mut GPUComputeHandle,
+        queue: *mut std::ffi::c_void,
+        buf_input: *const GPUBufferHandle,
+        buf_out: *mut GPUBufferHandle,
+        in_strides: *const u32,
+        out_shape: *const u32,
+        ndim: u32,
+        numel: u32,
+    ) -> *mut std::ffi::c_void;
 }
 
 #[cfg(test)]

@@ -338,4 +338,52 @@ void* gpu_bridge_compute_add_bias_nb(
     uint32_t cols
 );
 
+// ── N-D stride-based element-wise dispatch ───────────────────────────────
+
+int32_t gpu_bridge_compute_binary_nd(
+    GPUComputeHandle* compute,
+    const GPUBufferHandle* buf_a,
+    const GPUBufferHandle* buf_b,
+    GPUBufferHandle* buf_out,
+    const uint32_t* a_strides,
+    const uint32_t* b_strides,
+    const uint32_t* out_shape,
+    uint32_t ndim,
+    uint32_t numel
+);
+
+void* gpu_bridge_compute_binary_nd_nb(
+    GPUComputeHandle* compute,
+    void* queue,
+    const GPUBufferHandle* buf_a,
+    const GPUBufferHandle* buf_b,
+    GPUBufferHandle* buf_out,
+    const uint32_t* a_strides,
+    const uint32_t* b_strides,
+    const uint32_t* out_shape,
+    uint32_t ndim,
+    uint32_t numel
+);
+
+int32_t gpu_bridge_compute_unary_nd(
+    GPUComputeHandle* compute,
+    const GPUBufferHandle* buf_input,
+    GPUBufferHandle* buf_out,
+    const uint32_t* in_strides,
+    const uint32_t* out_shape,
+    uint32_t ndim,
+    uint32_t numel
+);
+
+void* gpu_bridge_compute_unary_nd_nb(
+    GPUComputeHandle* compute,
+    void* queue,
+    const GPUBufferHandle* buf_input,
+    GPUBufferHandle* buf_out,
+    const uint32_t* in_strides,
+    const uint32_t* out_shape,
+    uint32_t ndim,
+    uint32_t numel
+);
+
 #endif

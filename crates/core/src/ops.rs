@@ -1385,4 +1385,207 @@ mod tests {
         assert!(result[0].abs() < 0.01);
         assert!((result[5] - 20.0).abs() < 0.01);
     }
+
+    // ── N-D stride-based kernel tests ─────────────────────────────────────
+
+    #[test]
+    fn test_add_3d() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        // Create two [2,3,4] f32 tensors with distinct values
+        let a_data: Vec<f32> = (0..24).map(|i| i as f32).collect();
+        let b_data: Vec<f32> = (0..24).map(|i| (100 + i) as f32).collect();
+        let a = Tensor::from_f32(&device, vec![2, 3, 4], &a_data).unwrap();
+        let b = Tensor::from_f32(&device, vec![2, 3, 4], &b_data).unwrap();
+        let a_id = a.meta.id;
+        let b_id = b.meta.id;
+        rt.insert_tensor(a).unwrap();
+        rt.insert_tensor(b).unwrap();
+
+        let c_id = add(&mut rt, a_id, b_id).unwrap();
+        rt.eval(&device, c_id).unwrap();
+
+        let result = rt.read_f32(c_id).unwrap();
+        assert_eq!(result.len(), 24);
+        for i in 0..24 {
+            assert_eq!(result[i], i as f32 + (100 + i) as f32,
+                "Mismatch at index {}", i);
+        }
+    }
+
+    #[test]
+    fn test_add_broadcast_bias() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        // [4,3] + [3] -> [4,3] (bias addition via broadcasting)
+        let input_data: Vec<f32> = (0..12).map(|i| i as f32).collect();
+        let bias_data = vec![100.0, 200.0, 300.0];
+
+        let input = Tensor::from_f32(&device, vec![4, 3], &input_data).unwrap();
+        let bias = Tensor::from_f32(&device, vec![3], &bias_data).unwrap();
+        let input_id = input.meta.id;
+        let bias_id = bias.meta.id;
+        rt.insert_tensor(input).unwrap();
+        rt.insert_tensor(bias).unwrap();
+
+        let c_id = add(&mut rt, input_id, bias_id).unwrap();
+
+        // Verify output shape is [4,3]
+        let shape = rt.shape(c_id).unwrap();
+        assert_eq!(shape, vec![4, 3]);
+
+        rt.eval(&device, c_id).unwrap();
+
+        let result = rt.read_f32(c_id).unwrap();
+        assert_eq!(result.len(), 12);
+        // Each row gets the bias added: row[i] = [i*3+0+100, i*3+1+200, i*3+2+300]
+        for row in 0..4 {
+            for col in 0..3 {
+                let idx = row * 3 + col;
+                let expected = idx as f32 + bias_data[col];
+                assert_eq!(result[idx], expected,
+                    "Mismatch at [{},{}]: got {}, expected {}", row, col, result[idx], expected);
+            }
+        }
+    }
+
+    #[test]
+    fn test_relu_3d() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        // Create [2,3,4] tensor with mixed pos/neg values
+        let data: Vec<f32> = (0..24).map(|i| if i % 2 == 0 { i as f32 } else { -(i as f32) }).collect();
+        let t = Tensor::from_f32(&device, vec![2, 3, 4], &data).unwrap();
+        let t_id = t.meta.id;
+        rt.insert_tensor(t).unwrap();
+
+        let r_id = relu(&mut rt, t_id).unwrap();
+        rt.eval(&device, r_id).unwrap();
+
+        let result = rt.read_f32(r_id).unwrap();
+        assert_eq!(result.len(), 24);
+        for i in 0..24 {
+            let expected = if data[i] > 0.0 { data[i] } else { 0.0 };
+            assert_eq!(result[i], expected, "Mismatch at index {}", i);
+        }
+    }
+
+    #[test]
+    fn test_gelu_3d() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        // Create [2,3] tensor with specific values
+        let data = vec![0.0f32, 1.0, -1.0, 2.0, -2.0, 0.5];
+        let t = Tensor::from_f32(&device, vec![2, 3], &data).unwrap();
+        let t_id = t.meta.id;
+        rt.insert_tensor(t).unwrap();
+
+        let g_id = gelu(&mut rt, t_id).unwrap();
+        rt.eval(&device, g_id).unwrap();
+
+        let result = rt.read_f32(g_id).unwrap();
+        assert_eq!(result.len(), 6);
+
+        // GELU(0) = 0
+        assert!(result[0].abs() < 0.01, "GELU(0) = {}", result[0]);
+        // GELU(1) ≈ 0.841
+        assert!((result[1] - 0.841).abs() < 0.02, "GELU(1) = {}", result[1]);
+        // GELU(-1) ≈ -0.159
+        assert!((result[2] - (-0.159)).abs() < 0.02, "GELU(-1) = {}", result[2]);
+    }
+
+    #[test]
+    fn test_mul_broadcast_3d() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        // [2,1,4] * [3,4] -> [2,3,4]
+        let a_data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        let b_data: Vec<f32> = (0..12).map(|i| (i + 1) as f32).collect();
+
+        let a = Tensor::from_f32(&device, vec![2, 1, 4], &a_data).unwrap();
+        let b = Tensor::from_f32(&device, vec![3, 4], &b_data).unwrap();
+        let a_id = a.meta.id;
+        let b_id = b.meta.id;
+        rt.insert_tensor(a).unwrap();
+        rt.insert_tensor(b).unwrap();
+
+        let c_id = mul(&mut rt, a_id, b_id).unwrap();
+
+        // Verify output shape is [2,3,4]
+        let shape = rt.shape(c_id).unwrap();
+        assert_eq!(shape, vec![2, 3, 4]);
+
+        rt.eval(&device, c_id).unwrap();
+
+        let result = rt.read_f32(c_id).unwrap();
+        assert_eq!(result.len(), 24);
+
+        // Manual computation:
+        // a[2,1,4] means a[0,:,:] = [1,2,3,4] broadcast over dim 1
+        // a[1,:,:] = [5,6,7,8] broadcast over dim 1
+        // b[3,4] = [[1,2,3,4],[5,6,7,8],[9,10,11,12]]
+        // result[0,0,:] = [1*1, 2*2, 3*3, 4*4] = [1, 4, 9, 16]
+        assert_eq!(result[0], 1.0);
+        assert_eq!(result[1], 4.0);
+        assert_eq!(result[2], 9.0);
+        assert_eq!(result[3], 16.0);
+        // result[0,1,:] = [1*5, 2*6, 3*7, 4*8] = [5, 12, 21, 32]
+        assert_eq!(result[4], 5.0);
+        assert_eq!(result[5], 12.0);
+        assert_eq!(result[6], 21.0);
+        assert_eq!(result[7], 32.0);
+    }
+
+    #[test]
+    fn test_sub_broadcast_scalar() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        // [2,3] - [1] (scalar broadcast)
+        let a_data: Vec<f32> = vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0];
+        let b_data: Vec<f32> = vec![5.0];
+
+        let a = Tensor::from_f32(&device, vec![2, 3], &a_data).unwrap();
+        let b = Tensor::from_f32(&device, vec![1], &b_data).unwrap();
+        let a_id = a.meta.id;
+        let b_id = b.meta.id;
+        rt.insert_tensor(a).unwrap();
+        rt.insert_tensor(b).unwrap();
+
+        let c_id = sub(&mut rt, a_id, b_id).unwrap();
+        rt.eval(&device, c_id).unwrap();
+
+        let result = rt.read_f32(c_id).unwrap();
+        assert_eq!(result, &[5.0, 15.0, 25.0, 35.0, 45.0, 55.0]);
+    }
+
+    #[test]
+    fn test_existing_2d_ops_unchanged() {
+        // Verify that all existing 2D ops still work after the N-D kernel rewrite
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        // 2D add + matmul chain
+        let a = Tensor::from_f32(&device, vec![2, 2], &[1.0, 2.0, 3.0, 4.0]).unwrap();
+        let b = Tensor::from_f32(&device, vec![2, 2], &[5.0, 6.0, 7.0, 8.0]).unwrap();
+        let a_id = a.meta.id;
+        let b_id = b.meta.id;
+        rt.insert_tensor(a).unwrap();
+        rt.insert_tensor(b).unwrap();
+
+        // add
+        let sum_id = add(&mut rt, a_id, b_id).unwrap();
+        rt.eval(&device, sum_id).unwrap();
+        assert_eq!(rt.read_f32(sum_id).unwrap(), &[6.0, 8.0, 10.0, 12.0]);
+
+        // matmul
+        let mm_id = matmul(&mut rt, a_id, b_id).unwrap();
+        rt.eval(&device, mm_id).unwrap();
+        assert_eq!(rt.read_f32(mm_id).unwrap(), &[19.0, 22.0, 43.0, 50.0]);
+    }
 }

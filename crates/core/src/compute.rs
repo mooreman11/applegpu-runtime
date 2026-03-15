@@ -6,30 +6,91 @@ use crate::buffer::Buffer;
 use crate::device::Device;
 use crate::error::{GpuError, Result};
 use crate::ffi;
-use crate::tensor::DType;
+use crate::tensor::{DType, MAX_DIMS};
 
-/// MSL source for binary element-wise ops (add, sub, mul, div).
-const BINARY_KERNEL_SOURCE: &str = r#"
-#include <metal_stdlib>
-using namespace metal;
-
-kernel void elementwise_add(device const float* a [[buffer(0)]], device const float* b [[buffer(1)]], device float* out [[buffer(2)]], constant uint& count [[buffer(3)]], uint id [[thread_position_in_grid]]) { if (id < count) { out[id] = a[id] + b[id]; } }
-kernel void elementwise_sub(device const float* a [[buffer(0)]], device const float* b [[buffer(1)]], device float* out [[buffer(2)]], constant uint& count [[buffer(3)]], uint id [[thread_position_in_grid]]) { if (id < count) { out[id] = a[id] - b[id]; } }
-kernel void elementwise_mul(device const float* a [[buffer(0)]], device const float* b [[buffer(1)]], device float* out [[buffer(2)]], constant uint& count [[buffer(3)]], uint id [[thread_position_in_grid]]) { if (id < count) { out[id] = a[id] * b[id]; } }
-kernel void elementwise_div(device const float* a [[buffer(0)]], device const float* b [[buffer(1)]], device float* out [[buffer(2)]], constant uint& count [[buffer(3)]], uint id [[thread_position_in_grid]]) { if (id < count) { out[id] = a[id] / b[id]; } }
+/// MSL helper for N-D stride-based indexing, prepended to all element-wise kernels.
+const ND_INDEX_HELPER: &str = r#"
+uint nd_index_to_offset(uint flat_id, constant uint* shape, constant uint* strides, constant uint& ndim) {
+    uint offset = 0;
+    for (uint d = ndim; d > 0; d--) {
+        uint i = d - 1;
+        offset += (flat_id % shape[i]) * strides[i];
+        flat_id /= shape[i];
+    }
+    return offset;
+}
 "#;
 
-/// MSL source for unary element-wise ops (neg, relu, exp, log, sqrt).
-const UNARY_KERNEL_SOURCE: &str = r#"
+/// MSL source for binary element-wise ops (add, sub, mul, div) with N-D stride-based indexing.
+const BINARY_KERNEL_SOURCE: &str = const_format::concatcp!(
+    r#"
 #include <metal_stdlib>
 using namespace metal;
+"#,
+    ND_INDEX_HELPER,
+    r#"
+kernel void elementwise_add(device const float* a [[buffer(0)]], device const float* b [[buffer(1)]], device float* out [[buffer(2)]], constant uint* a_strides [[buffer(3)]], constant uint* b_strides [[buffer(4)]], constant uint* out_shape [[buffer(5)]], constant uint& ndim [[buffer(6)]], constant uint& numel [[buffer(7)]], uint id [[thread_position_in_grid]]) {
+    if (id >= numel) return;
+    uint a_off = nd_index_to_offset(id, out_shape, a_strides, ndim);
+    uint b_off = nd_index_to_offset(id, out_shape, b_strides, ndim);
+    out[id] = a[a_off] + b[b_off];
+}
+kernel void elementwise_sub(device const float* a [[buffer(0)]], device const float* b [[buffer(1)]], device float* out [[buffer(2)]], constant uint* a_strides [[buffer(3)]], constant uint* b_strides [[buffer(4)]], constant uint* out_shape [[buffer(5)]], constant uint& ndim [[buffer(6)]], constant uint& numel [[buffer(7)]], uint id [[thread_position_in_grid]]) {
+    if (id >= numel) return;
+    uint a_off = nd_index_to_offset(id, out_shape, a_strides, ndim);
+    uint b_off = nd_index_to_offset(id, out_shape, b_strides, ndim);
+    out[id] = a[a_off] - b[b_off];
+}
+kernel void elementwise_mul(device const float* a [[buffer(0)]], device const float* b [[buffer(1)]], device float* out [[buffer(2)]], constant uint* a_strides [[buffer(3)]], constant uint* b_strides [[buffer(4)]], constant uint* out_shape [[buffer(5)]], constant uint& ndim [[buffer(6)]], constant uint& numel [[buffer(7)]], uint id [[thread_position_in_grid]]) {
+    if (id >= numel) return;
+    uint a_off = nd_index_to_offset(id, out_shape, a_strides, ndim);
+    uint b_off = nd_index_to_offset(id, out_shape, b_strides, ndim);
+    out[id] = a[a_off] * b[b_off];
+}
+kernel void elementwise_div(device const float* a [[buffer(0)]], device const float* b [[buffer(1)]], device float* out [[buffer(2)]], constant uint* a_strides [[buffer(3)]], constant uint* b_strides [[buffer(4)]], constant uint* out_shape [[buffer(5)]], constant uint& ndim [[buffer(6)]], constant uint& numel [[buffer(7)]], uint id [[thread_position_in_grid]]) {
+    if (id >= numel) return;
+    uint a_off = nd_index_to_offset(id, out_shape, a_strides, ndim);
+    uint b_off = nd_index_to_offset(id, out_shape, b_strides, ndim);
+    out[id] = a[a_off] / b[b_off];
+}
+"#
+);
 
-kernel void elementwise_neg(device const float* input [[buffer(0)]], device float* out [[buffer(1)]], constant uint& count [[buffer(2)]], uint id [[thread_position_in_grid]]) { if (id < count) { out[id] = -input[id]; } }
-kernel void elementwise_relu(device const float* input [[buffer(0)]], device float* out [[buffer(1)]], constant uint& count [[buffer(2)]], uint id [[thread_position_in_grid]]) { if (id < count) { out[id] = max(input[id], 0.0f); } }
-kernel void elementwise_exp(device const float* input [[buffer(0)]], device float* out [[buffer(1)]], constant uint& count [[buffer(2)]], uint id [[thread_position_in_grid]]) { if (id < count) { out[id] = exp(input[id]); } }
-kernel void elementwise_log(device const float* input [[buffer(0)]], device float* out [[buffer(1)]], constant uint& count [[buffer(2)]], uint id [[thread_position_in_grid]]) { if (id < count) { out[id] = log(input[id]); } }
-kernel void elementwise_sqrt(device const float* input [[buffer(0)]], device float* out [[buffer(1)]], constant uint& count [[buffer(2)]], uint id [[thread_position_in_grid]]) { if (id < count) { out[id] = sqrt(input[id]); } }
-"#;
+/// MSL source for unary element-wise ops (neg, relu, exp, log, sqrt) with N-D stride-based indexing.
+const UNARY_KERNEL_SOURCE: &str = const_format::concatcp!(
+    r#"
+#include <metal_stdlib>
+using namespace metal;
+"#,
+    ND_INDEX_HELPER,
+    r#"
+kernel void elementwise_neg(device const float* input [[buffer(0)]], device float* out [[buffer(1)]], constant uint* in_strides [[buffer(2)]], constant uint* out_shape [[buffer(3)]], constant uint& ndim [[buffer(4)]], constant uint& numel [[buffer(5)]], uint id [[thread_position_in_grid]]) {
+    if (id >= numel) return;
+    uint in_off = nd_index_to_offset(id, out_shape, in_strides, ndim);
+    out[id] = -input[in_off];
+}
+kernel void elementwise_relu(device const float* input [[buffer(0)]], device float* out [[buffer(1)]], constant uint* in_strides [[buffer(2)]], constant uint* out_shape [[buffer(3)]], constant uint& ndim [[buffer(4)]], constant uint& numel [[buffer(5)]], uint id [[thread_position_in_grid]]) {
+    if (id >= numel) return;
+    uint in_off = nd_index_to_offset(id, out_shape, in_strides, ndim);
+    out[id] = max(input[in_off], 0.0f);
+}
+kernel void elementwise_exp(device const float* input [[buffer(0)]], device float* out [[buffer(1)]], constant uint* in_strides [[buffer(2)]], constant uint* out_shape [[buffer(3)]], constant uint& ndim [[buffer(4)]], constant uint& numel [[buffer(5)]], uint id [[thread_position_in_grid]]) {
+    if (id >= numel) return;
+    uint in_off = nd_index_to_offset(id, out_shape, in_strides, ndim);
+    out[id] = exp(input[in_off]);
+}
+kernel void elementwise_log(device const float* input [[buffer(0)]], device float* out [[buffer(1)]], constant uint* in_strides [[buffer(2)]], constant uint* out_shape [[buffer(3)]], constant uint& ndim [[buffer(4)]], constant uint& numel [[buffer(5)]], uint id [[thread_position_in_grid]]) {
+    if (id >= numel) return;
+    uint in_off = nd_index_to_offset(id, out_shape, in_strides, ndim);
+    out[id] = log(input[in_off]);
+}
+kernel void elementwise_sqrt(device const float* input [[buffer(0)]], device float* out [[buffer(1)]], constant uint* in_strides [[buffer(2)]], constant uint* out_shape [[buffer(3)]], constant uint& ndim [[buffer(4)]], constant uint& numel [[buffer(5)]], uint id [[thread_position_in_grid]]) {
+    if (id >= numel) return;
+    uint in_off = nd_index_to_offset(id, out_shape, in_strides, ndim);
+    out[id] = sqrt(input[in_off]);
+}
+"#
+);
 
 /// MSL source for matrix multiplication.
 const MATMUL_KERNEL_SOURCE: &str = r#"
@@ -111,24 +172,31 @@ kernel void scalar_mul_f32(
 }
 "#;
 
-const GELU_KERNEL_SOURCE: &str = r#"
+const GELU_KERNEL_SOURCE: &str = const_format::concatcp!(
+    r#"
 #include <metal_stdlib>
 using namespace metal;
-
+"#,
+    ND_INDEX_HELPER,
+    r#"
 kernel void gelu_f32(
     device const float* input [[buffer(0)]],
     device float* output [[buffer(1)]],
-    constant uint& count [[buffer(2)]],
+    constant uint* in_strides [[buffer(2)]],
+    constant uint* out_shape [[buffer(3)]],
+    constant uint& ndim [[buffer(4)]],
+    constant uint& numel [[buffer(5)]],
     uint id [[thread_position_in_grid]]
 ) {
-    if (id < count) {
-        float x = input[id];
-        float inner = 0.7978845608f * (x + 0.044715f * x * x * x);
-        inner = clamp(inner, -10.0f, 10.0f);
-        output[id] = x * 0.5f * (1.0f + tanh(inner));
-    }
+    if (id >= numel) return;
+    uint in_off = nd_index_to_offset(id, out_shape, in_strides, ndim);
+    float x = input[in_off];
+    float inner = 0.7978845608f * (x + 0.044715f * x * x * x);
+    inner = clamp(inner, -10.0f, 10.0f);
+    output[id] = x * 0.5f * (1.0f + tanh(inner));
 }
-"#;
+"#
+);
 
 const LAYER_NORM_KERNEL_SOURCE: &str = r#"
 #include <metal_stdlib>
@@ -184,28 +252,76 @@ kernel void embedding_f32(
 
 // ── Float16 kernel sources ──────────────────────────────────────────────────
 
-/// MSL source for f16 binary element-wise ops (add, sub, mul, div).
-const BINARY_KERNEL_SOURCE_F16: &str = r#"
+/// MSL source for f16 binary element-wise ops (add, sub, mul, div) with N-D stride-based indexing.
+const BINARY_KERNEL_SOURCE_F16: &str = const_format::concatcp!(
+    r#"
 #include <metal_stdlib>
 using namespace metal;
+"#,
+    ND_INDEX_HELPER,
+    r#"
+kernel void elementwise_add_f16(device const half* a [[buffer(0)]], device const half* b [[buffer(1)]], device half* out [[buffer(2)]], constant uint* a_strides [[buffer(3)]], constant uint* b_strides [[buffer(4)]], constant uint* out_shape [[buffer(5)]], constant uint& ndim [[buffer(6)]], constant uint& numel [[buffer(7)]], uint id [[thread_position_in_grid]]) {
+    if (id >= numel) return;
+    uint a_off = nd_index_to_offset(id, out_shape, a_strides, ndim);
+    uint b_off = nd_index_to_offset(id, out_shape, b_strides, ndim);
+    out[id] = a[a_off] + b[b_off];
+}
+kernel void elementwise_sub_f16(device const half* a [[buffer(0)]], device const half* b [[buffer(1)]], device half* out [[buffer(2)]], constant uint* a_strides [[buffer(3)]], constant uint* b_strides [[buffer(4)]], constant uint* out_shape [[buffer(5)]], constant uint& ndim [[buffer(6)]], constant uint& numel [[buffer(7)]], uint id [[thread_position_in_grid]]) {
+    if (id >= numel) return;
+    uint a_off = nd_index_to_offset(id, out_shape, a_strides, ndim);
+    uint b_off = nd_index_to_offset(id, out_shape, b_strides, ndim);
+    out[id] = a[a_off] - b[b_off];
+}
+kernel void elementwise_mul_f16(device const half* a [[buffer(0)]], device const half* b [[buffer(1)]], device half* out [[buffer(2)]], constant uint* a_strides [[buffer(3)]], constant uint* b_strides [[buffer(4)]], constant uint* out_shape [[buffer(5)]], constant uint& ndim [[buffer(6)]], constant uint& numel [[buffer(7)]], uint id [[thread_position_in_grid]]) {
+    if (id >= numel) return;
+    uint a_off = nd_index_to_offset(id, out_shape, a_strides, ndim);
+    uint b_off = nd_index_to_offset(id, out_shape, b_strides, ndim);
+    out[id] = a[a_off] * b[b_off];
+}
+kernel void elementwise_div_f16(device const half* a [[buffer(0)]], device const half* b [[buffer(1)]], device half* out [[buffer(2)]], constant uint* a_strides [[buffer(3)]], constant uint* b_strides [[buffer(4)]], constant uint* out_shape [[buffer(5)]], constant uint& ndim [[buffer(6)]], constant uint& numel [[buffer(7)]], uint id [[thread_position_in_grid]]) {
+    if (id >= numel) return;
+    uint a_off = nd_index_to_offset(id, out_shape, a_strides, ndim);
+    uint b_off = nd_index_to_offset(id, out_shape, b_strides, ndim);
+    out[id] = a[a_off] / b[b_off];
+}
+"#
+);
 
-kernel void elementwise_add_f16(device const half* a [[buffer(0)]], device const half* b [[buffer(1)]], device half* out [[buffer(2)]], constant uint& count [[buffer(3)]], uint id [[thread_position_in_grid]]) { if (id < count) { out[id] = a[id] + b[id]; } }
-kernel void elementwise_sub_f16(device const half* a [[buffer(0)]], device const half* b [[buffer(1)]], device half* out [[buffer(2)]], constant uint& count [[buffer(3)]], uint id [[thread_position_in_grid]]) { if (id < count) { out[id] = a[id] - b[id]; } }
-kernel void elementwise_mul_f16(device const half* a [[buffer(0)]], device const half* b [[buffer(1)]], device half* out [[buffer(2)]], constant uint& count [[buffer(3)]], uint id [[thread_position_in_grid]]) { if (id < count) { out[id] = a[id] * b[id]; } }
-kernel void elementwise_div_f16(device const half* a [[buffer(0)]], device const half* b [[buffer(1)]], device half* out [[buffer(2)]], constant uint& count [[buffer(3)]], uint id [[thread_position_in_grid]]) { if (id < count) { out[id] = a[id] / b[id]; } }
-"#;
-
-/// MSL source for f16 unary element-wise ops (neg, relu, exp, log, sqrt).
-const UNARY_KERNEL_SOURCE_F16: &str = r#"
+/// MSL source for f16 unary element-wise ops (neg, relu, exp, log, sqrt) with N-D stride-based indexing.
+const UNARY_KERNEL_SOURCE_F16: &str = const_format::concatcp!(
+    r#"
 #include <metal_stdlib>
 using namespace metal;
-
-kernel void elementwise_neg_f16(device const half* input [[buffer(0)]], device half* out [[buffer(1)]], constant uint& count [[buffer(2)]], uint id [[thread_position_in_grid]]) { if (id < count) { out[id] = -input[id]; } }
-kernel void elementwise_relu_f16(device const half* input [[buffer(0)]], device half* out [[buffer(1)]], constant uint& count [[buffer(2)]], uint id [[thread_position_in_grid]]) { if (id < count) { out[id] = max(input[id], (half)0); } }
-kernel void elementwise_exp_f16(device const half* input [[buffer(0)]], device half* out [[buffer(1)]], constant uint& count [[buffer(2)]], uint id [[thread_position_in_grid]]) { if (id < count) { out[id] = exp(input[id]); } }
-kernel void elementwise_log_f16(device const half* input [[buffer(0)]], device half* out [[buffer(1)]], constant uint& count [[buffer(2)]], uint id [[thread_position_in_grid]]) { if (id < count) { out[id] = log(input[id]); } }
-kernel void elementwise_sqrt_f16(device const half* input [[buffer(0)]], device half* out [[buffer(1)]], constant uint& count [[buffer(2)]], uint id [[thread_position_in_grid]]) { if (id < count) { out[id] = sqrt(input[id]); } }
-"#;
+"#,
+    ND_INDEX_HELPER,
+    r#"
+kernel void elementwise_neg_f16(device const half* input [[buffer(0)]], device half* out [[buffer(1)]], constant uint* in_strides [[buffer(2)]], constant uint* out_shape [[buffer(3)]], constant uint& ndim [[buffer(4)]], constant uint& numel [[buffer(5)]], uint id [[thread_position_in_grid]]) {
+    if (id >= numel) return;
+    uint in_off = nd_index_to_offset(id, out_shape, in_strides, ndim);
+    out[id] = -input[in_off];
+}
+kernel void elementwise_relu_f16(device const half* input [[buffer(0)]], device half* out [[buffer(1)]], constant uint* in_strides [[buffer(2)]], constant uint* out_shape [[buffer(3)]], constant uint& ndim [[buffer(4)]], constant uint& numel [[buffer(5)]], uint id [[thread_position_in_grid]]) {
+    if (id >= numel) return;
+    uint in_off = nd_index_to_offset(id, out_shape, in_strides, ndim);
+    out[id] = max(input[in_off], (half)0);
+}
+kernel void elementwise_exp_f16(device const half* input [[buffer(0)]], device half* out [[buffer(1)]], constant uint* in_strides [[buffer(2)]], constant uint* out_shape [[buffer(3)]], constant uint& ndim [[buffer(4)]], constant uint& numel [[buffer(5)]], uint id [[thread_position_in_grid]]) {
+    if (id >= numel) return;
+    uint in_off = nd_index_to_offset(id, out_shape, in_strides, ndim);
+    out[id] = exp(input[in_off]);
+}
+kernel void elementwise_log_f16(device const half* input [[buffer(0)]], device half* out [[buffer(1)]], constant uint* in_strides [[buffer(2)]], constant uint* out_shape [[buffer(3)]], constant uint& ndim [[buffer(4)]], constant uint& numel [[buffer(5)]], uint id [[thread_position_in_grid]]) {
+    if (id >= numel) return;
+    uint in_off = nd_index_to_offset(id, out_shape, in_strides, ndim);
+    out[id] = log(input[in_off]);
+}
+kernel void elementwise_sqrt_f16(device const half* input [[buffer(0)]], device half* out [[buffer(1)]], constant uint* in_strides [[buffer(2)]], constant uint* out_shape [[buffer(3)]], constant uint& ndim [[buffer(4)]], constant uint& numel [[buffer(5)]], uint id [[thread_position_in_grid]]) {
+    if (id >= numel) return;
+    uint in_off = nd_index_to_offset(id, out_shape, in_strides, ndim);
+    out[id] = sqrt(input[in_off]);
+}
+"#
+);
 
 /// MSL source for f16 matmul with f32-intermediate accumulation.
 const MATMUL_KERNEL_SOURCE_F16: &str = r#"
@@ -273,24 +389,31 @@ kernel void transpose_f16(
 }
 "#;
 
-const GELU_KERNEL_SOURCE_F16: &str = r#"
+const GELU_KERNEL_SOURCE_F16: &str = const_format::concatcp!(
+    r#"
 #include <metal_stdlib>
 using namespace metal;
-
+"#,
+    ND_INDEX_HELPER,
+    r#"
 kernel void gelu_f16(
     device const half* input [[buffer(0)]],
     device half* output [[buffer(1)]],
-    constant uint& count [[buffer(2)]],
+    constant uint* in_strides [[buffer(2)]],
+    constant uint* out_shape [[buffer(3)]],
+    constant uint& ndim [[buffer(4)]],
+    constant uint& numel [[buffer(5)]],
     uint id [[thread_position_in_grid]]
 ) {
-    if (id < count) {
-        float x = float(input[id]);
-        float inner = 0.7978845608f * (x + 0.044715f * x * x * x);
-        inner = clamp(inner, -10.0f, 10.0f);
-        output[id] = half(x * 0.5f * (1.0f + tanh(inner)));
-    }
+    if (id >= numel) return;
+    uint in_off = nd_index_to_offset(id, out_shape, in_strides, ndim);
+    float x = float(input[in_off]);
+    float inner = 0.7978845608f * (x + 0.044715f * x * x * x);
+    inner = clamp(inner, -10.0f, 10.0f);
+    output[id] = half(x * 0.5f * (1.0f + tanh(inner)));
 }
-"#;
+"#
+);
 
 const LAYER_NORM_KERNEL_SOURCE_F16: &str = r#"
 #include <metal_stdlib>
@@ -580,7 +703,8 @@ impl ComputePipeline {
         }
     }
 
-    /// Dispatch binary element-wise operation: out = op(a, b).
+    /// Dispatch binary element-wise operation with N-D strides: out = op(a, b).
+    /// For contiguous same-shape inputs, constructs 1-D contiguous strides.
     pub fn dispatch_elementwise(
         &self,
         buf_a: &Buffer,
@@ -588,34 +712,36 @@ impl ComputePipeline {
         buf_out: &Buffer,
         element_count: usize,
     ) -> Result<()> {
-        let result = unsafe {
-            ffi::gpu_bridge_compute_elementwise(
-                self.handle,
-                buf_a.raw_handle() as *const _,
-                buf_b.raw_handle() as *const _,
-                buf_out.raw_handle(),
-                element_count as u64,
-            )
-        };
-        if result == 0 { Ok(()) } else { Err(GpuError::ComputeFailed("Binary kernel dispatch failed".to_string())) }
+        // Construct 1-D contiguous strides for backward compat
+        let mut strides = [0u32; MAX_DIMS];
+        strides[0] = 1;
+        let mut shape = [0u32; MAX_DIMS];
+        shape[0] = element_count as u32;
+        self.dispatch_binary_nd(
+            buf_a, &strides,
+            buf_b, &strides,
+            buf_out, &shape,
+            1, element_count as u32,
+        )
     }
 
-    /// Dispatch unary element-wise operation: out = op(input).
+    /// Dispatch unary element-wise operation with N-D strides: out = op(input).
+    /// For contiguous inputs, constructs 1-D contiguous strides.
     pub fn dispatch_unary(
         &self,
         buf_input: &Buffer,
         buf_out: &Buffer,
         element_count: usize,
     ) -> Result<()> {
-        let result = unsafe {
-            ffi::gpu_bridge_compute_unary(
-                self.handle,
-                buf_input.raw_handle() as *const _,
-                buf_out.raw_handle(),
-                element_count as u64,
-            )
-        };
-        if result == 0 { Ok(()) } else { Err(GpuError::ComputeFailed("Unary kernel dispatch failed".to_string())) }
+        let mut strides = [0u32; MAX_DIMS];
+        strides[0] = 1;
+        let mut shape = [0u32; MAX_DIMS];
+        shape[0] = element_count as u32;
+        self.dispatch_unary_nd(
+            buf_input, &strides,
+            buf_out, &shape,
+            1, element_count as u32,
+        )
     }
 
     /// Dispatch matrix multiplication: C[M,N] = A[M,K] * B[K,N].
@@ -817,7 +943,7 @@ impl ComputePipeline {
 
     // ── Non-blocking dispatch methods ─────────────────────────────────────
 
-    /// Non-blocking binary elementwise. Returns command buffer handle.
+    /// Non-blocking binary elementwise with N-D strides. Returns command buffer handle.
     pub fn dispatch_elementwise_nb(
         &self,
         queue: *mut std::ffi::c_void,
@@ -826,20 +952,20 @@ impl ComputePipeline {
         buf_out: &Buffer,
         element_count: usize,
     ) -> Result<*mut std::ffi::c_void> {
-        let cb = unsafe {
-            ffi::gpu_bridge_compute_elementwise_nb(
-                self.handle,
-                queue,
-                buf_a.raw_handle() as *const _,
-                buf_b.raw_handle() as *const _,
-                buf_out.raw_handle(),
-                element_count as u64,
-            )
-        };
-        if cb.is_null() { Err(GpuError::ComputeFailed("Non-blocking binary dispatch failed".to_string())) } else { Ok(cb) }
+        let mut strides = [0u32; MAX_DIMS];
+        strides[0] = 1;
+        let mut shape = [0u32; MAX_DIMS];
+        shape[0] = element_count as u32;
+        self.dispatch_binary_nd_nb(
+            queue,
+            buf_a, &strides,
+            buf_b, &strides,
+            buf_out, &shape,
+            1, element_count as u32,
+        )
     }
 
-    /// Non-blocking unary. Returns command buffer handle.
+    /// Non-blocking unary with N-D strides. Returns command buffer handle.
     pub fn dispatch_unary_nb(
         &self,
         queue: *mut std::ffi::c_void,
@@ -847,16 +973,16 @@ impl ComputePipeline {
         buf_out: &Buffer,
         element_count: usize,
     ) -> Result<*mut std::ffi::c_void> {
-        let cb = unsafe {
-            ffi::gpu_bridge_compute_unary_nb(
-                self.handle,
-                queue,
-                buf_input.raw_handle() as *const _,
-                buf_out.raw_handle(),
-                element_count as u64,
-            )
-        };
-        if cb.is_null() { Err(GpuError::ComputeFailed("Non-blocking unary dispatch failed".to_string())) } else { Ok(cb) }
+        let mut strides = [0u32; MAX_DIMS];
+        strides[0] = 1;
+        let mut shape = [0u32; MAX_DIMS];
+        shape[0] = element_count as u32;
+        self.dispatch_unary_nd_nb(
+            queue,
+            buf_input, &strides,
+            buf_out, &shape,
+            1, element_count as u32,
+        )
     }
 
     /// Non-blocking matmul. Returns command buffer handle.
@@ -1092,6 +1218,102 @@ impl ComputePipeline {
             )
         };
         if cb.is_null() { Err(GpuError::ComputeFailed("Non-blocking add_bias dispatch failed".to_string())) } else { Ok(cb) }
+    }
+
+    // ── N-D stride-based dispatch methods ─────────────────────────────────
+
+    /// Dispatch N-D binary element-wise op with stride arrays.
+    pub fn dispatch_binary_nd(
+        &self,
+        buf_a: &Buffer, a_strides: &[u32; MAX_DIMS],
+        buf_b: &Buffer, b_strides: &[u32; MAX_DIMS],
+        buf_out: &Buffer, out_shape: &[u32; MAX_DIMS],
+        ndim: u32, numel: u32,
+    ) -> Result<()> {
+        let result = unsafe {
+            ffi::gpu_bridge_compute_binary_nd(
+                self.handle,
+                buf_a.raw_handle() as *const _,
+                buf_b.raw_handle() as *const _,
+                buf_out.raw_handle(),
+                a_strides.as_ptr(),
+                b_strides.as_ptr(),
+                out_shape.as_ptr(),
+                ndim,
+                numel,
+            )
+        };
+        if result == 0 { Ok(()) } else { Err(GpuError::ComputeFailed("Binary N-D dispatch failed".to_string())) }
+    }
+
+    /// Non-blocking N-D binary element-wise op.
+    pub fn dispatch_binary_nd_nb(
+        &self,
+        queue: *mut std::ffi::c_void,
+        buf_a: &Buffer, a_strides: &[u32; MAX_DIMS],
+        buf_b: &Buffer, b_strides: &[u32; MAX_DIMS],
+        buf_out: &Buffer, out_shape: &[u32; MAX_DIMS],
+        ndim: u32, numel: u32,
+    ) -> Result<*mut std::ffi::c_void> {
+        let cb = unsafe {
+            ffi::gpu_bridge_compute_binary_nd_nb(
+                self.handle,
+                queue,
+                buf_a.raw_handle() as *const _,
+                buf_b.raw_handle() as *const _,
+                buf_out.raw_handle(),
+                a_strides.as_ptr(),
+                b_strides.as_ptr(),
+                out_shape.as_ptr(),
+                ndim,
+                numel,
+            )
+        };
+        if cb.is_null() { Err(GpuError::ComputeFailed("Non-blocking binary N-D dispatch failed".to_string())) } else { Ok(cb) }
+    }
+
+    /// Dispatch N-D unary element-wise op with stride arrays.
+    pub fn dispatch_unary_nd(
+        &self,
+        buf_input: &Buffer, in_strides: &[u32; MAX_DIMS],
+        buf_out: &Buffer, out_shape: &[u32; MAX_DIMS],
+        ndim: u32, numel: u32,
+    ) -> Result<()> {
+        let result = unsafe {
+            ffi::gpu_bridge_compute_unary_nd(
+                self.handle,
+                buf_input.raw_handle() as *const _,
+                buf_out.raw_handle(),
+                in_strides.as_ptr(),
+                out_shape.as_ptr(),
+                ndim,
+                numel,
+            )
+        };
+        if result == 0 { Ok(()) } else { Err(GpuError::ComputeFailed("Unary N-D dispatch failed".to_string())) }
+    }
+
+    /// Non-blocking N-D unary element-wise op.
+    pub fn dispatch_unary_nd_nb(
+        &self,
+        queue: *mut std::ffi::c_void,
+        buf_input: &Buffer, in_strides: &[u32; MAX_DIMS],
+        buf_out: &Buffer, out_shape: &[u32; MAX_DIMS],
+        ndim: u32, numel: u32,
+    ) -> Result<*mut std::ffi::c_void> {
+        let cb = unsafe {
+            ffi::gpu_bridge_compute_unary_nd_nb(
+                self.handle,
+                queue,
+                buf_input.raw_handle() as *const _,
+                buf_out.raw_handle(),
+                in_strides.as_ptr(),
+                out_shape.as_ptr(),
+                ndim,
+                numel,
+            )
+        };
+        if cb.is_null() { Err(GpuError::ComputeFailed("Non-blocking unary N-D dispatch failed".to_string())) } else { Ok(cb) }
     }
 }
 
@@ -1620,6 +1842,60 @@ impl KernelRegistry {
     ) -> Result<*mut std::ffi::c_void> {
         let pipeline = self.get_or_create(device, kernel_source, function_name)?;
         pipeline.dispatch_fused_nb(queue, input_buffers, buf_out, element_count)
+    }
+
+    // ── N-D typed dispatch methods ────────────────────────────────────────
+
+    /// Dispatch N-D binary element-wise op with dtype-aware kernel selection.
+    pub fn dispatch_binary_nd_typed(
+        &self, device: &Device, function_name: &str, dtype: DType,
+        buf_a: &Buffer, a_strides: &[u32; MAX_DIMS],
+        buf_b: &Buffer, b_strides: &[u32; MAX_DIMS],
+        buf_out: &Buffer, out_shape: &[u32; MAX_DIMS],
+        ndim: u32, numel: u32,
+    ) -> Result<()> {
+        let (source, func) = Self::resolve_kernel(function_name, dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_binary_nd(buf_a, a_strides, buf_b, b_strides, buf_out, out_shape, ndim, numel)
+    }
+
+    /// Non-blocking N-D binary element-wise op with dtype-aware kernel selection.
+    pub fn dispatch_binary_nd_typed_nb(
+        &self, device: &Device, function_name: &str, dtype: DType,
+        queue: *mut std::ffi::c_void,
+        buf_a: &Buffer, a_strides: &[u32; MAX_DIMS],
+        buf_b: &Buffer, b_strides: &[u32; MAX_DIMS],
+        buf_out: &Buffer, out_shape: &[u32; MAX_DIMS],
+        ndim: u32, numel: u32,
+    ) -> Result<*mut std::ffi::c_void> {
+        let (source, func) = Self::resolve_kernel(function_name, dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_binary_nd_nb(queue, buf_a, a_strides, buf_b, b_strides, buf_out, out_shape, ndim, numel)
+    }
+
+    /// Dispatch N-D unary element-wise op with dtype-aware kernel selection.
+    pub fn dispatch_unary_nd_typed(
+        &self, device: &Device, function_name: &str, dtype: DType,
+        buf_input: &Buffer, in_strides: &[u32; MAX_DIMS],
+        buf_out: &Buffer, out_shape: &[u32; MAX_DIMS],
+        ndim: u32, numel: u32,
+    ) -> Result<()> {
+        let (source, func) = Self::resolve_kernel(function_name, dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_unary_nd(buf_input, in_strides, buf_out, out_shape, ndim, numel)
+    }
+
+    /// Non-blocking N-D unary element-wise op with dtype-aware kernel selection.
+    pub fn dispatch_unary_nd_typed_nb(
+        &self, device: &Device, function_name: &str, dtype: DType,
+        queue: *mut std::ffi::c_void,
+        buf_input: &Buffer, in_strides: &[u32; MAX_DIMS],
+        buf_out: &Buffer, out_shape: &[u32; MAX_DIMS],
+        ndim: u32, numel: u32,
+    ) -> Result<*mut std::ffi::c_void> {
+        let (source, func) = Self::resolve_kernel(function_name, dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_unary_nd_nb(queue, buf_input, in_strides, buf_out, out_shape, ndim, numel)
     }
 }
 

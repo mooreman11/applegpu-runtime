@@ -8,7 +8,7 @@ use crate::graph::{Graph, OpNode};
 use crate::limits::ResourceLimits;
 use crate::pool::BufferPool;
 use crate::scheduler::{ContainerId, Scheduler};
-use crate::tensor::{DType, Tensor};
+use crate::tensor::{DType, Tensor, TensorLayout, Shape, MAX_DIMS};
 
 use once_cell::sync::Lazy;
 
@@ -220,10 +220,14 @@ impl LazyRuntime {
         }
 
         if node.op.is_gelu() {
+            let (in_strides, out_shape_u32, ndim, numel) = self.unary_nd_params(node)?;
             let out_buf = self.pool.acquire(device, out_size)?;
             let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
             let input = self.get_tensor(node.inputs[0])?;
-            REGISTRY.dispatch_gelu_typed(device, dtype, &input.buffer, &out.buffer, input.numel())?;
+            REGISTRY.dispatch_unary_nd_typed(
+                device, "gelu_f32", dtype,
+                &input.buffer, &in_strides, &out.buffer, &out_shape_u32, ndim, numel,
+            )?;
             return Ok(out);
         }
 
@@ -350,16 +354,20 @@ impl LazyRuntime {
         }
 
         if node.op.is_unary() {
+            let (in_strides, out_shape_u32, ndim, numel) = self.unary_nd_params(node)?;
             let out_buf = self.pool.acquire(device, out_size)?;
             let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
             let input = self.get_tensor(node.inputs[0])?;
-            REGISTRY.dispatch_unary_typed(
+            REGISTRY.dispatch_unary_nd_typed(
                 device,
                 node.op.kernel_name(),
                 dtype,
                 &input.buffer,
+                &in_strides,
                 &out.buffer,
-                input.numel(),
+                &out_shape_u32,
+                ndim,
+                numel,
             )?;
             Ok(out)
         } else if node.op.is_matmul() {
@@ -374,19 +382,24 @@ impl LazyRuntime {
             REGISTRY.dispatch_matmul_typed(device, dtype, &a.buffer, &b.buffer, &out.buffer, m, n, k)?;
             Ok(out)
         } else {
-            // Binary element-wise
+            // Binary element-wise (N-D with broadcasting)
+            let (a_strides, b_strides, out_shape_u32, ndim, numel) = self.binary_nd_params(node)?;
             let out_buf = self.pool.acquire(device, out_size)?;
             let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
             let a = self.get_tensor(node.inputs[0])?;
             let b = self.get_tensor(node.inputs[1])?;
-            REGISTRY.dispatch_binary_typed(
+            REGISTRY.dispatch_binary_nd_typed(
                 device,
                 node.op.kernel_name(),
                 dtype,
                 &a.buffer,
+                &a_strides,
                 &b.buffer,
+                &b_strides,
                 &out.buffer,
-                a.numel(),
+                &out_shape_u32,
+                ndim,
+                numel,
             )?;
             Ok(out)
         }
@@ -443,8 +456,12 @@ impl LazyRuntime {
         }
 
         if node.op.is_gelu() {
+            let (in_strides, out_shape_u32, ndim, numel) = self.unary_nd_params(node)?;
             let input = self.get_tensor(node.inputs[0])?;
-            return REGISTRY.dispatch_gelu_typed_nb(device, dtype, queue, &input.buffer, &out.buffer, input.numel());
+            return REGISTRY.dispatch_unary_nd_typed_nb(
+                device, "gelu_f32", dtype, queue,
+                &input.buffer, &in_strides, &out.buffer, &out_shape_u32, ndim, numel,
+            );
         }
 
         if node.op.is_layer_norm() {
@@ -543,15 +560,19 @@ impl LazyRuntime {
         }
 
         if node.op.is_unary() {
+            let (in_strides, out_shape_u32, ndim, numel) = self.unary_nd_params(node)?;
             let input = self.get_tensor(node.inputs[0])?;
-            REGISTRY.dispatch_unary_typed_nb(
+            REGISTRY.dispatch_unary_nd_typed_nb(
                 device,
                 node.op.kernel_name(),
                 dtype,
                 queue,
                 &input.buffer,
+                &in_strides,
                 &out.buffer,
-                input.numel(),
+                &out_shape_u32,
+                ndim,
+                numel,
             )
         } else if node.op.is_matmul() {
             let a = self.get_tensor(node.inputs[0])?;
@@ -562,20 +583,97 @@ impl LazyRuntime {
             let n = b_dims[1];
             REGISTRY.dispatch_matmul_typed_nb(device, dtype, queue, &a.buffer, &b.buffer, &out.buffer, m, n, k)
         } else {
-            // Binary element-wise
+            // Binary element-wise (N-D with broadcasting)
+            let (a_strides, b_strides, out_shape_u32, ndim, numel) = self.binary_nd_params(node)?;
             let a = self.get_tensor(node.inputs[0])?;
             let b = self.get_tensor(node.inputs[1])?;
-            REGISTRY.dispatch_binary_typed_nb(
+            REGISTRY.dispatch_binary_nd_typed_nb(
                 device,
                 node.op.kernel_name(),
                 dtype,
                 queue,
                 &a.buffer,
+                &a_strides,
                 &b.buffer,
+                &b_strides,
                 &out.buffer,
-                a.numel(),
+                &out_shape_u32,
+                ndim,
+                numel,
             )
         }
+    }
+
+    /// Convert a [usize; MAX_DIMS] array to [u32; MAX_DIMS] for Metal dispatch.
+    fn to_u32_array(arr: &[usize; MAX_DIMS]) -> [u32; MAX_DIMS] {
+        let mut out = [0u32; MAX_DIMS];
+        for i in 0..MAX_DIMS {
+            out[i] = arr[i] as u32;
+        }
+        out
+    }
+
+    /// Convert a Shape's dims to [u32; MAX_DIMS] for Metal dispatch.
+    fn shape_to_u32(shape: &Shape) -> [u32; MAX_DIMS] {
+        Self::to_u32_array(&shape.dims)
+    }
+
+    /// Compute broadcast strides for a binary op, converting to u32.
+    fn binary_nd_params(
+        &self, node: &OpNode,
+    ) -> Result<([u32; MAX_DIMS], [u32; MAX_DIMS], [u32; MAX_DIMS], u32, u32)> {
+        let a_shape = {
+            if let Some(t) = self.tensors.get(&node.inputs[0]) {
+                t.meta.layout.shape
+            } else if let Some(n) = self.graph.get_node(node.inputs[0]) {
+                n.out_shape
+            } else {
+                return Err(GpuError::GraphError(format!("Tensor {} not found", node.inputs[0])));
+            }
+        };
+        let b_shape = {
+            if let Some(t) = self.tensors.get(&node.inputs[1]) {
+                t.meta.layout.shape
+            } else if let Some(n) = self.graph.get_node(node.inputs[1]) {
+                n.out_shape
+            } else {
+                return Err(GpuError::GraphError(format!("Tensor {} not found", node.inputs[1])));
+            }
+        };
+
+        let a_strides = TensorLayout::broadcast_strides_for(&a_shape, &node.out_shape);
+        let b_strides = TensorLayout::broadcast_strides_for(&b_shape, &node.out_shape);
+
+        let a_strides_u32 = Self::to_u32_array(&a_strides);
+        let b_strides_u32 = Self::to_u32_array(&b_strides);
+        let out_shape_u32 = Self::shape_to_u32(&node.out_shape);
+        let ndim = node.out_shape.ndim() as u32;
+        let numel = node.out_shape.numel() as u32;
+
+        Ok((a_strides_u32, b_strides_u32, out_shape_u32, ndim, numel))
+    }
+
+    /// Compute contiguous strides for a unary op input, converting to u32.
+    fn unary_nd_params(
+        &self, node: &OpNode,
+    ) -> Result<([u32; MAX_DIMS], [u32; MAX_DIMS], u32, u32)> {
+        let in_shape = {
+            if let Some(t) = self.tensors.get(&node.inputs[0]) {
+                t.meta.layout.shape
+            } else if let Some(n) = self.graph.get_node(node.inputs[0]) {
+                n.out_shape
+            } else {
+                return Err(GpuError::GraphError(format!("Tensor {} not found", node.inputs[0])));
+            }
+        };
+
+        let in_strides = TensorLayout::broadcast_strides_for(&in_shape, &node.out_shape);
+        let in_strides_u32 = Self::to_u32_array(&in_strides);
+        let out_shape_u32 = Self::shape_to_u32(&node.out_shape);
+        let ndim = node.out_shape.ndim() as u32;
+        let numel = node.out_shape.numel() as u32;
+
+        Ok((in_strides_u32, out_shape_u32, ndim, numel))
     }
 
     /// Get a reference to a materialized tensor. Errors if not materialized.
