@@ -116,7 +116,8 @@ All ops support N-D tensors (up to 8 dimensions) with NumPy-style broadcasting a
 ### Infrastructure
 
 - **PyTorch device backend** — `ApplegpuTensor` with `__torch_dispatch__`, 40+ aten ops routed to Metal, CPU fallback with warnings
-- **Training support** — PyTorch autograd works natively, SGD/Adam optimizers, MLP training verified with loss decrease
+- **Training support** — autograd, SGD/Adam/AdamW, gradient clipping, GPT-2 fine-tuning, ResNet training
+- **Fast tensor transfer** — `from_torch` 385x faster via direct `data_ptr()` (0.55ms vs 212ms for 1M elements)
 - **Multi-container scheduler** — priority-based fair queuing with per-container resource quotas
 - **Persistent memory pool** — power-of-two bucketed buffer reuse with watermark eviction
 - **Command buffer batching** — non-blocking GPU dispatch, single wait per eval
@@ -133,9 +134,16 @@ All ops support N-D tensors (up to 8 dimensions) with NumPy-style broadcasting a
 | GPT-2 medium (345M) | ~3 tok/s | 24 layers, 1024 dims |
 | GPT-2 large (774M) | ~0.7 tok/s | 36 layers, 1280 dims |
 
+### Training
+
+- **PyTorch autograd** — backward ops flow natively through `__torch_dispatch__`
+- **Optimizers** — SGD, Adam, AdamW all work with loss decrease
+- **Gradient clipping** — `torch.nn.utils.clip_grad_norm_` supported
+- **Validated training** — MLP, transformer (GELU+LN), ResNet-18, GPT-2 fine-tuning
+
 ### Test Coverage
 
-560 tests across all layers (266 Rust + 13 Swift + 281 Python)
+~600 tests across all layers (283 Rust + 13 Swift + ~300 Python)
 
 ## Examples
 

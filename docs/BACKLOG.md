@@ -165,32 +165,30 @@ _Training support: PyTorch autograd works natively on Metal GPU for MLP training
 - [ ] **Int64 compute kernels** — batch_norm's num_batches_tracked falls back to CPU
 - [ ] **Gradient accumulation** — for large batch training across multiple micro-batches
 
+## v0.7.0 — SHIPPED
+_Production training: backward kernels, Adam/AdamW, gradient clipping, 385x faster tensor transfer._
+
+- [x] All backward ops on Metal (softmax, layer_norm, conv2d, embedding, batch_norm)
+- [x] Training verified: MLP, transformer, ResNet-18, GPT-2 fine-tuning
+- [x] Adam/AdamW/SGD optimizers, gradient clipping
+- [x] Direct data_ptr() transfer (385x faster from_torch, 683x faster from_numpy)
+
 ## Up Next
 
-### v0.7.0: Production training + performance
-_Scale training to real models. Verify all backward ops. Optimize dispatch overhead._
+### v0.8.0: Working tree cleanup + polish
+_Commit any remaining changes, stabilize, expand model support._
 
-**Training at scale:**
-- [x] **Softmax backward on Metal** — native kernel, zero CPU fallback
-- [x] **Layer norm backward on Metal** — native kernel for grad_input, CPU for grad_weight/beta
-- [x] **Conv2d backward on Metal** — transposed convolution grad_input, CPU grad_weight
-- [x] **Batch norm backward on Metal** — inference-mode grad_input
-- [x] **Embedding backward on Metal** — atomic scatter-add
-- [x] **Transformer training** — 3-layer GELU+LayerNorm model trains on Metal (loss decreases over 10 steps)
-- [x] **GPT-2 fine-tuning** — tiny GPT-2 trains on Metal (loss 4.39 → 3.79 over 5 steps, CE loss via CPU fallback)
-- [x] **ResNet training** — ResNet-18 trains on Metal GPU (loss 1.11 → 0.73 over 3 steps)
-- [x] **Adam/AdamW optimizer** — in-place ops (mul_, addcmul_, addcdiv_, lerp_) fixed, loss decreases
-- [x] **Gradient clipping** — torch.nn.utils.clip_grad_norm_ works (linalg_vector_norm via CPU fallback)
-
-**Performance:**
-- [ ] **torch.compile() support** — graph-level fusion, eliminate Python dispatch overhead
-- [x] **Direct data_ptr() transfer** — from_torch 385x faster (212ms → 0.55ms), from_numpy 683x faster
-- [ ] **Native model.to("applegpu")** — proper PrivateUse1 storage backend
-
-**More models:**
 - [ ] **Whisper** — audio model with conv1d
 - [ ] **Stable Diffusion** — requires group_norm (new kernel)
 - [ ] **Fine-tuned model export** — save trained weights
+- [ ] **Native model.to("applegpu")** — proper PrivateUse1 storage backend
+
+### v0.9.0: Performance optimization
+_Graph-level fusion, eliminate Python dispatch overhead._
+
+- [ ] **torch.compile() support** — register as compile backend for graph-level fusion
+- [ ] **Single command buffer** — encode all ops into one MTLCommandBuffer (Phase 2b)
+- [ ] **Concurrent queues** — dispatch independent subgraphs in parallel (Phase 2c)
 
 ## Further Backlog
 
