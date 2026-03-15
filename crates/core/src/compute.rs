@@ -4185,6 +4185,25 @@ pub fn wait_command_buffer(cb: *mut std::ffi::c_void) {
     unsafe { ffi::gpu_bridge_wait_command_buffer(cb) }
 }
 
+/// Begin batch encoding: creates a single command buffer for all subsequent _nb dispatches.
+/// Returns a non-null handle on success (unretained — only for null-checking).
+/// All _nb calls will encode into this CB until end_batch() or abort_batch() is called.
+pub fn begin_batch(queue: *mut std::ffi::c_void) -> *mut std::ffi::c_void {
+    unsafe { ffi::gpu_bridge_begin_batch(queue) }
+}
+
+/// End batch encoding: commits the batch command buffer and returns its handle for waiting.
+/// The returned handle is retained — pass to wait_command_buffer() which consumes it.
+pub fn end_batch() -> *mut std::ffi::c_void {
+    unsafe { ffi::gpu_bridge_end_batch() }
+}
+
+/// Abort batch encoding: discards the batch command buffer without committing.
+/// Call this when an error occurs mid-batch to clean up batch state.
+pub fn abort_batch() {
+    unsafe { ffi::gpu_bridge_abort_batch() }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

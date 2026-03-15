@@ -180,6 +180,10 @@ extern "C" {
 
     pub fn gpu_bridge_wait_command_buffer(cb: *mut std::ffi::c_void);
 
+    pub fn gpu_bridge_begin_batch(queue: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
+    pub fn gpu_bridge_end_batch() -> *mut std::ffi::c_void;
+    pub fn gpu_bridge_abort_batch();
+
     pub fn gpu_bridge_compute_elementwise_nb(
         compute: *mut GPUComputeHandle,
         queue: *mut std::ffi::c_void,

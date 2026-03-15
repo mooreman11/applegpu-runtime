@@ -183,6 +183,14 @@ void* gpu_bridge_get_shared_queue(GPUDeviceHandle* device);
 // Wait for a command buffer to complete (consumes the retained reference).
 void gpu_bridge_wait_command_buffer(void* command_buffer);
 
+// Batch encoding: encode all ops into a single command buffer per eval.
+// begin_batch creates a command buffer; all subsequent _nb calls encode into it.
+// end_batch commits and returns the CB handle for waiting.
+// abort_batch discards the batch on mid-encode error.
+void* gpu_bridge_begin_batch(void* queue);
+void* gpu_bridge_end_batch(void);
+void gpu_bridge_abort_batch(void);
+
 // Non-blocking elementwise: returns command buffer handle (or NULL on failure).
 void* gpu_bridge_compute_elementwise_nb(
     GPUComputeHandle* compute,

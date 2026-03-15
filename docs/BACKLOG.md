@@ -55,9 +55,10 @@ _Eliminate GPU idle time between ops, then enable true parallel execution._
 - [x] **Non-blocking dispatch** — remove waitUntilCompleted() from individual ops, wait once at end of eval
 - [x] **Spec:** `docs/superpowers/specs/2026-03-14-command-buffer-batching-design.md`
 
-**Phase 2b: Single command buffer** _(future)_
-- [ ] **Encode all ops into one MTLCommandBuffer** — reduce CB creation overhead
-- [ ] **begin_batch/end_batch FFI** — new Swift/Rust API for batch encoding
+**Phase 2b: Single command buffer** _(DONE)_
+- [x] **Encode all ops into one MTLCommandBuffer** — reduce CB creation overhead
+- [x] **begin_batch/end_batch/abort_batch FFI** — new Swift/Rust API for batch encoding
+- [x] **Spec:** `docs/superpowers/specs/2026-03-15-single-command-buffer-design.md`
 
 **Phase 2c: Concurrent queues** _(future)_
 - [ ] **Dependency analysis** — identify independent subgraphs in the topo-sorted order
