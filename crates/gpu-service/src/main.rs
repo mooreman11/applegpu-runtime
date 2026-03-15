@@ -1,3 +1,4 @@
+use std::io;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -14,6 +15,26 @@ use applegpu_wire::{
     EvalRequest, EvalResponse, HandshakeRequest, HandshakeResponse,
     HANDSHAKE_OK, HANDSHAKE_REJECTED_QUOTA, PROTOCOL_VERSION, MAX_MESSAGE_SIZE,
 };
+
+/// Convert a wire protocol dtype discriminant to a core DType.
+fn wire_dtype_to_core(d: u32) -> io::Result<DType> {
+    match d {
+        0 => Ok(DType::Float32),
+        1 => Ok(DType::Float16),
+        2 => Ok(DType::Float64),
+        3 => Ok(DType::Int8),
+        4 => Ok(DType::Int16),
+        5 => Ok(DType::Int32),
+        6 => Ok(DType::Int64),
+        7 => Ok(DType::UInt8),
+        8 => Ok(DType::UInt32),
+        9 => Ok(DType::Bool),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Unknown dtype: {}", d),
+        )),
+    }
+}
 
 struct SharedState {
     runtime: Mutex<LazyRuntime>,
@@ -100,15 +121,28 @@ fn handle_eval(
     container_id: ContainerId,
     request: &EvalRequest,
 ) -> EvalResponse {
+    // Guard: reject FusedElementwise from clients (prevents MSL injection)
+    for node in &request.nodes {
+        if matches!(&node.op, applegpu_wire::WireOpKind::FusedElementwise { .. }) {
+            return EvalResponse::Err(
+                "FusedElementwise not allowed over wire protocol".to_string(),
+            );
+        }
+    }
+
     let mut rt = shared.runtime.lock().unwrap();
 
     for td in &request.tensors {
+        let dtype = match wire_dtype_to_core(td.dtype) {
+            Ok(d) => d,
+            Err(e) => return EvalResponse::Err(format!("Invalid dtype: {}", e)),
+        };
         match Buffer::from_bytes(&shared.device, &td.data) {
             Ok(buffer) => {
                 let tensor = Tensor::from_raw(
                     td.id,
                     td.shape.clone(),
-                    DType::Float32,
+                    dtype,
                     buffer,
                 );
                 if let Err(e) = rt.insert_tensor_for(tensor, container_id) {
@@ -133,14 +167,13 @@ fn handle_eval(
         return EvalResponse::Err(format!("Eval failed: {}", e));
     }
 
-    match rt.read_f32(request.target_id) {
+    match rt.read_bytes(request.target_id) {
         Ok(data) => {
             let shape = rt.shape(request.target_id).unwrap_or_default();
-            let data_bytes: Vec<u8> = data.iter().flat_map(|f| f.to_le_bytes()).collect();
             EvalResponse::Ok {
                 tensor_id: request.target_id,
                 shape,
-                data: data_bytes,
+                data,
             }
         }
         Err(e) => EvalResponse::Err(format!("Read failed: {}", e)),
@@ -203,6 +236,112 @@ fn main() {
                 thread::spawn(move || handle_connection(shared, stream));
             }
             Err(e) => eprintln!("Connection error: {}", e),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use applegpu_wire::{WireOpKind, WireOpNode, WireTensorData};
+
+    fn make_shared() -> SharedState {
+        SharedState {
+            runtime: Mutex::new(LazyRuntime::new()),
+            device: Device::new().expect("No Metal GPU available"),
+        }
+    }
+
+    #[test]
+    fn reject_fused_elementwise_over_wire() {
+        let shared = make_shared();
+        let cid = {
+            let mut rt = shared.runtime.lock().unwrap();
+            let config = ContainerConfig {
+                priority: Priority::Normal,
+                max_memory_bytes: 1024 * 1024,
+                max_tensor_count: 64,
+                max_tensor_size_bytes: 0,
+                max_pending_jobs: 64,
+            };
+            rt.scheduler.register_container(config).unwrap()
+        };
+
+        let request = EvalRequest {
+            target_id: 10,
+            tensors: vec![],
+            nodes: vec![WireOpNode {
+                id: 10,
+                op: WireOpKind::FusedElementwise {
+                    kernel_source: "kernel void evil() {}".to_string(),
+                    function_name: "evil".to_string(),
+                },
+                inputs: vec![1, 2],
+                out_shape: vec![4],
+                out_dtype: 0,
+            }],
+        };
+
+        let response = handle_eval(&shared, cid, &request);
+        match response {
+            EvalResponse::Err(msg) => {
+                assert!(
+                    msg.contains("FusedElementwise not allowed"),
+                    "Expected rejection message, got: {}",
+                    msg
+                );
+            }
+            _ => panic!("Expected EvalResponse::Err for FusedElementwise, got Ok"),
+        }
+    }
+
+    #[test]
+    fn allow_safe_ops_over_wire() {
+        let shared = make_shared();
+        let cid = {
+            let mut rt = shared.runtime.lock().unwrap();
+            let config = ContainerConfig {
+                priority: Priority::Normal,
+                max_memory_bytes: 1024 * 1024,
+                max_tensor_count: 64,
+                max_tensor_size_bytes: 0,
+                max_pending_jobs: 64,
+            };
+            rt.scheduler.register_container(config).unwrap()
+        };
+
+        let data: Vec<u8> = vec![1.0f32, 2.0, 3.0, 4.0]
+            .iter()
+            .flat_map(|f| f.to_le_bytes())
+            .collect();
+
+        let request = EvalRequest {
+            target_id: 42,
+            tensors: vec![WireTensorData {
+                id: 1,
+                shape: vec![4],
+                dtype: 0,
+                data,
+            }],
+            nodes: vec![WireOpNode {
+                id: 42,
+                op: WireOpKind::Neg,
+                inputs: vec![1],
+                out_shape: vec![4],
+                out_dtype: 0,
+            }],
+        };
+
+        // Should NOT be rejected by the FusedElementwise guard
+        let response = handle_eval(&shared, cid, &request);
+        match &response {
+            EvalResponse::Err(msg) => {
+                assert!(
+                    !msg.contains("FusedElementwise not allowed"),
+                    "Safe op Neg was incorrectly rejected as FusedElementwise",
+                );
+            }
+            EvalResponse::Ok { .. } => { /* success */ }
         }
     }
 }
