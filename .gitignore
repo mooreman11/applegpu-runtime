@@ -1,5 +1,6 @@
 /target/
 /swift/.build/
+/swift/GPUContainer/.build/
 /python/target/
 *.egg-info/
 __pycache__/
