@@ -92,7 +92,8 @@ kernel void elementwise_sqrt(device const float* input [[buffer(0)]], device flo
 "#
 );
 
-/// MSL source for matrix multiplication.
+/// MSL source for batched matrix multiplication.
+/// 3D dispatch: (col, row, batch). Supports batch broadcasting via strides.
 const MATMUL_KERNEL_SOURCE: &str = r#"
 #include <metal_stdlib>
 using namespace metal;
@@ -104,17 +105,24 @@ kernel void matmul_f32(
     constant uint& M [[buffer(3)]],
     constant uint& N [[buffer(4)]],
     constant uint& K [[buffer(5)]],
-    uint2 gid [[thread_position_in_grid]]
+    constant uint& batch_size [[buffer(6)]],
+    constant uint& a_batch_stride [[buffer(7)]],
+    constant uint& b_batch_stride [[buffer(8)]],
+    uint3 gid [[thread_position_in_grid]]
 ) {
-    uint row = gid.y;
     uint col = gid.x;
-    if (row >= M || col >= N) return;
+    uint row = gid.y;
+    uint batch = gid.z;
+    if (row >= M || col >= N || batch >= batch_size) return;
+
+    uint a_offset = batch * a_batch_stride;
+    uint b_offset = batch * b_batch_stride;
 
     float sum = 0.0f;
     for (uint i = 0; i < K; i++) {
-        sum += A[row * K + i] * B[i * N + col];
+        sum += A[a_offset + row * K + i] * B[b_offset + i * N + col];
     }
-    C[row * N + col] = sum;
+    C[batch * M * N + row * N + col] = sum;
 }
 "#;
 
@@ -323,7 +331,7 @@ kernel void elementwise_sqrt_f16(device const half* input [[buffer(0)]], device 
 "#
 );
 
-/// MSL source for f16 matmul with f32-intermediate accumulation.
+/// MSL source for f16 batched matmul with f32-intermediate accumulation.
 const MATMUL_KERNEL_SOURCE_F16: &str = r#"
 #include <metal_stdlib>
 using namespace metal;
@@ -335,16 +343,22 @@ kernel void matmul_f16(
     constant uint& M [[buffer(3)]],
     constant uint& N [[buffer(4)]],
     constant uint& K [[buffer(5)]],
-    uint2 gid [[thread_position_in_grid]]
+    constant uint& batch_size [[buffer(6)]],
+    constant uint& a_batch_stride [[buffer(7)]],
+    constant uint& b_batch_stride [[buffer(8)]],
+    uint3 gid [[thread_position_in_grid]]
 ) {
-    uint row = gid.y;
     uint col = gid.x;
-    if (row >= M || col >= N) return;
+    uint row = gid.y;
+    uint batch = gid.z;
+    if (row >= M || col >= N || batch >= batch_size) return;
+    uint a_offset = batch * a_batch_stride;
+    uint b_offset = batch * b_batch_stride;
     float sum = 0.0f;
     for (uint i = 0; i < K; i++) {
-        sum += float(A[row * K + i]) * float(B[i * N + col]);
+        sum += float(A[a_offset + row * K + i]) * float(B[b_offset + i * N + col]);
     }
-    C[row * N + col] = half(sum);
+    C[batch * M * N + row * N + col] = half(sum);
 }
 "#;
 
@@ -595,9 +609,11 @@ const SOFTMAX_CAUSAL_KERNEL_SOURCE: &str = r#"
 #include <metal_stdlib>
 using namespace metal;
 
-kernel void softmax_causal_f32(device const float* input [[buffer(0)]], device float* output [[buffer(1)]], constant uint& rows [[buffer(2)]], constant uint& cols [[buffer(3)]], uint row [[thread_position_in_grid]]) {
-    if (row >= rows) return;
-    uint offset = row * cols;
+kernel void softmax_causal_f32(device const float* input [[buffer(0)]], device float* output [[buffer(1)]], constant uint& batch_size [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint2 gid [[thread_position_in_grid]]) {
+    uint row = gid.x;
+    uint batch = gid.y;
+    if (row >= rows || batch >= batch_size) return;
+    uint offset = batch * rows * cols + row * cols;
     float max_val = -1e9f;
     for (uint j = 0; j <= row && j < cols; j++) max_val = max(max_val, input[offset + j]);
     float sum = 0.0f;
@@ -613,9 +629,11 @@ const SOFTMAX_CAUSAL_KERNEL_SOURCE_F16: &str = r#"
 #include <metal_stdlib>
 using namespace metal;
 
-kernel void softmax_causal_f16(device const half* input [[buffer(0)]], device half* output [[buffer(1)]], constant uint& rows [[buffer(2)]], constant uint& cols [[buffer(3)]], uint row [[thread_position_in_grid]]) {
-    if (row >= rows) return;
-    uint offset = row * cols;
+kernel void softmax_causal_f16(device const half* input [[buffer(0)]], device half* output [[buffer(1)]], constant uint& batch_size [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint2 gid [[thread_position_in_grid]]) {
+    uint row = gid.x;
+    uint batch = gid.y;
+    if (row >= rows || batch >= batch_size) return;
+    uint offset = batch * rows * cols + row * cols;
     float max_val = -1e9f;
     for (uint j = 0; j <= row && j < cols; j++) max_val = max(max_val, float(input[offset + j]));
     float sum = 0.0f;
@@ -744,7 +762,9 @@ impl ComputePipeline {
         )
     }
 
-    /// Dispatch matrix multiplication: C[M,N] = A[M,K] * B[K,N].
+    /// Dispatch batched matrix multiplication:
+    /// C[batch, M, N] = A[batch, M, K] * B[batch, K, N]
+    /// batch_size=1 for standard 2D matmul.
     pub fn dispatch_matmul(
         &self,
         buf_a: &Buffer,
@@ -754,8 +774,24 @@ impl ComputePipeline {
         n: usize,
         k: usize,
     ) -> Result<()> {
+        self.dispatch_matmul_batched(buf_a, buf_b, buf_c, m, n, k, 1, m * k, k * n)
+    }
+
+    /// Dispatch batched matmul with explicit batch params.
+    pub fn dispatch_matmul_batched(
+        &self,
+        buf_a: &Buffer,
+        buf_b: &Buffer,
+        buf_c: &Buffer,
+        m: usize,
+        n: usize,
+        k: usize,
+        batch_size: usize,
+        a_batch_stride: usize,
+        b_batch_stride: usize,
+    ) -> Result<()> {
         let result = unsafe {
-            ffi::gpu_bridge_compute_matmul(
+            ffi::gpu_bridge_compute_matmul_batched(
                 self.handle,
                 buf_a.raw_handle() as *const _,
                 buf_b.raw_handle() as *const _,
@@ -763,9 +799,12 @@ impl ComputePipeline {
                 m as u32,
                 n as u32,
                 k as u32,
+                batch_size as u32,
+                a_batch_stride as u32,
+                b_batch_stride as u32,
             )
         };
-        if result == 0 { Ok(()) } else { Err(GpuError::ComputeFailed("Matmul dispatch failed".to_string())) }
+        if result == 0 { Ok(()) } else { Err(GpuError::ComputeFailed("Batched matmul dispatch failed".to_string())) }
     }
 
     /// Dispatch a fused element-wise kernel with variable input buffer count.
@@ -872,6 +911,19 @@ impl ComputePipeline {
             )
         };
         if result == 0 { Ok(()) } else { Err(GpuError::ComputeFailed("Softmax dispatch failed".to_string())) }
+    }
+
+    /// Dispatch batched softmax_causal with 2D grid: (row, batch).
+    pub fn dispatch_softmax_causal(
+        &self, buf_input: &Buffer, buf_output: &Buffer, batch_size: usize, rows: usize, cols: usize,
+    ) -> Result<()> {
+        let result = unsafe {
+            ffi::gpu_bridge_compute_softmax_causal(
+                self.handle, buf_input.raw_handle() as *const _,
+                buf_output.raw_handle(), batch_size as u32, rows as u32, cols as u32,
+            )
+        };
+        if result == 0 { Ok(()) } else { Err(GpuError::ComputeFailed("SoftmaxCausal dispatch failed".to_string())) }
     }
 
     pub fn dispatch_transpose(
@@ -1066,8 +1118,25 @@ impl ComputePipeline {
         n: usize,
         k: usize,
     ) -> Result<*mut std::ffi::c_void> {
+        self.dispatch_matmul_batched_nb(queue, buf_a, buf_b, buf_c, m, n, k, 1, m * k, k * n)
+    }
+
+    /// Non-blocking batched matmul. Returns command buffer handle.
+    pub fn dispatch_matmul_batched_nb(
+        &self,
+        queue: *mut std::ffi::c_void,
+        buf_a: &Buffer,
+        buf_b: &Buffer,
+        buf_c: &Buffer,
+        m: usize,
+        n: usize,
+        k: usize,
+        batch_size: usize,
+        a_batch_stride: usize,
+        b_batch_stride: usize,
+    ) -> Result<*mut std::ffi::c_void> {
         let cb = unsafe {
-            ffi::gpu_bridge_compute_matmul_nb(
+            ffi::gpu_bridge_compute_matmul_batched_nb(
                 self.handle,
                 queue,
                 buf_a.raw_handle() as *const _,
@@ -1076,9 +1145,12 @@ impl ComputePipeline {
                 m as u32,
                 n as u32,
                 k as u32,
+                batch_size as u32,
+                a_batch_stride as u32,
+                b_batch_stride as u32,
             )
         };
-        if cb.is_null() { Err(GpuError::ComputeFailed("Non-blocking matmul dispatch failed".to_string())) } else { Ok(cb) }
+        if cb.is_null() { Err(GpuError::ComputeFailed("Non-blocking batched matmul dispatch failed".to_string())) } else { Ok(cb) }
     }
 
     /// Non-blocking softmax. Returns command buffer handle.
@@ -1101,6 +1173,30 @@ impl ComputePipeline {
             )
         };
         if cb.is_null() { Err(GpuError::ComputeFailed("Non-blocking softmax dispatch failed".to_string())) } else { Ok(cb) }
+    }
+
+    /// Non-blocking batched softmax_causal. Returns command buffer handle.
+    pub fn dispatch_softmax_causal_nb(
+        &self,
+        queue: *mut std::ffi::c_void,
+        buf_input: &Buffer,
+        buf_output: &Buffer,
+        batch_size: usize,
+        rows: usize,
+        cols: usize,
+    ) -> Result<*mut std::ffi::c_void> {
+        let cb = unsafe {
+            ffi::gpu_bridge_compute_softmax_causal_nb(
+                self.handle,
+                queue,
+                buf_input.raw_handle() as *const _,
+                buf_output.raw_handle(),
+                batch_size as u32,
+                rows as u32,
+                cols as u32,
+            )
+        };
+        if cb.is_null() { Err(GpuError::ComputeFailed("Non-blocking softmax_causal dispatch failed".to_string())) } else { Ok(cb) }
     }
 
     /// Non-blocking transpose. Returns command buffer handle.
@@ -1575,6 +1671,26 @@ impl KernelRegistry {
         pipeline.dispatch_matmul(buf_a, buf_b, buf_c, m, n, k)
     }
 
+    /// Dispatch batched matmul with dtype-aware kernel selection.
+    pub fn dispatch_matmul_batched_typed(
+        &self,
+        device: &Device,
+        dtype: DType,
+        buf_a: &Buffer,
+        buf_b: &Buffer,
+        buf_c: &Buffer,
+        m: usize,
+        n: usize,
+        k: usize,
+        batch_size: usize,
+        a_batch_stride: usize,
+        b_batch_stride: usize,
+    ) -> Result<()> {
+        let (source, func) = Self::resolve_kernel("matmul_f32", dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_matmul_batched(buf_a, buf_b, buf_c, m, n, k, batch_size, a_batch_stride, b_batch_stride)
+    }
+
     /// Dispatch a fused kernel with variable input buffers.
     pub fn dispatch_fused(
         &self,
@@ -1754,12 +1870,11 @@ impl KernelRegistry {
 
     pub fn dispatch_softmax_causal_typed(
         &self, device: &Device, dtype: DType, buf_input: &Buffer, buf_output: &Buffer,
-        rows: usize, cols: usize,
+        batch_size: usize, rows: usize, cols: usize,
     ) -> Result<()> {
         let (source, func) = Self::resolve_kernel("softmax_causal_f32", dtype);
         let pipeline = self.get_or_create(device, source, &func)?;
-        // Reuse softmax dispatch (same buffer layout: input, output, rows, cols; 1D dispatch per row)
-        pipeline.dispatch_softmax(buf_input, buf_output, rows, cols)
+        pipeline.dispatch_softmax_causal(buf_input, buf_output, batch_size, rows, cols)
     }
 
     pub fn dispatch_argmax_typed(
@@ -1821,11 +1936,11 @@ impl KernelRegistry {
 
     pub fn dispatch_softmax_causal_typed_nb(
         &self, device: &Device, dtype: DType, queue: *mut std::ffi::c_void,
-        buf_input: &Buffer, buf_output: &Buffer, rows: usize, cols: usize,
+        buf_input: &Buffer, buf_output: &Buffer, batch_size: usize, rows: usize, cols: usize,
     ) -> Result<*mut std::ffi::c_void> {
         let (source, func) = Self::resolve_kernel("softmax_causal_f32", dtype);
         let pipeline = self.get_or_create(device, source, &func)?;
-        pipeline.dispatch_softmax_nb(queue, buf_input, buf_output, rows, cols)
+        pipeline.dispatch_softmax_causal_nb(queue, buf_input, buf_output, batch_size, rows, cols)
     }
 
     pub fn dispatch_argmax_typed_nb(
@@ -1893,6 +2008,17 @@ impl KernelRegistry {
         let (source, func) = Self::resolve_kernel("matmul_f32", dtype);
         let pipeline = self.get_or_create(device, source, &func)?;
         pipeline.dispatch_matmul_nb(queue, buf_a, buf_b, buf_c, m, n, k)
+    }
+
+    pub fn dispatch_matmul_batched_typed_nb(
+        &self, device: &Device, dtype: DType, queue: *mut std::ffi::c_void,
+        buf_a: &Buffer, buf_b: &Buffer, buf_c: &Buffer,
+        m: usize, n: usize, k: usize,
+        batch_size: usize, a_batch_stride: usize, b_batch_stride: usize,
+    ) -> Result<*mut std::ffi::c_void> {
+        let (source, func) = Self::resolve_kernel("matmul_f32", dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_matmul_batched_nb(queue, buf_a, buf_b, buf_c, m, n, k, batch_size, a_batch_stride, b_batch_stride)
     }
 
     pub fn dispatch_softmax_typed_nb(

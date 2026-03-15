@@ -61,6 +61,30 @@ int32_t gpu_bridge_compute_matmul(
     uint32_t K
 );
 
+// Batched matrix multiply: C[batch,M,N] = A[batch,M,K] * B[batch,K,N]
+int32_t gpu_bridge_compute_matmul_batched(
+    GPUComputeHandle* compute,
+    const GPUBufferHandle* buf_a,
+    const GPUBufferHandle* buf_b,
+    GPUBufferHandle* buf_c,
+    uint32_t M,
+    uint32_t N,
+    uint32_t K,
+    uint32_t batch_size,
+    uint32_t a_batch_stride,
+    uint32_t b_batch_stride
+);
+
+// Batched softmax with causal mask: 2D dispatch (row, batch)
+int32_t gpu_bridge_compute_softmax_causal(
+    GPUComputeHandle* compute,
+    const GPUBufferHandle* buf_input,
+    GPUBufferHandle* buf_output,
+    uint32_t batch_size,
+    uint32_t rows,
+    uint32_t cols
+);
+
 // Execute a fused kernel with variable number of input buffers.
 int32_t gpu_bridge_compute_fused(
     GPUComputeHandle* compute,
@@ -156,6 +180,32 @@ void* gpu_bridge_compute_matmul_nb(
     uint32_t M,
     uint32_t N,
     uint32_t K
+);
+
+// Non-blocking batched matmul: returns command buffer handle.
+void* gpu_bridge_compute_matmul_batched_nb(
+    GPUComputeHandle* compute,
+    void* queue,
+    const GPUBufferHandle* buf_a,
+    const GPUBufferHandle* buf_b,
+    GPUBufferHandle* buf_c,
+    uint32_t M,
+    uint32_t N,
+    uint32_t K,
+    uint32_t batch_size,
+    uint32_t a_batch_stride,
+    uint32_t b_batch_stride
+);
+
+// Non-blocking batched softmax causal: returns command buffer handle.
+void* gpu_bridge_compute_softmax_causal_nb(
+    GPUComputeHandle* compute,
+    void* queue,
+    const GPUBufferHandle* buf_input,
+    GPUBufferHandle* buf_output,
+    uint32_t batch_size,
+    uint32_t rows,
+    uint32_t cols
 );
 
 // Non-blocking softmax: returns command buffer handle.

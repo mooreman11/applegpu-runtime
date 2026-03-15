@@ -109,6 +109,28 @@ extern "C" {
         k: u32,
     ) -> i32;
 
+    pub fn gpu_bridge_compute_matmul_batched(
+        compute: *mut GPUComputeHandle,
+        buf_a: *const GPUBufferHandle,
+        buf_b: *const GPUBufferHandle,
+        buf_c: *mut GPUBufferHandle,
+        m: u32,
+        n: u32,
+        k: u32,
+        batch_size: u32,
+        a_batch_stride: u32,
+        b_batch_stride: u32,
+    ) -> i32;
+
+    pub fn gpu_bridge_compute_softmax_causal(
+        compute: *mut GPUComputeHandle,
+        buf_input: *const GPUBufferHandle,
+        buf_output: *mut GPUBufferHandle,
+        batch_size: u32,
+        rows: u32,
+        cols: u32,
+    ) -> i32;
+
     pub fn gpu_bridge_compute_fused(
         compute: *mut GPUComputeHandle,
         input_buffers: *const *const GPUBufferHandle,
@@ -175,6 +197,30 @@ extern "C" {
         m: u32,
         n: u32,
         k: u32,
+    ) -> *mut std::ffi::c_void;
+
+    pub fn gpu_bridge_compute_matmul_batched_nb(
+        compute: *mut GPUComputeHandle,
+        queue: *mut std::ffi::c_void,
+        buf_a: *const GPUBufferHandle,
+        buf_b: *const GPUBufferHandle,
+        buf_c: *mut GPUBufferHandle,
+        m: u32,
+        n: u32,
+        k: u32,
+        batch_size: u32,
+        a_batch_stride: u32,
+        b_batch_stride: u32,
+    ) -> *mut std::ffi::c_void;
+
+    pub fn gpu_bridge_compute_softmax_causal_nb(
+        compute: *mut GPUComputeHandle,
+        queue: *mut std::ffi::c_void,
+        buf_input: *const GPUBufferHandle,
+        buf_output: *mut GPUBufferHandle,
+        batch_size: u32,
+        rows: u32,
+        cols: u32,
     ) -> *mut std::ffi::c_void;
 
     pub fn gpu_bridge_compute_softmax_nb(

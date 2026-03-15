@@ -117,10 +117,16 @@ pub fn matmul(rt: &mut LazyRuntime, a_id: u64, b_id: u64) -> Result<u64> {
     let a_shape = rt.shape(a_id)?;
     let b_shape = rt.shape(b_id)?;
 
-    if a_shape.len() != 2 || b_shape.len() != 2 {
+    if a_shape.len() < 2 {
         return Err(GpuError::InvalidTensor(format!(
-            "matmul requires 2D tensors, got {:?} and {:?}",
-            a_shape, b_shape
+            "matmul requires at least 2D tensors, got {:?}",
+            a_shape
+        )));
+    }
+    if b_shape.len() < 2 {
+        return Err(GpuError::InvalidTensor(format!(
+            "matmul requires at least 2D tensors, got {:?}",
+            b_shape
         )));
     }
 
@@ -131,37 +137,59 @@ pub fn matmul(rt: &mut LazyRuntime, a_id: u64, b_id: u64) -> Result<u64> {
         )));
     }
 
-    let (m, k1) = (a_shape[0], a_shape[1]);
-    let (k2, n) = (b_shape[0], b_shape[1]);
+    let a_ndim = a_shape.len();
+    let b_ndim = b_shape.len();
+
+    let m = a_shape[a_ndim - 2];
+    let k1 = a_shape[a_ndim - 1];
+    let k2 = b_shape[b_ndim - 2];
+    let n = b_shape[b_ndim - 1];
 
     if k1 != k2 {
         return Err(GpuError::InvalidTensor(format!(
-            "matmul inner dimensions mismatch: A[{},{}] * B[{},{}]",
+            "matmul inner dimensions mismatch: A[...,{},{}] * B[...,{},{}]",
             m, k1, k2, n
         )));
     }
+
+    // Broadcast batch dimensions
+    let a_batch = &a_shape[..a_ndim - 2];
+    let b_batch = &b_shape[..b_ndim - 2];
+    let a_batch_shape = Shape::new(if a_batch.is_empty() { vec![1] } else { a_batch.to_vec() })?;
+    let b_batch_shape = Shape::new(if b_batch.is_empty() { vec![1] } else { b_batch.to_vec() })?;
+    let broadcast_batch = a_batch_shape.broadcast_with(&b_batch_shape)?;
+
+    // Build output shape: broadcast_batch_dims + [M, N]
+    let mut out_dims: Vec<usize> = broadcast_batch.dims().to_vec();
+    // If both inputs were 2D (no batch dims), out is 2D
+    if a_batch.is_empty() && b_batch.is_empty() {
+        out_dims.clear();
+    }
+    out_dims.push(m);
+    out_dims.push(n);
 
     let out_id = next_id();
     rt.record_op(OpNode {
         id: out_id,
         op: OpKind::Matmul,
         inputs: vec![a_id, b_id],
-        out_shape: Shape::new(vec![m, n])?,
+        out_shape: Shape::new(out_dims)?,
         out_dtype: a_dtype,
         container_id: ContainerId::DEFAULT,
     });
     Ok(out_id)
 }
 
-/// Softmax along last dimension. Input must be 2D [rows, cols].
+/// Softmax along last dimension. Supports any shape with at least 1 dim.
+/// Leading dims are treated as independent rows (flattened).
 pub fn softmax(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
     let dtype = rt.dtype(input_id)?;
     validate_compute_dtype(dtype)?;
     let shape = rt.shape(input_id)?;
-    if shape.len() != 2 {
-        return Err(GpuError::InvalidTensor(format!(
-            "softmax requires 2D tensor, got {:?}", shape
-        )));
+    if shape.is_empty() {
+        return Err(GpuError::InvalidTensor(
+            "softmax requires at least 1D tensor".to_string()
+        ));
     }
     let out_id = next_id();
     rt.record_op(OpNode {
@@ -443,13 +471,15 @@ pub fn add_bias(rt: &mut LazyRuntime, input_id: u64, bias_id: u64) -> Result<u64
 
 /// Softmax with causal (upper-triangle) mask.
 /// For position (row, col) where col > row, value is treated as -inf.
+/// Softmax causal along last two dimensions. Supports N-D with batch dims.
+/// Requires at least 2 dims. Last 2 dims are [rows, cols] for the causal mask.
 pub fn softmax_causal(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
     let dtype = rt.dtype(input_id)?;
     validate_compute_dtype(dtype)?;
     let shape = rt.shape(input_id)?;
-    if shape.len() != 2 {
+    if shape.len() < 2 {
         return Err(GpuError::InvalidTensor(format!(
-            "softmax_causal requires 2D tensor, got {:?}", shape
+            "softmax_causal requires at least 2D tensor, got {:?}", shape
         )));
     }
     let out_id = next_id();

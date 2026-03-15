@@ -211,8 +211,9 @@ impl LazyRuntime {
             let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
             let input = self.get_tensor(node.inputs[0])?;
             let dims = input.meta.layout.shape.dims();
-            let (rows, cols) = (dims[0], dims[1]);
-            REGISTRY.dispatch_softmax_typed(device, dtype, &input.buffer, &out.buffer, rows, cols)?;
+            let cols = dims[dims.len() - 1];
+            let total_rows: usize = dims[..dims.len() - 1].iter().product::<usize>().max(1);
+            REGISTRY.dispatch_softmax_typed(device, dtype, &input.buffer, &out.buffer, total_rows, cols)?;
             return Ok(out);
         }
 
@@ -346,8 +347,11 @@ impl LazyRuntime {
             let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
             let input = self.get_tensor(node.inputs[0])?;
             let dims = input.meta.layout.shape.dims();
-            let (rows, cols) = (dims[0], dims[1]);
-            REGISTRY.dispatch_softmax_causal_typed(device, dtype, &input.buffer, &out.buffer, rows, cols)?;
+            let ndim = dims.len();
+            let rows = dims[ndim - 2];
+            let cols = dims[ndim - 1];
+            let batch_size: usize = dims[..ndim - 2].iter().product::<usize>().max(1);
+            REGISTRY.dispatch_softmax_causal_typed(device, dtype, &input.buffer, &out.buffer, batch_size, rows, cols)?;
             return Ok(out);
         }
 
@@ -392,9 +396,21 @@ impl LazyRuntime {
             let b = self.get_tensor(node.inputs[1])?;
             let a_dims = a.meta.layout.shape.dims();
             let b_dims = b.meta.layout.shape.dims();
-            let (m, k) = (a_dims[0], a_dims[1]);
-            let n = b_dims[1];
-            REGISTRY.dispatch_matmul_typed(device, dtype, &a.buffer, &b.buffer, &out.buffer, m, n, k)?;
+            let a_ndim = a_dims.len();
+            let b_ndim = b_dims.len();
+            let m = a_dims[a_ndim - 2];
+            let k = a_dims[a_ndim - 1];
+            let n = b_dims[b_ndim - 1];
+            let out_dims = node.out_shape.dims();
+            let out_ndim = out_dims.len();
+            let batch_size: usize = out_dims[..out_ndim - 2].iter().product::<usize>().max(1);
+            let a_batch_stride = if a_ndim > 2 { m * k } else { 0 };
+            let b_batch_stride = if b_ndim > 2 { k * n } else { 0 };
+            if batch_size <= 1 {
+                REGISTRY.dispatch_matmul_typed(device, dtype, &a.buffer, &b.buffer, &out.buffer, m, n, k)?;
+            } else {
+                REGISTRY.dispatch_matmul_batched_typed(device, dtype, &a.buffer, &b.buffer, &out.buffer, m, n, k, batch_size, a_batch_stride, b_batch_stride)?;
+            }
             Ok(out)
         } else {
             // Binary element-wise (N-D with broadcasting)
@@ -469,8 +485,9 @@ impl LazyRuntime {
         if node.op.is_softmax() {
             let input = self.get_tensor(node.inputs[0])?;
             let dims = input.meta.layout.shape.dims();
-            let (rows, cols) = (dims[0], dims[1]);
-            return REGISTRY.dispatch_softmax_typed_nb(device, dtype, queue, &input.buffer, &out.buffer, rows, cols);
+            let cols = dims[dims.len() - 1];
+            let total_rows: usize = dims[..dims.len() - 1].iter().product::<usize>().max(1);
+            return REGISTRY.dispatch_softmax_typed_nb(device, dtype, queue, &input.buffer, &out.buffer, total_rows, cols);
         }
 
         if node.op.is_transpose() {
@@ -573,8 +590,11 @@ impl LazyRuntime {
         if node.op.is_softmax_causal() {
             let input = self.get_tensor(node.inputs[0])?;
             let dims = input.meta.layout.shape.dims();
-            let (rows, cols) = (dims[0], dims[1]);
-            return REGISTRY.dispatch_softmax_causal_typed_nb(device, dtype, queue, &input.buffer, &out.buffer, rows, cols);
+            let ndim = dims.len();
+            let rows = dims[ndim - 2];
+            let cols = dims[ndim - 1];
+            let batch_size: usize = dims[..ndim - 2].iter().product::<usize>().max(1);
+            return REGISTRY.dispatch_softmax_causal_typed_nb(device, dtype, queue, &input.buffer, &out.buffer, batch_size, rows, cols);
         }
 
         if node.op.is_argmax() {
@@ -609,9 +629,21 @@ impl LazyRuntime {
             let b = self.get_tensor(node.inputs[1])?;
             let a_dims = a.meta.layout.shape.dims();
             let b_dims = b.meta.layout.shape.dims();
-            let (m, k) = (a_dims[0], a_dims[1]);
-            let n = b_dims[1];
-            REGISTRY.dispatch_matmul_typed_nb(device, dtype, queue, &a.buffer, &b.buffer, &out.buffer, m, n, k)
+            let a_ndim = a_dims.len();
+            let b_ndim = b_dims.len();
+            let m = a_dims[a_ndim - 2];
+            let k = a_dims[a_ndim - 1];
+            let n = b_dims[b_ndim - 1];
+            let out_dims = node.out_shape.dims();
+            let out_ndim = out_dims.len();
+            let batch_size: usize = out_dims[..out_ndim - 2].iter().product::<usize>().max(1);
+            let a_batch_stride = if a_ndim > 2 { m * k } else { 0 };
+            let b_batch_stride = if b_ndim > 2 { k * n } else { 0 };
+            if batch_size <= 1 {
+                REGISTRY.dispatch_matmul_typed_nb(device, dtype, queue, &a.buffer, &b.buffer, &out.buffer, m, n, k)
+            } else {
+                REGISTRY.dispatch_matmul_batched_typed_nb(device, dtype, queue, &a.buffer, &b.buffer, &out.buffer, m, n, k, batch_size, a_batch_stride, b_batch_stride)
+            }
         } else {
             // Binary element-wise (N-D with broadcasting)
             let (a_strides, b_strides, out_shape_u32, ndim, numel) = self.binary_nd_params(node)?;

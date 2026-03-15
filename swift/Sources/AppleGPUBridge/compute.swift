@@ -87,7 +87,11 @@ final class GPUCompute {
     }
 
     func dispatchMatmul(bufA: MTLBuffer, bufB: MTLBuffer, bufC: MTLBuffer, M: Int, N: Int, K: Int) -> Bool {
-        if M == 0 || N == 0 || K == 0 { return true }
+        return dispatchMatmulBatched(bufA: bufA, bufB: bufB, bufC: bufC, M: M, N: N, K: K, batchSize: 1, aBatchStride: M * K, bBatchStride: K * N)
+    }
+
+    func dispatchMatmulBatched(bufA: MTLBuffer, bufB: MTLBuffer, bufC: MTLBuffer, M: Int, N: Int, K: Int, batchSize: Int, aBatchStride: Int, bBatchStride: Int) -> Bool {
+        if M == 0 || N == 0 || K == 0 || batchSize == 0 { return true }
 
         guard let commandBuffer = commandQueue.makeCommandBuffer(),
               let encoder = commandBuffer.makeComputeCommandEncoder() else {
@@ -100,21 +104,53 @@ final class GPUCompute {
         encoder.setBuffer(bufC, offset: 0, index: 2)
 
         var m = UInt32(M), n = UInt32(N), k = UInt32(K)
+        var bs = UInt32(batchSize), abs_val = UInt32(aBatchStride), bbs = UInt32(bBatchStride)
         encoder.setBytes(&m, length: MemoryLayout<UInt32>.size, index: 3)
         encoder.setBytes(&n, length: MemoryLayout<UInt32>.size, index: 4)
         encoder.setBytes(&k, length: MemoryLayout<UInt32>.size, index: 5)
+        encoder.setBytes(&bs, length: MemoryLayout<UInt32>.size, index: 6)
+        encoder.setBytes(&abs_val, length: MemoryLayout<UInt32>.size, index: 7)
+        encoder.setBytes(&bbs, length: MemoryLayout<UInt32>.size, index: 8)
 
-        // 2D dispatch: each thread computes one element of C[M,N]
+        // 3D dispatch: (col, row, batch)
         let w = pipelineState.threadExecutionWidth
-        let h = pipelineState.maxTotalThreadsPerThreadgroup / w
+        let h = max(pipelineState.maxTotalThreadsPerThreadgroup / w, 1)
         let threadsPerGroup = MTLSize(width: w, height: h, depth: 1)
-        let gridSize = MTLSize(width: N, height: M, depth: 1)
+        let gridSize = MTLSize(width: N, height: M, depth: batchSize)
 
         encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadsPerGroup)
         encoder.endEncoding()
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
 
+        return commandBuffer.status == .completed
+    }
+
+    func dispatchSoftmaxCausal(bufIn: MTLBuffer, bufOut: MTLBuffer, batchSize: Int, rows: Int, cols: Int) -> Bool {
+        if batchSize == 0 || rows == 0 || cols == 0 { return true }
+
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder() else { return false }
+
+        encoder.setComputePipelineState(pipelineState)
+        encoder.setBuffer(bufIn, offset: 0, index: 0)
+        encoder.setBuffer(bufOut, offset: 0, index: 1)
+
+        var bs = UInt32(batchSize), r = UInt32(rows), c = UInt32(cols)
+        encoder.setBytes(&bs, length: MemoryLayout<UInt32>.size, index: 2)
+        encoder.setBytes(&r, length: MemoryLayout<UInt32>.size, index: 3)
+        encoder.setBytes(&c, length: MemoryLayout<UInt32>.size, index: 4)
+
+        // 2D dispatch: (row, batch)
+        let w = pipelineState.threadExecutionWidth
+        let h = max(pipelineState.maxTotalThreadsPerThreadgroup / w, 1)
+        let threadsPerGroup = MTLSize(width: w, height: h, depth: 1)
+        let gridSize = MTLSize(width: rows, height: batchSize, depth: 1)
+
+        encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadsPerGroup)
+        encoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
         return commandBuffer.status == .completed
     }
 
@@ -536,6 +572,61 @@ public func gpuBridgeComputeMatmul(
     return success ? 0 : -1
 }
 
+@_cdecl("gpu_bridge_compute_matmul_batched")
+public func gpuBridgeComputeMatmulBatched(
+    _ computePtr: UnsafeMutableRawPointer?,
+    _ bufAPtr: UnsafeRawPointer?,
+    _ bufBPtr: UnsafeRawPointer?,
+    _ bufCPtr: UnsafeMutableRawPointer?,
+    _ M: UInt32,
+    _ N: UInt32,
+    _ K: UInt32,
+    _ batchSize: UInt32,
+    _ aBatchStride: UInt32,
+    _ bBatchStride: UInt32
+) -> Int32 {
+    guard let computePtr = computePtr,
+          let bufAPtr = bufAPtr,
+          let bufBPtr = bufBPtr,
+          let bufCPtr = bufCPtr else { return -1 }
+
+    let compute = Unmanaged<GPUCompute>.fromOpaque(computePtr).takeUnretainedValue()
+    let bufA = Unmanaged<GPUBuffer>.fromOpaque(bufAPtr).takeUnretainedValue()
+    let bufB = Unmanaged<GPUBuffer>.fromOpaque(bufBPtr).takeUnretainedValue()
+    let bufC = Unmanaged<GPUBuffer>.fromOpaque(bufCPtr).takeUnretainedValue()
+
+    let success = compute.dispatchMatmulBatched(
+        bufA: bufA.buffer, bufB: bufB.buffer, bufC: bufC.buffer,
+        M: Int(M), N: Int(N), K: Int(K),
+        batchSize: Int(batchSize), aBatchStride: Int(aBatchStride), bBatchStride: Int(bBatchStride)
+    )
+    return success ? 0 : -1
+}
+
+@_cdecl("gpu_bridge_compute_softmax_causal")
+public func gpuBridgeComputeSoftmaxCausal(
+    _ computePtr: UnsafeMutableRawPointer?,
+    _ bufInPtr: UnsafeRawPointer?,
+    _ bufOutPtr: UnsafeMutableRawPointer?,
+    _ batchSize: UInt32,
+    _ rows: UInt32,
+    _ cols: UInt32
+) -> Int32 {
+    guard let computePtr = computePtr,
+          let bufInPtr = bufInPtr,
+          let bufOutPtr = bufOutPtr else { return -1 }
+
+    let compute = Unmanaged<GPUCompute>.fromOpaque(computePtr).takeUnretainedValue()
+    let bufIn = Unmanaged<GPUBuffer>.fromOpaque(bufInPtr).takeUnretainedValue()
+    let bufOut = Unmanaged<GPUBuffer>.fromOpaque(bufOutPtr).takeUnretainedValue()
+
+    let success = compute.dispatchSoftmaxCausal(
+        bufIn: bufIn.buffer, bufOut: bufOut.buffer,
+        batchSize: Int(batchSize), rows: Int(rows), cols: Int(cols)
+    )
+    return success ? 0 : -1
+}
+
 @_cdecl("gpu_bridge_compute_fused")
 public func gpuBridgeComputeFused(
     _ computePtr: UnsafeMutableRawPointer?,
@@ -905,6 +996,23 @@ public func gpuBridgeComputeMatmulNB(
     _ N: UInt32,
     _ K: UInt32
 ) -> UnsafeMutableRawPointer? {
+    return gpuBridgeComputeMatmulBatchedNB(computePtr, queuePtr, bufAPtr, bufBPtr, bufCPtr, M, N, K, 1, M * K, K * N)
+}
+
+@_cdecl("gpu_bridge_compute_matmul_batched_nb")
+public func gpuBridgeComputeMatmulBatchedNB(
+    _ computePtr: UnsafeMutableRawPointer?,
+    _ queuePtr: UnsafeMutableRawPointer?,
+    _ bufAPtr: UnsafeRawPointer?,
+    _ bufBPtr: UnsafeRawPointer?,
+    _ bufCPtr: UnsafeMutableRawPointer?,
+    _ M: UInt32,
+    _ N: UInt32,
+    _ K: UInt32,
+    _ batchSize: UInt32,
+    _ aBatchStride: UInt32,
+    _ bBatchStride: UInt32
+) -> UnsafeMutableRawPointer? {
     guard let computePtr = computePtr,
           let queuePtr = queuePtr,
           let bufAPtr = bufAPtr,
@@ -917,7 +1025,7 @@ public func gpuBridgeComputeMatmulNB(
     let bufB = Unmanaged<GPUBuffer>.fromOpaque(bufBPtr).takeUnretainedValue()
     let bufC = Unmanaged<GPUBuffer>.fromOpaque(bufCPtr).takeUnretainedValue()
 
-    if M == 0 || N == 0 || K == 0 { return nil }
+    if M == 0 || N == 0 || K == 0 || batchSize == 0 { return nil }
 
     guard let commandBuffer = queue.makeCommandBuffer(),
           let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
@@ -927,15 +1035,64 @@ public func gpuBridgeComputeMatmulNB(
     encoder.setBuffer(bufB.buffer, offset: 0, index: 1)
     encoder.setBuffer(bufC.buffer, offset: 0, index: 2)
 
-    var m = M, n = N, k = K
+    var m = M, n = N, k = K, bs = batchSize, abs_val = aBatchStride, bbs = bBatchStride
     encoder.setBytes(&m, length: MemoryLayout<UInt32>.size, index: 3)
     encoder.setBytes(&n, length: MemoryLayout<UInt32>.size, index: 4)
     encoder.setBytes(&k, length: MemoryLayout<UInt32>.size, index: 5)
+    encoder.setBytes(&bs, length: MemoryLayout<UInt32>.size, index: 6)
+    encoder.setBytes(&abs_val, length: MemoryLayout<UInt32>.size, index: 7)
+    encoder.setBytes(&bbs, length: MemoryLayout<UInt32>.size, index: 8)
 
     let w = compute.pipelineState.threadExecutionWidth
-    let h = compute.pipelineState.maxTotalThreadsPerThreadgroup / w
+    let h = max(compute.pipelineState.maxTotalThreadsPerThreadgroup / w, 1)
     let threadsPerGroup = MTLSize(width: w, height: h, depth: 1)
-    let gridSize = MTLSize(width: Int(N), height: Int(M), depth: 1)
+    let gridSize = MTLSize(width: Int(N), height: Int(M), depth: Int(batchSize))
+
+    encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadsPerGroup)
+    encoder.endEncoding()
+    commandBuffer.commit()
+
+    return Unmanaged.passRetained(commandBuffer as AnyObject).toOpaque()
+}
+
+@_cdecl("gpu_bridge_compute_softmax_causal_nb")
+public func gpuBridgeComputeSoftmaxCausalNB(
+    _ computePtr: UnsafeMutableRawPointer?,
+    _ queuePtr: UnsafeMutableRawPointer?,
+    _ bufInPtr: UnsafeRawPointer?,
+    _ bufOutPtr: UnsafeMutableRawPointer?,
+    _ batchSize: UInt32,
+    _ rows: UInt32,
+    _ cols: UInt32
+) -> UnsafeMutableRawPointer? {
+    guard let computePtr = computePtr,
+          let queuePtr = queuePtr,
+          let bufInPtr = bufInPtr,
+          let bufOutPtr = bufOutPtr else { return nil }
+
+    let compute = Unmanaged<GPUCompute>.fromOpaque(computePtr).takeUnretainedValue()
+    let queue = Unmanaged<MTLCommandQueue>.fromOpaque(queuePtr).takeUnretainedValue()
+    let bufIn = Unmanaged<GPUBuffer>.fromOpaque(bufInPtr).takeUnretainedValue()
+    let bufOut = Unmanaged<GPUBuffer>.fromOpaque(bufOutPtr).takeUnretainedValue()
+
+    if batchSize == 0 || rows == 0 || cols == 0 { return nil }
+
+    guard let commandBuffer = queue.makeCommandBuffer(),
+          let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
+
+    encoder.setComputePipelineState(compute.pipelineState)
+    encoder.setBuffer(bufIn.buffer, offset: 0, index: 0)
+    encoder.setBuffer(bufOut.buffer, offset: 0, index: 1)
+
+    var bs = batchSize, r = rows, c = cols
+    encoder.setBytes(&bs, length: MemoryLayout<UInt32>.size, index: 2)
+    encoder.setBytes(&r, length: MemoryLayout<UInt32>.size, index: 3)
+    encoder.setBytes(&c, length: MemoryLayout<UInt32>.size, index: 4)
+
+    let w = compute.pipelineState.threadExecutionWidth
+    let h = max(compute.pipelineState.maxTotalThreadsPerThreadgroup / w, 1)
+    let threadsPerGroup = MTLSize(width: w, height: h, depth: 1)
+    let gridSize = MTLSize(width: Int(rows), height: Int(batchSize), depth: 1)
 
     encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadsPerGroup)
     encoder.endEncoding()
