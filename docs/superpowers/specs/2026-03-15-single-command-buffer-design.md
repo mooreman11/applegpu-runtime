@@ -1,7 +1,7 @@
 # Single Command Buffer (Phase 2b)
 
 **Date:** 2026-03-15
-**Status:** Approved (v2 — incorporates reviewer feedback)
+**Status:** Shipped
 **Scope:** Encode all ops within an eval into a single MTLCommandBuffer, reducing per-op CB creation overhead.
 **Depends on:** Phase 2a (command buffer batching) — already shipped.
 
