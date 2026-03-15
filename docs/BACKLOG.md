@@ -184,7 +184,7 @@ _Scale training to real models. Verify all backward ops. Optimize dispatch overh
 
 **Performance:**
 - [ ] **torch.compile() support** — graph-level fusion, eliminate Python dispatch overhead
-- [ ] **Direct data_ptr() transfer** — bypass NumPy for tensor conversion
+- [x] **Direct data_ptr() transfer** — from_torch 385x faster (212ms → 0.55ms), from_numpy 683x faster
 - [ ] **Native model.to("applegpu")** — proper PrivateUse1 storage backend
 
 **More models:**
