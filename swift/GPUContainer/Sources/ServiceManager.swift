@@ -90,6 +90,7 @@ enum GPUContainerError: Error, CustomStringConvertible {
     case serviceNotFound
     case serviceStartTimeout
     case containerCliNotFound
+    case kernelNotFound
 
     var description: String {
         switch self {
@@ -100,6 +101,8 @@ enum GPUContainerError: Error, CustomStringConvertible {
             return "gpu-service failed to start within 5 seconds"
         case .containerCliNotFound:
             return "Apple container CLI not found. Install with: brew install container"
+        case .kernelNotFound:
+            return "Linux kernel not found. Run 'container system start' to install the default kernel."
         }
     }
 }
