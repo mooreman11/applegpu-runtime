@@ -29,6 +29,7 @@ from applegpu_runtime.applegpu_runtime import (
     reshape,
     softmax,
     transpose,
+    transpose_dims,
     gelu,
     layer_norm,
     embedding,
@@ -87,13 +88,16 @@ def load_model(model_name="gpt2"):
     from applegpu_runtime.models.gpt2 import load_gpt2_weights
     return load_gpt2_weights(model_name)
 
-def run_model(model_name, prompt, max_tokens=50):
+def run_model(model_name, prompt, max_tokens=50, temperature=1.0, top_k=50, top_p=0.9):
     """Run inference on a pretrained model.
 
     Args:
         model_name: HuggingFace model name (e.g., "gpt2")
         prompt: input text string
         max_tokens: number of tokens to generate
+        temperature: sampling temperature (0 = greedy, 1.0 = standard)
+        top_k: only sample from top k tokens (default 50)
+        top_p: nucleus sampling threshold (default 0.9)
 
     Returns:
         generated text string
@@ -103,16 +107,20 @@ def run_model(model_name, prompt, max_tokens=50):
 
     model = load_gpt2_weights(model_name)
     input_ids = tokenize(model_name, prompt)
-    output_ids = generate(model, input_ids, max_tokens=max_tokens)
+    output_ids = generate(model, input_ids, max_tokens=max_tokens,
+                          temperature=temperature, top_k=top_k, top_p=top_p)
     return decode(model_name, output_ids)
 
-def generate_text(model, prompt, max_tokens=50):
+def generate_text(model, prompt, max_tokens=50, temperature=1.0, top_k=50, top_p=0.9):
     """Generate text from a loaded model.
 
     Args:
         model: dict from load_model()
         prompt: input text or list of token IDs
         max_tokens: number of tokens to generate
+        temperature: sampling temperature (0 = greedy, 1.0 = standard)
+        top_k: only sample from top k tokens (default 50)
+        top_p: nucleus sampling threshold (default 0.9)
 
     Returns:
         generated text string
@@ -125,7 +133,8 @@ def generate_text(model, prompt, max_tokens=50):
     else:
         input_ids = prompt
 
-    output_ids = generate(model, input_ids, max_tokens=max_tokens)
+    output_ids = generate(model, input_ids, max_tokens=max_tokens,
+                          temperature=temperature, top_k=top_k, top_p=top_p)
     return decode("gpt2", output_ids)
 
 
@@ -158,6 +167,7 @@ __all__ = [
     "reshape",
     "softmax",
     "transpose",
+    "transpose_dims",
     "gelu",
     "layer_norm",
     "embedding",

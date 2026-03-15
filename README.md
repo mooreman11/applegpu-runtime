@@ -38,7 +38,8 @@ uv run maturin develop
 import applegpu_runtime as gpu
 
 # One line: load GPT-2, tokenize, run forward pass, generate text
-output = gpu.run_model("gpt2", "The meaning of life is", max_tokens=50)
+output = gpu.run_model("gpt2", "The meaning of life is", max_tokens=50,
+                       temperature=0.8, top_k=50, top_p=0.9)
 print(output)
 ```
 
@@ -94,7 +95,7 @@ make test-python   # uv run pytest -v
 
 ## Status
 
-v0.2.0. Current capabilities:
+v0.3.0. Current capabilities:
 
 - **Two backends** — MLX-native (direct Metal) and VM (IPC to GPU service process)
 - **VM backend** — graph serialization over Unix sockets to a standalone `gpu-service` binary
@@ -110,13 +111,14 @@ v0.2.0. Current capabilities:
 - **Resource limits** — configurable max tensor size, total GPU memory, and tensor count via `gpu.set_limits()` or env vars, enforced per-container and globally
 - **Lazy execution** — ops build a DAG, computation deferred until materialization
 - **Transformer ops** — GELU, LayerNorm (with affine), Embedding (Int32), softmax_causal, attention_causal, argmax
-- **GPT-2 inference** — `gpu.run_model("gpt2", "Hello", max_tokens=50)` for end-to-end text generation on Metal GPU
+- **GPT-2 inference** — `gpu.run_model("gpt2", "Hello", max_tokens=50)` with top-k/top-p sampling, KV cache, batched multi-head attention
 - **N-D tensors (up to 8 dimensions)** — stride-based MSL kernels, NumPy-style broadcasting for all element-wise ops, N-D reshape, 3D/4D tensor creation and roundtrip via NumPy
 - **Batched N-D ops** — matmul, softmax, softmax_causal, layer_norm, embedding, transpose, attention, and attention_causal all support arbitrary leading batch dimensions with broadcasting. One kernel dispatch handles all batch elements.
 - **Tensor manipulation** — reshape, slice, concat, add_bias (broadcast)
 - 25 GPU operations (f32 + f16): add, sub, mul, div, neg, relu, gelu, exp, log, sqrt, matmul, softmax, softmax_causal, layer_norm, transpose, scalar_mul, embedding, attention, attention_causal, reshape, slice, concat, add_bias, argmax + kernel fusion
 - **General transpose** — `gpu.transpose_dims(t, dim0, dim1)` for arbitrary dimension swaps, enabling batched multi-head attention via reshape + transpose
-- 433 tests passing across all layers (228 Rust + 13 Swift + 192 Python)
+- **Text generation sampling** — temperature, top-k, and top-p (nucleus) sampling for diverse, coherent output
+- 440 tests passing across all layers (228 Rust + 13 Swift + 199 Python)
 
 ### NumPy & PyTorch Interop
 

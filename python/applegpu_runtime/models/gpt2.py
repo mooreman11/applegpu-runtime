@@ -20,7 +20,8 @@ def load_gpt2_weights(model_name="gpt2"):
     gpu.init_backend()
 
     # GPT-2 has ~148 weight tensors + many intermediates during generation
-    gpu.set_limits(max_tensor_size_mb=1024, max_memory_mb=8192, max_tensors=0)
+    # Unlimited resource limits — GPT-2 creates many intermediates during generation
+    gpu.set_limits(max_tensor_size_mb=0, max_memory_mb=0, max_tensors=0)
 
     hf_model = GPT2LMHeadModel.from_pretrained(model_name)
     config = hf_model.config
@@ -46,10 +47,14 @@ def load_gpt2_weights(model_name="gpt2"):
 def gpt2_forward(model, input_ids, kv_cache=None):
     """Run GPT-2 forward pass with optional KV cache.
 
+    Uses batched multi-head attention: Q/K/V are reshaped to
+    [n_head, seq, d_head] so all heads run in a single batched
+    matmul/attention dispatch per layer.
+
     Args:
         model: dict from load_gpt2_weights()
         input_ids: list of int token IDs (full sequence if no cache, single token if cached)
-        kv_cache: optional list of (k, v) tuples per layer per head, from previous forward pass
+        kv_cache: optional list of (k, v) tuples per layer, shape [n_head, past, d_head]
 
     Returns:
         (logits, new_kv_cache) where logits is [seq_len, vocab_size] (or [1, vocab_size] with cache)
@@ -101,42 +106,38 @@ def gpt2_forward(model, input_ids, kv_cache=None):
         qkv = x_norm @ attn_w
         qkv = gpu.add_bias(qkv, attn_b)
 
-        # Split into Q, K, V
+        # Split into Q, K, V: each [seq, n_embd]
         q_all = gpu.slice(qkv, dim=1, start=0, end=n_embd)
         k_new = gpu.slice(qkv, dim=1, start=n_embd, end=2*n_embd)
         v_new = gpu.slice(qkv, dim=1, start=2*n_embd, end=3*n_embd)
 
-        # Multi-head attention with KV cache
-        layer_kv = []
-        head_outputs = []
-        for h in range(n_head):
-            q_h = gpu.slice(q_all, dim=1, start=h*d_head, end=(h+1)*d_head)
-            k_h = gpu.slice(k_new, dim=1, start=h*d_head, end=(h+1)*d_head)
-            v_h = gpu.slice(v_new, dim=1, start=h*d_head, end=(h+1)*d_head)
+        # Reshape to [seq, n_head, d_head] then transpose to [n_head, seq, d_head]
+        q = gpu.reshape(q_all, [seq_len, n_head, d_head])
+        q = gpu.transpose_dims(q, 0, 1)  # [n_head, seq, d_head]
+        k = gpu.reshape(k_new, [seq_len, n_head, d_head])
+        k = gpu.transpose_dims(k, 0, 1)  # [n_head, seq, d_head]
+        v = gpu.reshape(v_new, [seq_len, n_head, d_head])
+        v = gpu.transpose_dims(v, 0, 1)  # [n_head, seq, d_head]
 
-            if use_cache:
-                # Concat new K/V with cached K/V
-                cached_k, cached_v = kv_cache[i][h]
-                k_h = gpu.concat(cached_k, k_h, dim=0)  # [past+1, d_head]
-                v_h = gpu.concat(cached_v, v_h, dim=0)  # [past+1, d_head]
+        if use_cache:
+            # Concat new K/V with cached: [n_head, past, d_head] + [n_head, 1, d_head]
+            cached_k, cached_v = kv_cache[i]
+            k = gpu.concat(cached_k, k, dim=1)  # [n_head, past+1, d_head]
+            v = gpu.concat(cached_v, v, dim=1)  # [n_head, past+1, d_head]
 
-            layer_kv.append((k_h, v_h))
+        new_kv_cache.append((k, v))
 
-            # Attention: Q is [seq, d_head], K/V are [total_seq, d_head]
-            # For cached: Q is [1, d_head], K/V are [past+1, d_head]
-            # Use regular attention (not causal) for single-token with cache,
-            # since the new token can attend to all past positions
-            if use_cache:
-                out_h = gpu.attention(q_h, k_h, v_h)
-            else:
-                out_h = gpu.attention_causal(q_h, k_h, v_h)
+        # Batched attention: one dispatch for all heads
+        # Q: [n_head, seq, d_head], K/V: [n_head, total_seq, d_head]
+        if use_cache:
+            attn_out = gpu.attention(q, k, v)
+        else:
+            attn_out = gpu.attention_causal(q, k, v)
+        # attn_out: [n_head, seq, d_head]
 
-            head_outputs.append(out_h)
-
-        new_kv_cache.append(layer_kv)
-
-        # Concat heads
-        attn_out = gpu.concat_all(head_outputs, dim=1)
+        # Reshape back: [n_head, seq, d_head] -> [seq, n_head, d_head] -> [seq, n_embd]
+        attn_out = gpu.transpose_dims(attn_out, 0, 1)  # [seq, n_head, d_head]
+        attn_out = gpu.reshape(attn_out, [seq_len, n_embd])
 
         # Output projection
         proj_w = w[f"{prefix}.attn.c_proj.weight"]

@@ -85,7 +85,10 @@ _Eliminate GPU idle time between ops, then enable true parallel execution._
 ### Post-v0.2.0 inference optimizations
 - [x] **KV cache** — reuse past key/value computations for autoregressive generation
 - [x] **N-way concat** — concat_all convenience function for multi-head concat
-- [ ] **Top-k / top-p sampling** — temperature-based sampling for non-greedy generation
+- [x] **Top-k / top-p sampling** — temperature, top-k, and nucleus (top-p) sampling
+- [x] **General transpose** — transpose_dims(dim0, dim1) for arbitrary dimension swaps
+- [x] **Batched GPT-2 attention** — reshape + transpose for [n_head, seq, d_head] batched ops
+- [x] **Tag v0.3.0** — shipped with N-D tensors, batched ops, sampling
 
 ## Up Next
 
