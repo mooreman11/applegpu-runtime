@@ -1091,8 +1091,14 @@ def _max_pool2d(input, kernel_size, stride=None, padding=(0, 0), dilation=(1, 1)
     sh, sw = stride[0], stride[1] if len(stride) > 1 else stride[0]
     ph, pw = padding[0], padding[1] if len(padding) > 1 else padding[0]
     result = _wrap(gpu.max_pool2d(_unwrap(input), kh, kw, sh, sw, ph, pw))
-    # Returns (output, indices) -- dummy indices
-    return result, torch.tensor([0])
+    # Compute real indices on CPU (needed for backward pass)
+    input_cpu = input.to_torch_cpu() if isinstance(input, ApplegpuTensor) else input
+    _, indices_cpu = torch.nn.functional.max_pool2d_with_indices(
+        input_cpu, kernel_size, stride=stride, padding=padding,
+        dilation=dilation, ceil_mode=ceil_mode,
+    )
+    indices = ApplegpuTensor.from_torch(indices_cpu)
+    return result, indices
 
 
 @register_op(torch.ops.aten.avg_pool2d.default)
@@ -1261,6 +1267,18 @@ def _op_batch_norm_backward(grad_output, input, weight, running_mean, running_va
         grad_bias = ApplegpuTensor.from_torch(go_cpu.sum(dim=[0, 2, 3]))
 
     return grad_input, grad_weight, grad_bias
+
+
+@register_op(torch.ops.aten.max_pool2d_with_indices_backward.default)
+def _op_max_pool2d_backward(grad_output, input, kernel_size, stride, padding, dilation, ceil_mode, indices):
+    """max_pool2d backward — scatter gradients to max positions via CPU."""
+    go_cpu = grad_output.to_torch_cpu() if isinstance(grad_output, ApplegpuTensor) else grad_output
+    in_cpu = input.to_torch_cpu() if isinstance(input, ApplegpuTensor) else input
+    idx_cpu = indices.to_torch_cpu() if isinstance(indices, ApplegpuTensor) else indices
+    grad_input_cpu = torch.ops.aten.max_pool2d_with_indices_backward(
+        go_cpu, in_cpu, kernel_size, stride, padding, dilation, ceil_mode, idx_cpu,
+    )
+    return ApplegpuTensor.from_torch(grad_input_cpu)
 
 
 # ============================================================
