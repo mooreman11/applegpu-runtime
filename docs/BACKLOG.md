@@ -74,16 +74,15 @@ _Eliminate GPU idle time between ops, then enable true parallel execution._
 - [ ] **Gather/scatter** — index-based tensor operations
 - [ ] **Conv1d** — used in some transformer variants and audio models
 
-### 4. Transformers adapter → v0.2.0
-_Full pipeline: load model, tokenize, run forward pass, generate text. GPT-2 as first target._
-- [ ] **Weight loader** — download HuggingFace weights, convert to GpuTensors
-- [ ] **GPT-2 forward pass** — Python implementation using our ops (matmul, attention, gelu, layer_norm, embedding)
-- [ ] **Text generation** — tokenize → forward → argmax (CPU) → decode loop
-- [ ] **`gpu.run_model("gpt2", "Hello world")`** — end-to-end API
-- [ ] **Tag v0.2.0** — ship with transformer inference
+### ~~4. Transformers adapter → v0.2.0~~ DONE
+- [x] **Weight loader** — load HuggingFace GPT-2 weights, convert to GpuTensors
+- [x] **GPT-2 forward pass** — multi-head causal attention + FFN with all 25 ops
+- [x] **Text generation** — tokenize → forward → argmax → decode loop
+- [x] **`gpu.run_model("gpt2", "Hello world")`** — end-to-end API
+- [x] **Foundation ops** — reshape, slice, concat, add_bias, softmax_causal, attention_causal, argmax
+- [x] **Tag v0.2.0** — shipped
 
 ### Post-v0.2.0 inference optimizations
-- [ ] **Argmax GPU kernel** — reduction op, avoids CPU roundtrip during generation
 - [ ] **KV cache** — reuse past key/value computations for autoregressive generation (major speedup)
 - [ ] **Top-k / top-p sampling** — temperature-based sampling for non-greedy generation
 - [ ] **Batch inference** — multiple sequences in parallel

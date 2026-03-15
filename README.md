@@ -32,6 +32,16 @@ make test
 uv run maturin develop
 ```
 
+## GPT-2 Inference
+
+```python
+import applegpu_runtime as gpu
+
+# One line: load GPT-2, tokenize, run forward pass, generate text
+output = gpu.run_model("gpt2", "The meaning of life is", max_tokens=50)
+print(output)
+```
+
 ## Quick Start
 
 ```python
@@ -84,7 +94,7 @@ make test-python   # uv run pytest -v
 
 ## Status
 
-v0.1.0. Current capabilities:
+v0.2.0. Current capabilities:
 
 - **Two backends** — MLX-native (direct Metal) and VM (IPC to GPU service process)
 - **VM backend** — graph serialization over Unix sockets to a standalone `gpu-service` binary
@@ -100,9 +110,10 @@ v0.1.0. Current capabilities:
 - **Resource limits** — configurable max tensor size, total GPU memory, and tensor count via `gpu.set_limits()` or env vars, enforced per-container and globally
 - **Lazy execution** — ops build a DAG, computation deferred until materialization
 - **Transformer ops** — GELU, LayerNorm (with affine), Embedding (Int32), softmax_causal, attention_causal, argmax
+- **GPT-2 inference** — `gpu.run_model("gpt2", "Hello", max_tokens=50)` for end-to-end text generation on Metal GPU
 - **Tensor manipulation** — reshape, slice, concat, add_bias (broadcast)
 - 25 GPU operations (f32 + f16): add, sub, mul, div, neg, relu, gelu, exp, log, sqrt, matmul, softmax, softmax_causal, layer_norm, transpose, scalar_mul, embedding, attention, attention_causal, reshape, slice, concat, add_bias, argmax + kernel fusion
-- 335 tests passing across all layers (179 Rust + 13 Swift + 143 Python)
+- 340 tests passing across all layers (179 Rust + 13 Swift + 148 Python)
 
 ### NumPy & PyTorch Interop
 
