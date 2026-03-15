@@ -65,9 +65,11 @@ print(output)
 
 ```python
 import applegpu_runtime as gpu
+import numpy as np
 
 gpu.init_backend()
 
+# Tensors — any shape up to 8 dimensions
 a = gpu.tensor([1.0, 2.0, 3.0, 4.0], shape=[2, 2])
 b = gpu.tensor([5.0, 6.0, 7.0, 8.0], shape=[2, 2])
 
@@ -78,6 +80,21 @@ e = (c * a).relu()     # chain freely
 
 # Computation happens on materialization
 e.to_list()            # evaluates the entire chain on the GPU
+
+# N-D tensors with broadcasting
+x = gpu.from_numpy(np.random.randn(2, 3, 4).astype(np.float32))
+bias = gpu.from_numpy(np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32))
+y = x + bias           # [2, 3, 4] + [4] broadcasts automatically
+
+# Multi-dtype
+t = gpu.tensor([1, 2, 3], shape=[3], dtype="int32")
+h = gpu.tensor([1.0, 2.0], shape=[2], dtype="float16")
+
+# Transformer ops
+q = gpu.from_numpy(np.random.randn(4, 8, 64).astype(np.float32))
+k = gpu.from_numpy(np.random.randn(4, 8, 64).astype(np.float32))
+v = gpu.from_numpy(np.random.randn(4, 8, 64).astype(np.float32))
+out = gpu.attention_causal(q, k, v)  # batched causal attention
 ```
 
 ## Capabilities
