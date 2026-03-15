@@ -328,6 +328,14 @@ impl Tensor {
         Self::empty(device, shape, DType::Float16)
     }
 
+    /// Create a tensor from i32 data.
+    pub fn from_i32(device: &Device, shape: Vec<usize>, data: &[i32]) -> Result<Self> {
+        let bytes = unsafe {
+            std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * std::mem::size_of::<i32>())
+        };
+        Self::from_data(device, shape, DType::Int32, bytes)
+    }
+
     /// Create a tensor from f16 data (passed as raw u16 bit patterns).
     pub fn from_f16(device: &Device, shape: Vec<usize>, data: &[u16]) -> Result<Self> {
         let bytes = unsafe {

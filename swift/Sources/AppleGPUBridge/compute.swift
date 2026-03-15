@@ -325,6 +325,64 @@ final class GPUCompute {
         return commandBuffer.status == .completed
     }
 
+    func dispatchSoftmaxBackward(bufGradOut: MTLBuffer, bufOut: MTLBuffer, bufGradIn: MTLBuffer, rows: Int, cols: Int) -> Bool {
+        if rows == 0 || cols == 0 { return true }
+
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder() else { return false }
+
+        encoder.setComputePipelineState(pipelineState)
+        encoder.setBuffer(bufGradOut, offset: 0, index: 0)
+        encoder.setBuffer(bufOut, offset: 0, index: 1)
+        encoder.setBuffer(bufGradIn, offset: 0, index: 2)
+
+        var r = UInt32(rows), c = UInt32(cols)
+        encoder.setBytes(&r, length: MemoryLayout<UInt32>.size, index: 3)
+        encoder.setBytes(&c, length: MemoryLayout<UInt32>.size, index: 4)
+
+        let threadGroupSize = min(pipelineState.maxTotalThreadsPerThreadgroup, rows)
+        let threadGroups = (rows + threadGroupSize - 1) / threadGroupSize
+
+        encoder.dispatchThreadgroups(
+            MTLSize(width: threadGroups, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: threadGroupSize, height: 1, depth: 1)
+        )
+        encoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        return commandBuffer.status == .completed
+    }
+
+    func dispatchLayerNormBackward(bufGradOut: MTLBuffer, bufIn: MTLBuffer, bufGamma: MTLBuffer, bufGradIn: MTLBuffer, rows: Int, cols: Int, eps: Float) -> Bool {
+        if rows == 0 || cols == 0 { return true }
+
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder() else { return false }
+
+        encoder.setComputePipelineState(pipelineState)
+        encoder.setBuffer(bufGradOut, offset: 0, index: 0)
+        encoder.setBuffer(bufIn, offset: 0, index: 1)
+        encoder.setBuffer(bufGamma, offset: 0, index: 2)
+        encoder.setBuffer(bufGradIn, offset: 0, index: 3)
+
+        var r = UInt32(rows), c = UInt32(cols), e = eps
+        encoder.setBytes(&r, length: MemoryLayout<UInt32>.size, index: 4)
+        encoder.setBytes(&c, length: MemoryLayout<UInt32>.size, index: 5)
+        encoder.setBytes(&e, length: MemoryLayout<Float>.size, index: 6)
+
+        let threadGroupSize = min(pipelineState.maxTotalThreadsPerThreadgroup, rows)
+        let threadGroups = (rows + threadGroupSize - 1) / threadGroupSize
+
+        encoder.dispatchThreadgroups(
+            MTLSize(width: threadGroups, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: threadGroupSize, height: 1, depth: 1)
+        )
+        encoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        return commandBuffer.status == .completed
+    }
+
     func dispatchSliceDim0(bufIn: MTLBuffer, bufOut: MTLBuffer, cols: Int, startRow: Int, outRows: Int) -> Bool {
         if outRows == 0 || cols == 0 { return true }
 
@@ -861,6 +919,62 @@ public func gpuBridgeComputeLayerNorm(
     let success = compute.dispatchLayerNorm(
         bufIn: bufIn.buffer, bufGamma: bufGamma.buffer, bufBeta: bufBeta.buffer,
         bufOut: bufOut.buffer, rows: Int(rows), cols: Int(cols), eps: eps
+    )
+    return success ? 0 : -1
+}
+
+@_cdecl("gpu_bridge_compute_softmax_backward")
+public func gpuBridgeComputeSoftmaxBackward(
+    _ computePtr: UnsafeMutableRawPointer?,
+    _ bufGradOutPtr: UnsafeRawPointer?,
+    _ bufOutPtr: UnsafeRawPointer?,
+    _ bufGradInPtr: UnsafeMutableRawPointer?,
+    _ rows: UInt32,
+    _ cols: UInt32
+) -> Int32 {
+    guard let computePtr = computePtr,
+          let bufGradOutPtr = bufGradOutPtr,
+          let bufOutPtr = bufOutPtr,
+          let bufGradInPtr = bufGradInPtr else { return -1 }
+
+    let compute = Unmanaged<GPUCompute>.fromOpaque(computePtr).takeUnretainedValue()
+    let bufGradOut = Unmanaged<GPUBuffer>.fromOpaque(bufGradOutPtr).takeUnretainedValue()
+    let bufOut = Unmanaged<GPUBuffer>.fromOpaque(bufOutPtr).takeUnretainedValue()
+    let bufGradIn = Unmanaged<GPUBuffer>.fromOpaque(bufGradInPtr).takeUnretainedValue()
+
+    let success = compute.dispatchSoftmaxBackward(
+        bufGradOut: bufGradOut.buffer, bufOut: bufOut.buffer, bufGradIn: bufGradIn.buffer,
+        rows: Int(rows), cols: Int(cols)
+    )
+    return success ? 0 : -1
+}
+
+@_cdecl("gpu_bridge_compute_layer_norm_backward")
+public func gpuBridgeComputeLayerNormBackward(
+    _ computePtr: UnsafeMutableRawPointer?,
+    _ bufGradOutPtr: UnsafeRawPointer?,
+    _ bufInPtr: UnsafeRawPointer?,
+    _ bufGammaPtr: UnsafeRawPointer?,
+    _ bufGradInPtr: UnsafeMutableRawPointer?,
+    _ rows: UInt32,
+    _ cols: UInt32,
+    _ eps: Float
+) -> Int32 {
+    guard let computePtr = computePtr,
+          let bufGradOutPtr = bufGradOutPtr,
+          let bufInPtr = bufInPtr,
+          let bufGammaPtr = bufGammaPtr,
+          let bufGradInPtr = bufGradInPtr else { return -1 }
+
+    let compute = Unmanaged<GPUCompute>.fromOpaque(computePtr).takeUnretainedValue()
+    let bufGradOut = Unmanaged<GPUBuffer>.fromOpaque(bufGradOutPtr).takeUnretainedValue()
+    let bufIn = Unmanaged<GPUBuffer>.fromOpaque(bufInPtr).takeUnretainedValue()
+    let bufGamma = Unmanaged<GPUBuffer>.fromOpaque(bufGammaPtr).takeUnretainedValue()
+    let bufGradIn = Unmanaged<GPUBuffer>.fromOpaque(bufGradInPtr).takeUnretainedValue()
+
+    let success = compute.dispatchLayerNormBackward(
+        bufGradOut: bufGradOut.buffer, bufIn: bufIn.buffer, bufGamma: bufGamma.buffer,
+        bufGradIn: bufGradIn.buffer, rows: Int(rows), cols: Int(cols), eps: eps
     )
     return success ? 0 : -1
 }
@@ -1543,6 +1657,112 @@ public func gpuBridgeComputeLayerNormNB(
     encoder.setBuffer(bufGamma.buffer, offset: 0, index: 1)
     encoder.setBuffer(bufBeta.buffer, offset: 0, index: 2)
     encoder.setBuffer(bufOut.buffer, offset: 0, index: 3)
+
+    var r = rows, c = cols, e = eps
+    encoder.setBytes(&r, length: MemoryLayout<UInt32>.size, index: 4)
+    encoder.setBytes(&c, length: MemoryLayout<UInt32>.size, index: 5)
+    encoder.setBytes(&e, length: MemoryLayout<Float>.size, index: 6)
+
+    let rowCount = Int(rows)
+    let threadGroupSize = min(compute.pipelineState.maxTotalThreadsPerThreadgroup, rowCount)
+    let threadGroups = (rowCount + threadGroupSize - 1) / threadGroupSize
+
+    encoder.dispatchThreadgroups(
+        MTLSize(width: threadGroups, height: 1, depth: 1),
+        threadsPerThreadgroup: MTLSize(width: threadGroupSize, height: 1, depth: 1)
+    )
+    encoder.endEncoding()
+    commandBuffer.commit()
+
+    return Unmanaged.passRetained(commandBuffer as AnyObject).toOpaque()
+}
+
+@_cdecl("gpu_bridge_compute_softmax_backward_nb")
+public func gpuBridgeComputeSoftmaxBackwardNB(
+    _ computePtr: UnsafeMutableRawPointer?,
+    _ queuePtr: UnsafeMutableRawPointer?,
+    _ bufGradOutPtr: UnsafeRawPointer?,
+    _ bufOutPtr: UnsafeRawPointer?,
+    _ bufGradInPtr: UnsafeMutableRawPointer?,
+    _ rows: UInt32,
+    _ cols: UInt32
+) -> UnsafeMutableRawPointer? {
+    guard let computePtr = computePtr,
+          let queuePtr = queuePtr,
+          let bufGradOutPtr = bufGradOutPtr,
+          let bufOutPtr = bufOutPtr,
+          let bufGradInPtr = bufGradInPtr else { return nil }
+
+    let compute = Unmanaged<GPUCompute>.fromOpaque(computePtr).takeUnretainedValue()
+    let queue = Unmanaged<MTLCommandQueue>.fromOpaque(queuePtr).takeUnretainedValue()
+    let bufGradOut = Unmanaged<GPUBuffer>.fromOpaque(bufGradOutPtr).takeUnretainedValue()
+    let bufOut = Unmanaged<GPUBuffer>.fromOpaque(bufOutPtr).takeUnretainedValue()
+    let bufGradIn = Unmanaged<GPUBuffer>.fromOpaque(bufGradInPtr).takeUnretainedValue()
+
+    if rows == 0 || cols == 0 { return nil }
+
+    guard let commandBuffer = queue.makeCommandBuffer(),
+          let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
+
+    encoder.setComputePipelineState(compute.pipelineState)
+    encoder.setBuffer(bufGradOut.buffer, offset: 0, index: 0)
+    encoder.setBuffer(bufOut.buffer, offset: 0, index: 1)
+    encoder.setBuffer(bufGradIn.buffer, offset: 0, index: 2)
+
+    var r = rows, c = cols
+    encoder.setBytes(&r, length: MemoryLayout<UInt32>.size, index: 3)
+    encoder.setBytes(&c, length: MemoryLayout<UInt32>.size, index: 4)
+
+    let rowCount = Int(rows)
+    let threadGroupSize = min(compute.pipelineState.maxTotalThreadsPerThreadgroup, rowCount)
+    let threadGroups = (rowCount + threadGroupSize - 1) / threadGroupSize
+
+    encoder.dispatchThreadgroups(
+        MTLSize(width: threadGroups, height: 1, depth: 1),
+        threadsPerThreadgroup: MTLSize(width: threadGroupSize, height: 1, depth: 1)
+    )
+    encoder.endEncoding()
+    commandBuffer.commit()
+
+    return Unmanaged.passRetained(commandBuffer as AnyObject).toOpaque()
+}
+
+@_cdecl("gpu_bridge_compute_layer_norm_backward_nb")
+public func gpuBridgeComputeLayerNormBackwardNB(
+    _ computePtr: UnsafeMutableRawPointer?,
+    _ queuePtr: UnsafeMutableRawPointer?,
+    _ bufGradOutPtr: UnsafeRawPointer?,
+    _ bufInPtr: UnsafeRawPointer?,
+    _ bufGammaPtr: UnsafeRawPointer?,
+    _ bufGradInPtr: UnsafeMutableRawPointer?,
+    _ rows: UInt32,
+    _ cols: UInt32,
+    _ eps: Float
+) -> UnsafeMutableRawPointer? {
+    guard let computePtr = computePtr,
+          let queuePtr = queuePtr,
+          let bufGradOutPtr = bufGradOutPtr,
+          let bufInPtr = bufInPtr,
+          let bufGammaPtr = bufGammaPtr,
+          let bufGradInPtr = bufGradInPtr else { return nil }
+
+    let compute = Unmanaged<GPUCompute>.fromOpaque(computePtr).takeUnretainedValue()
+    let queue = Unmanaged<MTLCommandQueue>.fromOpaque(queuePtr).takeUnretainedValue()
+    let bufGradOut = Unmanaged<GPUBuffer>.fromOpaque(bufGradOutPtr).takeUnretainedValue()
+    let bufIn = Unmanaged<GPUBuffer>.fromOpaque(bufInPtr).takeUnretainedValue()
+    let bufGamma = Unmanaged<GPUBuffer>.fromOpaque(bufGammaPtr).takeUnretainedValue()
+    let bufGradIn = Unmanaged<GPUBuffer>.fromOpaque(bufGradInPtr).takeUnretainedValue()
+
+    if rows == 0 || cols == 0 { return nil }
+
+    guard let commandBuffer = queue.makeCommandBuffer(),
+          let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
+
+    encoder.setComputePipelineState(compute.pipelineState)
+    encoder.setBuffer(bufGradOut.buffer, offset: 0, index: 0)
+    encoder.setBuffer(bufIn.buffer, offset: 0, index: 1)
+    encoder.setBuffer(bufGamma.buffer, offset: 0, index: 2)
+    encoder.setBuffer(bufGradIn.buffer, offset: 0, index: 3)
 
     var r = rows, c = cols, e = eps
     encoder.setBytes(&r, length: MemoryLayout<UInt32>.size, index: 4)

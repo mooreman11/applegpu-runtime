@@ -143,6 +143,28 @@ int32_t gpu_bridge_compute_layer_norm(
     float eps
 );
 
+// Softmax backward: grad_input = output * (grad_output - sum(grad_output * output))
+int32_t gpu_bridge_compute_softmax_backward(
+    GPUComputeHandle* compute,
+    const GPUBufferHandle* buf_grad_output,
+    const GPUBufferHandle* buf_output,
+    GPUBufferHandle* buf_grad_input,
+    uint32_t rows,
+    uint32_t cols
+);
+
+// Layer norm backward: computes grad_input from grad_output, input, gamma
+int32_t gpu_bridge_compute_layer_norm_backward(
+    GPUComputeHandle* compute,
+    const GPUBufferHandle* buf_grad_output,
+    const GPUBufferHandle* buf_input,
+    const GPUBufferHandle* buf_gamma,
+    GPUBufferHandle* buf_grad_input,
+    uint32_t rows,
+    uint32_t cols,
+    float eps
+);
+
 // Embedding lookup: output[i,j] = weights[indices[i],j]
 int32_t gpu_bridge_compute_embedding(
     GPUComputeHandle* compute,
@@ -277,6 +299,30 @@ void* gpu_bridge_compute_layer_norm_nb(
     const GPUBufferHandle* buf_gamma,
     const GPUBufferHandle* buf_beta,
     GPUBufferHandle* buf_output,
+    uint32_t rows,
+    uint32_t cols,
+    float eps
+);
+
+// Non-blocking softmax backward: returns command buffer handle.
+void* gpu_bridge_compute_softmax_backward_nb(
+    GPUComputeHandle* compute,
+    void* queue,
+    const GPUBufferHandle* buf_grad_output,
+    const GPUBufferHandle* buf_output,
+    GPUBufferHandle* buf_grad_input,
+    uint32_t rows,
+    uint32_t cols
+);
+
+// Non-blocking layer norm backward: returns command buffer handle.
+void* gpu_bridge_compute_layer_norm_backward_nb(
+    GPUComputeHandle* compute,
+    void* queue,
+    const GPUBufferHandle* buf_grad_output,
+    const GPUBufferHandle* buf_input,
+    const GPUBufferHandle* buf_gamma,
+    GPUBufferHandle* buf_grad_input,
     uint32_t rows,
     uint32_t cols,
     float eps

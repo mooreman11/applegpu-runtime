@@ -373,6 +373,245 @@ pub fn layer_norm(rt: &mut LazyRuntime, input_id: u64, gamma_id: u64, beta_id: u
     Ok(out_id)
 }
 
+/// Softmax backward: grad_input = output * (grad_output - sum(grad_output * output, dim=-1)).
+/// Binary op: inputs are grad_output and softmax output, same shape.
+pub fn softmax_backward(rt: &mut LazyRuntime, grad_output_id: u64, output_id: u64) -> Result<u64> {
+    let grad_shape = rt.shape(grad_output_id)?;
+    let grad_dtype = rt.dtype(grad_output_id)?;
+    validate_compute_dtype(grad_dtype)?;
+    let out_shape = rt.shape(output_id)?;
+    let out_dtype = rt.dtype(output_id)?;
+
+    if grad_shape != out_shape {
+        return Err(GpuError::InvalidTensor(format!(
+            "softmax_backward: grad_output shape {:?} != output shape {:?}", grad_shape, out_shape
+        )));
+    }
+    if grad_dtype != out_dtype {
+        return Err(GpuError::InvalidTensor(format!(
+            "softmax_backward: grad_output dtype {:?} != output dtype {:?}", grad_dtype, out_dtype
+        )));
+    }
+    if grad_shape.is_empty() {
+        return Err(GpuError::InvalidTensor("softmax_backward requires at least 1D tensor".to_string()));
+    }
+
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op: OpKind::SoftmaxBackward,
+        inputs: vec![grad_output_id, output_id],
+        out_shape: Shape::new(grad_shape)?,
+        out_dtype: grad_dtype,
+        container_id: ContainerId::DEFAULT,
+    });
+    Ok(out_id)
+}
+
+/// Layer norm backward: computes grad_input from grad_output, original input, and gamma.
+/// Ternary op: inputs are grad_output, input, gamma.
+pub fn layer_norm_backward(rt: &mut LazyRuntime, grad_output_id: u64, input_id: u64, gamma_id: u64, eps: f32) -> Result<u64> {
+    let grad_shape = rt.shape(grad_output_id)?;
+    let grad_dtype = rt.dtype(grad_output_id)?;
+    validate_compute_dtype(grad_dtype)?;
+    let input_shape = rt.shape(input_id)?;
+    let input_dtype = rt.dtype(input_id)?;
+
+    if grad_shape != input_shape {
+        return Err(GpuError::InvalidTensor(format!(
+            "layer_norm_backward: grad_output shape {:?} != input shape {:?}", grad_shape, input_shape
+        )));
+    }
+    if grad_dtype != input_dtype {
+        return Err(GpuError::InvalidTensor(format!(
+            "layer_norm_backward: grad_output dtype {:?} != input dtype {:?}", grad_dtype, input_dtype
+        )));
+    }
+    if grad_shape.is_empty() {
+        return Err(GpuError::InvalidTensor("layer_norm_backward requires at least 1D tensor".to_string()));
+    }
+
+    let cols = grad_shape[grad_shape.len() - 1];
+    let gamma_shape = rt.shape(gamma_id)?;
+    if gamma_shape != vec![cols] {
+        return Err(GpuError::InvalidTensor(format!(
+            "layer_norm_backward: gamma shape {:?} must be [{}]", gamma_shape, cols
+        )));
+    }
+
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op: OpKind::LayerNormBackward { eps },
+        inputs: vec![grad_output_id, input_id, gamma_id],
+        out_shape: Shape::new(grad_shape)?,
+        out_dtype: grad_dtype,
+        container_id: ContainerId::DEFAULT,
+    });
+    Ok(out_id)
+}
+
+/// Conv2d backward input: computes grad_input from grad_output and weight.
+/// grad_output: [batch, out_channels, out_h, out_w]
+/// weight: [out_channels, in_channels, kh, kw]
+/// output: [batch, in_channels, in_h, in_w]
+pub fn conv2d_backward_input(
+    rt: &mut LazyRuntime,
+    grad_output_id: u64,
+    weight_id: u64,
+    in_h: usize,
+    in_w: usize,
+    stride: (usize, usize),
+    padding: (usize, usize),
+) -> Result<u64> {
+    let grad_dtype = rt.dtype(grad_output_id)?;
+    validate_compute_dtype(grad_dtype)?;
+    let w_dtype = rt.dtype(weight_id)?;
+    if grad_dtype != w_dtype {
+        return Err(GpuError::InvalidTensor(format!(
+            "conv2d_backward_input dtype mismatch: grad {:?} vs weight {:?}", grad_dtype, w_dtype
+        )));
+    }
+
+    let grad_shape = rt.shape(grad_output_id)?;
+    let w_shape = rt.shape(weight_id)?;
+
+    if grad_shape.len() != 4 {
+        return Err(GpuError::InvalidTensor(format!(
+            "conv2d_backward_input grad_output must be 4D [B,OC,OH,OW], got {:?}", grad_shape
+        )));
+    }
+    if w_shape.len() != 4 {
+        return Err(GpuError::InvalidTensor(format!(
+            "conv2d_backward_input weight must be 4D [OC,IC,KH,KW], got {:?}", w_shape
+        )));
+    }
+    if grad_shape[1] != w_shape[0] {
+        return Err(GpuError::InvalidTensor(format!(
+            "conv2d_backward_input out_channels mismatch: grad {} vs weight {}", grad_shape[1], w_shape[0]
+        )));
+    }
+
+    let batch = grad_shape[0];
+    let in_channels = w_shape[1];
+
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op: OpKind::Conv2dBackwardInput { stride, padding },
+        inputs: vec![grad_output_id, weight_id],
+        out_shape: Shape::new(vec![batch, in_channels, in_h, in_w])?,
+        out_dtype: grad_dtype,
+        container_id: ContainerId::DEFAULT,
+    });
+    Ok(out_id)
+}
+
+/// Embedding backward: scatter-add gradients back to weight matrix.
+/// grad_output: [seq_len, embed_dim]
+/// indices: [seq_len] (Int32)
+/// output: [num_weights, embed_dim] (zero-initialized, then accumulated)
+pub fn embedding_backward(
+    rt: &mut LazyRuntime,
+    grad_output_id: u64,
+    indices_id: u64,
+    num_weights: usize,
+) -> Result<u64> {
+    let grad_dtype = rt.dtype(grad_output_id)?;
+    validate_compute_dtype(grad_dtype)?;
+    let indices_dtype = rt.dtype(indices_id)?;
+
+    if indices_dtype != DType::Int32 {
+        return Err(GpuError::InvalidTensor(format!(
+            "embedding_backward indices must be Int32, got {:?}", indices_dtype
+        )));
+    }
+
+    let grad_shape = rt.shape(grad_output_id)?;
+    let indices_shape = rt.shape(indices_id)?;
+
+    if grad_shape.len() < 1 {
+        return Err(GpuError::InvalidTensor(
+            "embedding_backward grad_output must have at least 1 dimension".to_string()
+        ));
+    }
+    if indices_shape.is_empty() {
+        return Err(GpuError::InvalidTensor(
+            "embedding_backward indices must have at least 1 dimension".to_string()
+        ));
+    }
+
+    let embed_dim = grad_shape[grad_shape.len() - 1];
+    let seq_len: usize = indices_shape.iter().product();
+
+    // Verify grad_output flattened prefix matches indices flattened length
+    let grad_prefix: usize = grad_shape[..grad_shape.len() - 1].iter().product();
+    if grad_prefix != seq_len {
+        return Err(GpuError::InvalidTensor(format!(
+            "embedding_backward: grad_output prefix {} != indices numel {}", grad_prefix, seq_len
+        )));
+    }
+
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op: OpKind::EmbeddingBackward,
+        inputs: vec![grad_output_id, indices_id],
+        out_shape: Shape::new(vec![num_weights, embed_dim])?,
+        out_dtype: grad_dtype,
+        container_id: ContainerId::DEFAULT,
+    });
+    Ok(out_id)
+}
+
+/// Batch norm backward (inference mode): computes grad_input.
+/// grad_input = grad_output * weight / sqrt(running_var + eps)
+/// grad_output: [batch, channels, ...], weight: [channels], running_var: [channels]
+pub fn batch_norm_backward(
+    rt: &mut LazyRuntime,
+    grad_output_id: u64,
+    weight_id: u64,
+    running_var_id: u64,
+    eps: f32,
+) -> Result<u64> {
+    let grad_dtype = rt.dtype(grad_output_id)?;
+    validate_compute_dtype(grad_dtype)?;
+
+    let grad_shape = rt.shape(grad_output_id)?;
+    if grad_shape.len() < 2 {
+        return Err(GpuError::InvalidTensor(format!(
+            "batch_norm_backward grad_output must be >= 2D, got {:?}", grad_shape
+        )));
+    }
+    let channels = grad_shape[1];
+
+    for (name, id) in &[("weight", weight_id), ("running_var", running_var_id)] {
+        let s = rt.shape(*id)?;
+        let d = rt.dtype(*id)?;
+        if d != grad_dtype {
+            return Err(GpuError::InvalidTensor(format!(
+                "batch_norm_backward {} dtype {:?} != grad dtype {:?}", name, d, grad_dtype
+            )));
+        }
+        if s != vec![channels] {
+            return Err(GpuError::InvalidTensor(format!(
+                "batch_norm_backward {} shape {:?} must be [{}]", name, s, channels
+            )));
+        }
+    }
+
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op: OpKind::BatchNormBackward { eps },
+        inputs: vec![grad_output_id, weight_id, running_var_id],
+        out_shape: Shape::new(grad_shape)?,
+        out_dtype: grad_dtype,
+        container_id: ContainerId::DEFAULT,
+    });
+    Ok(out_id)
+}
+
 pub fn embedding(rt: &mut LazyRuntime, weights_id: u64, indices_id: u64) -> Result<u64> {
     let weights_shape = rt.shape(weights_id)?;
     let weights_dtype = rt.dtype(weights_id)?;
@@ -3204,5 +3443,482 @@ mod tests {
         let in_id = input_3d.meta.id;
         rt.insert_tensor(input_3d).unwrap();
         assert!(avg_pool2d(&mut rt, in_id, (2, 2), (2, 2), (0, 0)).is_err());
+    }
+
+    // ── Softmax Backward tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_softmax_backward_basic() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        // softmax output: already normalized rows (2x3)
+        // Row 0: [0.2, 0.3, 0.5], Row 1: [0.1, 0.7, 0.2]
+        let output_data = vec![0.2, 0.3, 0.5, 0.1, 0.7, 0.2];
+        let output = Tensor::from_f32(&device, vec![2, 3], &output_data).unwrap();
+        let out_id = output.meta.id;
+        rt.insert_tensor(output).unwrap();
+
+        // grad_output: upstream gradient
+        let grad_data = vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let grad = Tensor::from_f32(&device, vec![2, 3], &grad_data).unwrap();
+        let grad_id = grad.meta.id;
+        rt.insert_tensor(grad).unwrap();
+
+        let result_id = softmax_backward(&mut rt, grad_id, out_id).unwrap();
+        rt.eval(&device, result_id).unwrap();
+        let result = rt.read_f32(result_id).unwrap();
+
+        // Row 0: dot = 1.0*0.2 + 0.0*0.3 + 0.0*0.5 = 0.2
+        // grad_input[0] = 0.2 * (1.0 - 0.2) = 0.16
+        // grad_input[1] = 0.3 * (0.0 - 0.2) = -0.06
+        // grad_input[2] = 0.5 * (0.0 - 0.2) = -0.10
+        assert!((result[0] - 0.16).abs() < 1e-5, "got {}", result[0]);
+        assert!((result[1] - (-0.06)).abs() < 1e-5, "got {}", result[1]);
+        assert!((result[2] - (-0.10)).abs() < 1e-5, "got {}", result[2]);
+
+        // Row 1: dot = 0.0*0.1 + 1.0*0.7 + 0.0*0.2 = 0.7
+        // grad_input[3] = 0.1 * (0.0 - 0.7) = -0.07
+        // grad_input[4] = 0.7 * (1.0 - 0.7) = 0.21
+        // grad_input[5] = 0.2 * (0.0 - 0.7) = -0.14
+        assert!((result[3] - (-0.07)).abs() < 1e-5, "got {}", result[3]);
+        assert!((result[4] - 0.21).abs() < 1e-5, "got {}", result[4]);
+        assert!((result[5] - (-0.14)).abs() < 1e-5, "got {}", result[5]);
+
+        // Each row's grad sums to 0 (property of softmax backward)
+        for r in 0..2 {
+            let sum: f32 = (0..3).map(|c| result[r * 3 + c]).sum();
+            assert!(sum.abs() < 1e-5, "row {} sum = {}", r, sum);
+        }
+    }
+
+    #[test]
+    fn test_softmax_backward_end_to_end() {
+        // Verify that softmax forward + backward produces correct grad_input
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        let input_data = vec![1.0, 2.0, 3.0, 4.0, 1.0, 2.0];
+        let input = Tensor::from_f32(&device, vec![2, 3], &input_data).unwrap();
+        let in_id = input.meta.id;
+        rt.insert_tensor(input).unwrap();
+
+        // Forward softmax
+        let softmax_id = softmax(&mut rt, in_id).unwrap();
+        rt.eval(&device, softmax_id).unwrap();
+        let _softmax_vals = rt.read_f32(softmax_id).unwrap();
+
+        // All-ones grad_output (like sum().backward())
+        let grad = Tensor::from_f32(&device, vec![2, 3], &[1.0; 6]).unwrap();
+        let grad_id = grad.meta.id;
+        rt.insert_tensor(grad).unwrap();
+
+        let grad_in_id = softmax_backward(&mut rt, grad_id, softmax_id).unwrap();
+        rt.eval(&device, grad_in_id).unwrap();
+        let grad_in = rt.read_f32(grad_in_id).unwrap();
+
+        // When grad_output is all-ones, dot = sum(output) = 1.0
+        // So grad_input[j] = output[j] * (1.0 - 1.0) = 0.0 for all j
+        for &v in &grad_in {
+            assert!(v.abs() < 1e-5, "expected ~0, got {}", v);
+        }
+    }
+
+    #[test]
+    fn test_softmax_backward_shape_mismatch() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        let a = Tensor::from_f32(&device, vec![2, 3], &[1.0; 6]).unwrap();
+        let b = Tensor::from_f32(&device, vec![3, 2], &[1.0; 6]).unwrap();
+        let a_id = a.meta.id;
+        let b_id = b.meta.id;
+        rt.insert_tensor(a).unwrap();
+        rt.insert_tensor(b).unwrap();
+        assert!(softmax_backward(&mut rt, a_id, b_id).is_err());
+    }
+
+    #[test]
+    fn test_softmax_backward_3d() {
+        // Test with batched 3D input
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        // 2x2x3 shape (batch=2, rows=2, cols=3)
+        let output_data = vec![
+            0.2, 0.3, 0.5,  // batch0, row0
+            0.1, 0.7, 0.2,  // batch0, row1
+            0.3, 0.3, 0.4,  // batch1, row0
+            0.5, 0.3, 0.2,  // batch1, row1
+        ];
+        let output = Tensor::from_f32(&device, vec![2, 2, 3], &output_data).unwrap();
+        let out_id = output.meta.id;
+        rt.insert_tensor(output).unwrap();
+
+        let grad_data = vec![1.0; 12];
+        let grad = Tensor::from_f32(&device, vec![2, 2, 3], &grad_data).unwrap();
+        let grad_id = grad.meta.id;
+        rt.insert_tensor(grad).unwrap();
+
+        let result_id = softmax_backward(&mut rt, grad_id, out_id).unwrap();
+        assert_eq!(rt.shape(result_id).unwrap(), vec![2, 2, 3]);
+        rt.eval(&device, result_id).unwrap();
+        let result = rt.read_f32(result_id).unwrap();
+
+        // All-ones grad => all zeros grad_input
+        for &v in &result {
+            assert!(v.abs() < 1e-5, "expected ~0, got {}", v);
+        }
+    }
+
+    // ── Layer Norm Backward tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_layer_norm_backward_basic() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        // Input: 2x4
+        let input_data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        let input = Tensor::from_f32(&device, vec![2, 4], &input_data).unwrap();
+        let in_id = input.meta.id;
+        rt.insert_tensor(input).unwrap();
+
+        // Gamma = ones
+        let gamma = Tensor::from_f32(&device, vec![4], &[1.0; 4]).unwrap();
+        let gamma_id = gamma.meta.id;
+        rt.insert_tensor(gamma).unwrap();
+
+        // Grad output = ones (like sum().backward())
+        let grad = Tensor::from_f32(&device, vec![2, 4], &[1.0; 8]).unwrap();
+        let grad_id = grad.meta.id;
+        rt.insert_tensor(grad).unwrap();
+
+        let eps = 1e-5;
+        let result_id = layer_norm_backward(&mut rt, grad_id, in_id, gamma_id, eps).unwrap();
+        rt.eval(&device, result_id).unwrap();
+        let result = rt.read_f32(result_id).unwrap();
+
+        // With gamma=1 and uniform grad_output=1, the grad_input should sum to ~0 per row
+        // (layer norm backward preserves the zero-sum property)
+        for r in 0..2 {
+            let row_sum: f32 = (0..4).map(|c| result[r * 4 + c]).sum();
+            assert!(row_sum.abs() < 1e-4, "row {} sum = {}", r, row_sum);
+        }
+    }
+
+    #[test]
+    fn test_layer_norm_backward_numerical() {
+        // Verify against manual computation
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        // 1x3 for simplest case
+        let input_data = vec![1.0, 3.0, 5.0];
+        let input = Tensor::from_f32(&device, vec![1, 3], &input_data).unwrap();
+        let in_id = input.meta.id;
+        rt.insert_tensor(input).unwrap();
+
+        let gamma_data = vec![2.0, 1.0, 0.5];
+        let gamma = Tensor::from_f32(&device, vec![3], &gamma_data).unwrap();
+        let gamma_id = gamma.meta.id;
+        rt.insert_tensor(gamma).unwrap();
+
+        let grad_data = vec![1.0, 1.0, 1.0];
+        let grad = Tensor::from_f32(&device, vec![1, 3], &grad_data).unwrap();
+        let grad_id = grad.meta.id;
+        rt.insert_tensor(grad).unwrap();
+
+        let eps: f32 = 1e-5;
+        let result_id = layer_norm_backward(&mut rt, grad_id, in_id, gamma_id, eps).unwrap();
+        rt.eval(&device, result_id).unwrap();
+        let result = rt.read_f32(result_id).unwrap();
+
+        // Manual: mean=3.0, var=2.6667, inv_std=1/sqrt(2.6667+1e-5)=0.6124
+        // xhat = [-1.2247, 0.0, 1.2247]
+        // dy_gamma = [2.0, 1.0, 0.5]
+        // sum_dy_gamma = 3.5
+        // sum_dy_gamma_xhat = 2.0*(-1.2247) + 1.0*0.0 + 0.5*1.2247 = -1.8371
+        // n=3
+        // grad[j] = inv_std * (dy_gamma[j] - 3.5/3 - xhat[j]*(-1.8371)/3)
+        let mean: f32 = 3.0;
+        let var: f32 = (4.0 + 0.0 + 4.0) / 3.0;
+        let inv_std = 1.0 / (var + eps).sqrt();
+        let xhat: Vec<f32> = input_data.iter().map(|&x| (x - mean) * inv_std).collect();
+        let dy_gamma: Vec<f32> = grad_data.iter().zip(gamma_data.iter()).map(|(&g, &gm)| g * gm).collect();
+        let sum_dy_gamma: f32 = dy_gamma.iter().sum();
+        let sum_dy_gamma_xhat: f32 = dy_gamma.iter().zip(xhat.iter()).map(|(&d, &x)| d * x).sum();
+        let n = 3.0f32;
+        let expected: Vec<f32> = (0..3).map(|j| {
+            inv_std * (dy_gamma[j] - sum_dy_gamma / n - xhat[j] * sum_dy_gamma_xhat / n)
+        }).collect();
+
+        for j in 0..3 {
+            assert!((result[j] - expected[j]).abs() < 1e-4, "j={}: got {}, expected {}", j, result[j], expected[j]);
+        }
+    }
+
+    #[test]
+    fn test_layer_norm_backward_shape_validation() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        let a = Tensor::from_f32(&device, vec![2, 4], &[1.0; 8]).unwrap();
+        let b = Tensor::from_f32(&device, vec![3, 4], &[1.0; 12]).unwrap();
+        let gamma = Tensor::from_f32(&device, vec![4], &[1.0; 4]).unwrap();
+        let a_id = a.meta.id;
+        let b_id = b.meta.id;
+        let gamma_id = gamma.meta.id;
+        rt.insert_tensor(a).unwrap();
+        rt.insert_tensor(b).unwrap();
+        rt.insert_tensor(gamma).unwrap();
+
+        // Shape mismatch
+        assert!(layer_norm_backward(&mut rt, a_id, b_id, gamma_id, 1e-5).is_err());
+    }
+
+    #[test]
+    fn test_layer_norm_backward_gamma_shape_validation() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        let a = Tensor::from_f32(&device, vec![2, 4], &[1.0; 8]).unwrap();
+        let wrong_gamma = Tensor::from_f32(&device, vec![3], &[1.0; 3]).unwrap();
+        let a_id = a.meta.id;
+        let gamma_id = wrong_gamma.meta.id;
+        rt.insert_tensor(a).unwrap();
+        rt.insert_tensor(wrong_gamma).unwrap();
+
+        // Need another copy of a for input
+        let b = Tensor::from_f32(&device, vec![2, 4], &[1.0; 8]).unwrap();
+        let b_id = b.meta.id;
+        rt.insert_tensor(b).unwrap();
+
+        assert!(layer_norm_backward(&mut rt, a_id, b_id, gamma_id, 1e-5).is_err());
+    }
+
+    // ── Conv2d backward tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_conv2d_backward_input_identity_kernel() {
+        // Forward: input [1,1,3,3], weight [1,1,1,1]=[[1.0]], stride=1, pad=0 -> out [1,1,3,3]
+        // Forward is just identity (1x1 conv with weight=1).
+        // Backward: grad_output [1,1,3,3], weight [1,1,1,1]=[[1.0]]
+        // grad_input should equal grad_output (1x1 kernel acts as identity in backward too)
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        let grad_data: Vec<f32> = (1..=9).map(|x| x as f32).collect();
+        let grad_output = Tensor::from_f32(&device, vec![1, 1, 3, 3], &grad_data).unwrap();
+        let weight = Tensor::from_f32(&device, vec![1, 1, 1, 1], &[1.0]).unwrap();
+        let go_id = grad_output.meta.id;
+        let w_id = weight.meta.id;
+        rt.insert_tensor(grad_output).unwrap();
+        rt.insert_tensor(weight).unwrap();
+
+        let gi_id = conv2d_backward_input(&mut rt, go_id, w_id, 3, 3, (1, 1), (0, 0)).unwrap();
+        assert_eq!(rt.shape(gi_id).unwrap(), vec![1, 1, 3, 3]);
+
+        rt.eval(&device, gi_id).unwrap();
+        let result = rt.read_f32(gi_id).unwrap();
+        assert_eq!(result.as_slice(), grad_data.as_slice());
+    }
+
+    #[test]
+    fn test_conv2d_backward_input_values() {
+        // Forward: input [1,1,3,3], weight [1,1,2,2]=[[1,0],[0,1]], stride=1, pad=0 -> out [1,1,2,2]
+        // Backward: grad_output [1,1,2,2] = [[1,0],[0,0]]
+        // grad_input[ih,iw] = sum over (oc,i,j) of grad_output[oh,ow] * weight[oc,ic,i,j]
+        //   where oh = (ih+pad-i)/stride, ow = (iw+pad-j)/stride
+        // With weight = [[1,0],[0,1]], pad=0, stride=1:
+        // grad_input[0,0] = grad_out[0,0]*w[0,0] = 1*1 = 1
+        // grad_input[0,1] = grad_out[0,0]*w[0,1] + grad_out[0,1]*w[0,0] = 1*0 + 0*1 = 0
+        // grad_input[0,2] = grad_out[0,1]*w[0,1] = 0*0 = 0
+        // grad_input[1,0] = grad_out[0,0]*w[1,0] + grad_out[1,0]*w[0,0] = 1*0 + 0*1 = 0
+        // grad_input[1,1] = grad_out[0,0]*w[1,1] + grad_out[0,1]*w[1,0] + grad_out[1,0]*w[0,1] + grad_out[1,1]*w[0,0] = 1*1 + 0*0 + 0*0 + 0*1 = 1
+        // grad_input[1,2] = grad_out[0,1]*w[1,1] + grad_out[1,1]*w[0,1] = 0*1 + 0*0 = 0
+        // grad_input[2,0] = grad_out[1,0]*w[1,0] = 0*0 = 0
+        // grad_input[2,1] = grad_out[1,0]*w[1,1] + grad_out[1,1]*w[1,0] = 0*1 + 0*0 = 0
+        // grad_input[2,2] = grad_out[1,1]*w[1,1] = 0*1 = 0
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        let grad_output = Tensor::from_f32(&device, vec![1, 1, 2, 2], &[1.0, 0.0, 0.0, 0.0]).unwrap();
+        let weight = Tensor::from_f32(&device, vec![1, 1, 2, 2], &[1.0, 0.0, 0.0, 1.0]).unwrap();
+        let go_id = grad_output.meta.id;
+        let w_id = weight.meta.id;
+        rt.insert_tensor(grad_output).unwrap();
+        rt.insert_tensor(weight).unwrap();
+
+        let gi_id = conv2d_backward_input(&mut rt, go_id, w_id, 3, 3, (1, 1), (0, 0)).unwrap();
+        rt.eval(&device, gi_id).unwrap();
+        let result = rt.read_f32(gi_id).unwrap();
+        let expected = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0];
+        for (i, (&got, &exp)) in result.iter().zip(expected.iter()).enumerate() {
+            assert!((got - exp).abs() < 1e-5, "index {}: got {} expected {}", i, got, exp);
+        }
+    }
+
+    #[test]
+    fn test_conv2d_backward_input_shape_validation() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        // grad_output must be 4D
+        let go_3d = Tensor::from_f32(&device, vec![1, 1, 2], &[1.0; 2]).unwrap();
+        let w = Tensor::from_f32(&device, vec![1, 1, 2, 2], &[1.0; 4]).unwrap();
+        let go_id = go_3d.meta.id;
+        let w_id = w.meta.id;
+        rt.insert_tensor(go_3d).unwrap();
+        rt.insert_tensor(w).unwrap();
+        assert!(conv2d_backward_input(&mut rt, go_id, w_id, 3, 3, (1, 1), (0, 0)).is_err());
+    }
+
+    // ── Embedding backward tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_embedding_backward_basic() {
+        // indices = [0, 1, 0], grad_output = [[1,2],[3,4],[5,6]], num_weights=3, embed_dim=2
+        // grad_weight[0] = grad[0] + grad[2] = [1+5, 2+6] = [6, 8]
+        // grad_weight[1] = grad[1] = [3, 4]
+        // grad_weight[2] = [0, 0]
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        let grad = Tensor::from_f32(&device, vec![3, 2], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
+        let indices = Tensor::from_i32(&device, vec![3], &[0, 1, 0]).unwrap();
+        let go_id = grad.meta.id;
+        let idx_id = indices.meta.id;
+        rt.insert_tensor(grad).unwrap();
+        rt.insert_tensor(indices).unwrap();
+
+        let gw_id = embedding_backward(&mut rt, go_id, idx_id, 3).unwrap();
+        assert_eq!(rt.shape(gw_id).unwrap(), vec![3, 2]);
+
+        rt.eval(&device, gw_id).unwrap();
+        let result = rt.read_f32(gw_id).unwrap();
+        let expected = [6.0, 8.0, 3.0, 4.0, 0.0, 0.0];
+        for (i, (&got, &exp)) in result.iter().zip(expected.iter()).enumerate() {
+            assert!((got - exp).abs() < 1e-4, "index {}: got {} expected {}", i, got, exp);
+        }
+    }
+
+    #[test]
+    fn test_embedding_backward_no_collision() {
+        // All unique indices: [0, 1, 2]
+        // grad_output = [[10,20],[30,40],[50,60]]
+        // grad_weight should just be a copy
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        let data = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0];
+        let grad = Tensor::from_f32(&device, vec![3, 2], &data).unwrap();
+        let indices = Tensor::from_i32(&device, vec![3], &[0, 1, 2]).unwrap();
+        let go_id = grad.meta.id;
+        let idx_id = indices.meta.id;
+        rt.insert_tensor(grad).unwrap();
+        rt.insert_tensor(indices).unwrap();
+
+        let gw_id = embedding_backward(&mut rt, go_id, idx_id, 3).unwrap();
+        rt.eval(&device, gw_id).unwrap();
+        let result = rt.read_f32(gw_id).unwrap();
+        for (i, (&got, &exp)) in result.iter().zip(data.iter()).enumerate() {
+            assert!((got - exp).abs() < 1e-4, "index {}: got {} expected {}", i, got, exp);
+        }
+    }
+
+    #[test]
+    fn test_embedding_backward_shape_validation() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        // Indices must be Int32
+        let grad = Tensor::from_f32(&device, vec![3, 2], &[1.0; 6]).unwrap();
+        let bad_idx = Tensor::from_f32(&device, vec![3], &[0.0, 1.0, 2.0]).unwrap();
+        let go_id = grad.meta.id;
+        let idx_id = bad_idx.meta.id;
+        rt.insert_tensor(grad).unwrap();
+        rt.insert_tensor(bad_idx).unwrap();
+        assert!(embedding_backward(&mut rt, go_id, idx_id, 3).is_err());
+    }
+
+    // ── Batch norm backward tests ────────────────────────────────────────
+
+    #[test]
+    fn test_batch_norm_backward_basic() {
+        // grad_output [1,2,3], weight [1,2], running_var [1,1], eps=1e-5
+        // inv_std_0 = 1/sqrt(1 + 1e-5) ~ 1.0
+        // inv_std_1 = 1/sqrt(1 + 1e-5) ~ 1.0
+        // grad_input = grad_output * weight * inv_std
+        // channel 0: [1,2,3] * 1.0 * 1.0 = [1,2,3]
+        // channel 1: [4,5,6] * 2.0 * 1.0 = [8,10,12]
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        let grad = Tensor::from_f32(&device, vec![1, 2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
+        let weight = Tensor::from_f32(&device, vec![2], &[1.0, 2.0]).unwrap();
+        let var = Tensor::from_f32(&device, vec![2], &[1.0, 1.0]).unwrap();
+        let go_id = grad.meta.id;
+        let w_id = weight.meta.id;
+        let v_id = var.meta.id;
+        rt.insert_tensor(grad).unwrap();
+        rt.insert_tensor(weight).unwrap();
+        rt.insert_tensor(var).unwrap();
+
+        let gi_id = batch_norm_backward(&mut rt, go_id, w_id, v_id, 1e-5).unwrap();
+        assert_eq!(rt.shape(gi_id).unwrap(), vec![1, 2, 3]);
+
+        rt.eval(&device, gi_id).unwrap();
+        let result = rt.read_f32(gi_id).unwrap();
+        let inv_std = 1.0 / (1.0_f32 + 1e-5).sqrt();
+        let expected = [
+            1.0 * 1.0 * inv_std, 2.0 * 1.0 * inv_std, 3.0 * 1.0 * inv_std,
+            4.0 * 2.0 * inv_std, 5.0 * 2.0 * inv_std, 6.0 * 2.0 * inv_std,
+        ];
+        for (i, (&got, &exp)) in result.iter().zip(expected.iter()).enumerate() {
+            assert!((got - exp).abs() < 1e-3, "index {}: got {} expected {}", i, got, exp);
+        }
+    }
+
+    #[test]
+    fn test_batch_norm_backward_shape_validation() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        // grad must be >= 2D
+        let grad_1d = Tensor::from_f32(&device, vec![3], &[1.0; 3]).unwrap();
+        let w = Tensor::from_f32(&device, vec![3], &[1.0; 3]).unwrap();
+        let v = Tensor::from_f32(&device, vec![3], &[1.0; 3]).unwrap();
+        let ids = [grad_1d.meta.id, w.meta.id, v.meta.id];
+        rt.insert_tensor(grad_1d).unwrap();
+        rt.insert_tensor(w).unwrap();
+        rt.insert_tensor(v).unwrap();
+        assert!(batch_norm_backward(&mut rt, ids[0], ids[1], ids[2], 1e-5).is_err());
+    }
+
+    #[test]
+    fn test_batch_norm_backward_zero_var() {
+        // var = 0 -> inv_std = 1/sqrt(eps)
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        let grad = Tensor::from_f32(&device, vec![1, 1, 2], &[1.0, 1.0]).unwrap();
+        let weight = Tensor::from_f32(&device, vec![1], &[1.0]).unwrap();
+        let var = Tensor::from_f32(&device, vec![1], &[0.0]).unwrap();
+        let go_id = grad.meta.id;
+        let w_id = weight.meta.id;
+        let v_id = var.meta.id;
+        rt.insert_tensor(grad).unwrap();
+        rt.insert_tensor(weight).unwrap();
+        rt.insert_tensor(var).unwrap();
+
+        let eps = 1e-5_f32;
+        let gi_id = batch_norm_backward(&mut rt, go_id, w_id, v_id, eps).unwrap();
+        rt.eval(&device, gi_id).unwrap();
+        let result = rt.read_f32(gi_id).unwrap();
+        let expected = 1.0 / eps.sqrt();
+        for &v in &result {
+            assert!((v - expected).abs() < 1.0, "got {} expected {}", v, expected);
+        }
     }
 }

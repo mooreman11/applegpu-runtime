@@ -77,6 +77,12 @@ pub enum OpKind {
     BatchNorm { eps: f32 },
     MaxPool2d { kernel_size: (usize, usize), stride: (usize, usize), padding: (usize, usize) },
     AvgPool2d { kernel_size: (usize, usize), stride: (usize, usize), padding: (usize, usize) },
+    // Backward ops
+    SoftmaxBackward,
+    LayerNormBackward { eps: f32 },
+    Conv2dBackwardInput { stride: (usize, usize), padding: (usize, usize) },
+    EmbeddingBackward,
+    BatchNormBackward { eps: f32 },
 }
 
 impl OpKind {
@@ -124,6 +130,11 @@ impl OpKind {
             OpKind::BatchNorm { .. } => "batch_norm_f32",
             OpKind::MaxPool2d { .. } => "max_pool2d_f32",
             OpKind::AvgPool2d { .. } => "avg_pool2d_f32",
+            OpKind::SoftmaxBackward => "softmax_backward_f32",
+            OpKind::LayerNormBackward { .. } => "layer_norm_backward_f32",
+            OpKind::Conv2dBackwardInput { .. } => "conv2d_backward_input_f32",
+            OpKind::EmbeddingBackward => "embedding_backward_f32",
+            OpKind::BatchNormBackward { .. } => "batch_norm_backward_f32",
         }
     }
 
@@ -263,6 +274,26 @@ impl OpKind {
 
     pub fn is_avg_pool2d(&self) -> bool {
         matches!(self, OpKind::AvgPool2d { .. })
+    }
+
+    pub fn is_softmax_backward(&self) -> bool {
+        matches!(self, OpKind::SoftmaxBackward)
+    }
+
+    pub fn is_layer_norm_backward(&self) -> bool {
+        matches!(self, OpKind::LayerNormBackward { .. })
+    }
+
+    pub fn is_conv2d_backward_input(&self) -> bool {
+        matches!(self, OpKind::Conv2dBackwardInput { .. })
+    }
+
+    pub fn is_embedding_backward(&self) -> bool {
+        matches!(self, OpKind::EmbeddingBackward)
+    }
+
+    pub fn is_batch_norm_backward(&self) -> bool {
+        matches!(self, OpKind::BatchNormBackward { .. })
     }
 }
 

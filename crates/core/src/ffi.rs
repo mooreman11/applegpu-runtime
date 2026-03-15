@@ -280,6 +280,48 @@ extern "C" {
         eps: f32,
     ) -> i32;
 
+    pub fn gpu_bridge_compute_softmax_backward(
+        compute: *mut GPUComputeHandle,
+        buf_grad_output: *const GPUBufferHandle,
+        buf_output: *const GPUBufferHandle,
+        buf_grad_input: *mut GPUBufferHandle,
+        rows: u32,
+        cols: u32,
+    ) -> i32;
+
+    pub fn gpu_bridge_compute_softmax_backward_nb(
+        compute: *mut GPUComputeHandle,
+        queue: *mut std::ffi::c_void,
+        buf_grad_output: *const GPUBufferHandle,
+        buf_output: *const GPUBufferHandle,
+        buf_grad_input: *mut GPUBufferHandle,
+        rows: u32,
+        cols: u32,
+    ) -> *mut std::ffi::c_void;
+
+    pub fn gpu_bridge_compute_layer_norm_backward(
+        compute: *mut GPUComputeHandle,
+        buf_grad_output: *const GPUBufferHandle,
+        buf_input: *const GPUBufferHandle,
+        buf_gamma: *const GPUBufferHandle,
+        buf_grad_input: *mut GPUBufferHandle,
+        rows: u32,
+        cols: u32,
+        eps: f32,
+    ) -> i32;
+
+    pub fn gpu_bridge_compute_layer_norm_backward_nb(
+        compute: *mut GPUComputeHandle,
+        queue: *mut std::ffi::c_void,
+        buf_grad_output: *const GPUBufferHandle,
+        buf_input: *const GPUBufferHandle,
+        buf_gamma: *const GPUBufferHandle,
+        buf_grad_input: *mut GPUBufferHandle,
+        rows: u32,
+        cols: u32,
+        eps: f32,
+    ) -> *mut std::ffi::c_void;
+
     pub fn gpu_bridge_compute_embedding(
         compute: *mut GPUComputeHandle,
         buf_weights: *const GPUBufferHandle,

@@ -96,6 +96,11 @@ fn op_to_discriminant(op: &OpKind) -> u32 {
         OpKind::MaxPool2d { .. } => 38,
         OpKind::AvgPool2d { .. } => 39,
         OpKind::Tanh => 40,
+        OpKind::SoftmaxBackward => 41,
+        OpKind::LayerNormBackward { .. } => 42,
+        OpKind::Conv2dBackwardInput { .. } => 43,
+        OpKind::EmbeddingBackward => 44,
+        OpKind::BatchNormBackward { .. } => 45,
     }
 }
 
@@ -241,6 +246,25 @@ fn discriminant_to_op(d: u32, r: &mut impl Read) -> io::Result<OpKind> {
             Ok(OpKind::AvgPool2d { kernel_size: (k0, k1), stride: (s0, s1), padding: (p0, p1) })
         }
         40 => Ok(OpKind::Tanh),
+        41 => Ok(OpKind::SoftmaxBackward),
+        42 => {
+            let mut eps_bytes = [0u8; 4];
+            r.read_exact(&mut eps_bytes)?;
+            Ok(OpKind::LayerNormBackward { eps: f32::from_le_bytes(eps_bytes) })
+        }
+        43 => {
+            let s0 = read_u64(r)? as usize;
+            let s1 = read_u64(r)? as usize;
+            let p0 = read_u64(r)? as usize;
+            let p1 = read_u64(r)? as usize;
+            Ok(OpKind::Conv2dBackwardInput { stride: (s0, s1), padding: (p0, p1) })
+        }
+        44 => Ok(OpKind::EmbeddingBackward),
+        45 => {
+            let mut eps_bytes = [0u8; 4];
+            r.read_exact(&mut eps_bytes)?;
+            Ok(OpKind::BatchNormBackward { eps: f32::from_le_bytes(eps_bytes) })
+        }
         _ => Err(io::Error::new(io::ErrorKind::InvalidData, format!("Unknown op type: {}", d))),
     }
 }
@@ -359,6 +383,18 @@ impl EvalRequest {
                 write_u64(&mut buf, stride.1 as u64).unwrap();
                 write_u64(&mut buf, padding.0 as u64).unwrap();
                 write_u64(&mut buf, padding.1 as u64).unwrap();
+            }
+            if let OpKind::LayerNormBackward { eps } = node.op {
+                buf.write_all(&eps.to_le_bytes()).unwrap();
+            }
+            if let OpKind::Conv2dBackwardInput { stride, padding } = node.op {
+                write_u64(&mut buf, stride.0 as u64).unwrap();
+                write_u64(&mut buf, stride.1 as u64).unwrap();
+                write_u64(&mut buf, padding.0 as u64).unwrap();
+                write_u64(&mut buf, padding.1 as u64).unwrap();
+            }
+            if let OpKind::BatchNormBackward { eps } = node.op {
+                buf.write_all(&eps.to_le_bytes()).unwrap();
             }
         }
 

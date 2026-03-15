@@ -217,6 +217,103 @@ impl LazyRuntime {
             return Ok(out);
         }
 
+        if node.op.is_softmax_backward() {
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+            let grad_output = self.get_tensor(node.inputs[0])?;
+            let output = self.get_tensor(node.inputs[1])?;
+            let dims = grad_output.meta.layout.shape.dims();
+            let cols = dims[dims.len() - 1];
+            let total_rows: usize = dims[..dims.len() - 1].iter().product::<usize>().max(1);
+            REGISTRY.dispatch_softmax_backward_typed(device, dtype, &grad_output.buffer, &output.buffer, &out.buffer, total_rows, cols)?;
+            return Ok(out);
+        }
+
+        if node.op.is_layer_norm_backward() {
+            let eps = match node.op { crate::graph::OpKind::LayerNormBackward { eps } => eps, _ => unreachable!() };
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+            let grad_output = self.get_tensor(node.inputs[0])?;
+            let input = self.get_tensor(node.inputs[1])?;
+            let gamma = self.get_tensor(node.inputs[2])?;
+            let dims = grad_output.meta.layout.shape.dims();
+            let cols = dims[dims.len() - 1];
+            let total_rows: usize = dims[..dims.len() - 1].iter().product::<usize>().max(1);
+            REGISTRY.dispatch_layer_norm_backward_typed(device, dtype, &grad_output.buffer, &input.buffer, &gamma.buffer, &out.buffer, total_rows, cols, eps)?;
+            return Ok(out);
+        }
+
+        if let crate::graph::OpKind::Conv2dBackwardInput { stride, padding } = node.op {
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+            let grad_output = self.get_tensor(node.inputs[0])?;
+            let weight = self.get_tensor(node.inputs[1])?;
+            let go_dims = grad_output.meta.layout.shape.dims();
+            let w_dims = weight.meta.layout.shape.dims();
+            let out_dims = node.out_shape.dims();
+            let uint_params: Vec<u32> = vec![
+                go_dims[0] as u32,   // batch
+                w_dims[1] as u32,    // in_channels
+                go_dims[1] as u32,   // out_channels
+                out_dims[2] as u32,  // in_h
+                out_dims[3] as u32,  // in_w
+                go_dims[2] as u32,   // out_h
+                go_dims[3] as u32,   // out_w
+                w_dims[2] as u32,    // kh
+                w_dims[3] as u32,    // kw
+                stride.0 as u32,     // stride_h
+                stride.1 as u32,     // stride_w
+                padding.0 as u32,    // pad_h
+                padding.1 as u32,    // pad_w
+            ];
+            let grid_y = out_dims[2] as u32 * w_dims[1] as u32;
+            REGISTRY.dispatch_cnn_3d(
+                device, crate::compute::CONV2D_BACKWARD_INPUT_KERNEL_SOURCE, "conv2d_backward_input_f32",
+                &[&grad_output.buffer, &weight.buffer], &out.buffer,
+                &uint_params, &[], (out_dims[3] as u32, grid_y, go_dims[0] as u32),
+            )?;
+            return Ok(out);
+        }
+
+        if node.op.is_embedding_backward() {
+            let out_buf = self.pool.acquire(device, out_size)?;
+            // Zero the output buffer (embedding backward accumulates into zeroed buffer)
+            out_buf.zero()?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+            let grad_output = self.get_tensor(node.inputs[0])?;
+            let indices = self.get_tensor(node.inputs[1])?;
+            let seq_len = indices.meta.layout.shape.numel();
+            let embed_dim = node.out_shape.dims()[1];
+            let uint_params: Vec<u32> = vec![seq_len as u32, embed_dim as u32];
+            REGISTRY.dispatch_cnn_3d(
+                device, crate::compute::EMBEDDING_BACKWARD_KERNEL_SOURCE, "embedding_backward_f32",
+                &[&grad_output.buffer, &indices.buffer], &out.buffer,
+                &uint_params, &[], (embed_dim as u32, seq_len as u32, 1),
+            )?;
+            return Ok(out);
+        }
+
+        if let crate::graph::OpKind::BatchNormBackward { eps } = node.op {
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+            let grad_output = self.get_tensor(node.inputs[0])?;
+            let weight = self.get_tensor(node.inputs[1])?;
+            let running_var = self.get_tensor(node.inputs[2])?;
+            let in_dims = grad_output.meta.layout.shape.dims();
+            let batch = in_dims[0];
+            let channels = in_dims[1];
+            let spatial: usize = in_dims[2..].iter().product();
+            let uint_params: Vec<u32> = vec![batch as u32, channels as u32, spatial as u32];
+            let float_params: Vec<f32> = vec![eps];
+            REGISTRY.dispatch_cnn_3d(
+                device, crate::compute::BATCH_NORM_BACKWARD_KERNEL_SOURCE, "batch_norm_backward_f32",
+                &[&grad_output.buffer, &weight.buffer, &running_var.buffer],
+                &out.buffer, &uint_params, &float_params,
+                (spatial as u32, channels as u32, batch as u32),
+            )?;
+            return Ok(out);
+        }
+
         if let crate::graph::OpKind::Transpose { dim0, dim1 } = node.op {
             let out_buf = self.pool.acquire(device, out_size)?;
             let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
@@ -795,6 +892,81 @@ impl LazyRuntime {
             let cols = dims[dims.len() - 1];
             let total_rows: usize = dims[..dims.len() - 1].iter().product::<usize>().max(1);
             return REGISTRY.dispatch_softmax_typed_nb(device, dtype, queue, &input.buffer, &out.buffer, total_rows, cols);
+        }
+
+        if node.op.is_softmax_backward() {
+            let grad_output = self.get_tensor(node.inputs[0])?;
+            let output = self.get_tensor(node.inputs[1])?;
+            let dims = grad_output.meta.layout.shape.dims();
+            let cols = dims[dims.len() - 1];
+            let total_rows: usize = dims[..dims.len() - 1].iter().product::<usize>().max(1);
+            return REGISTRY.dispatch_softmax_backward_typed_nb(device, dtype, queue, &grad_output.buffer, &output.buffer, &out.buffer, total_rows, cols);
+        }
+
+        if node.op.is_layer_norm_backward() {
+            let eps = match node.op { crate::graph::OpKind::LayerNormBackward { eps } => eps, _ => unreachable!() };
+            let grad_output = self.get_tensor(node.inputs[0])?;
+            let input = self.get_tensor(node.inputs[1])?;
+            let gamma = self.get_tensor(node.inputs[2])?;
+            let dims = grad_output.meta.layout.shape.dims();
+            let cols = dims[dims.len() - 1];
+            let total_rows: usize = dims[..dims.len() - 1].iter().product::<usize>().max(1);
+            return REGISTRY.dispatch_layer_norm_backward_typed_nb(device, dtype, queue, &grad_output.buffer, &input.buffer, &gamma.buffer, &out.buffer, total_rows, cols, eps);
+        }
+
+        if let crate::graph::OpKind::Conv2dBackwardInput { stride, padding } = node.op {
+            let grad_output = self.get_tensor(node.inputs[0])?;
+            let weight = self.get_tensor(node.inputs[1])?;
+            let go_dims = grad_output.meta.layout.shape.dims();
+            let w_dims = weight.meta.layout.shape.dims();
+            let out_dims = node.out_shape.dims();
+            let uint_params: Vec<u32> = vec![
+                go_dims[0] as u32, w_dims[1] as u32, go_dims[1] as u32,
+                out_dims[2] as u32, out_dims[3] as u32,
+                go_dims[2] as u32, go_dims[3] as u32,
+                w_dims[2] as u32, w_dims[3] as u32,
+                stride.0 as u32, stride.1 as u32,
+                padding.0 as u32, padding.1 as u32,
+            ];
+            let grid_y = out_dims[2] as u32 * w_dims[1] as u32;
+            return REGISTRY.dispatch_cnn_3d_nb(
+                device, crate::compute::CONV2D_BACKWARD_INPUT_KERNEL_SOURCE, "conv2d_backward_input_f32", queue,
+                &[&grad_output.buffer, &weight.buffer], &out.buffer,
+                &uint_params, &[], (out_dims[3] as u32, grid_y, go_dims[0] as u32),
+            );
+        }
+
+        if node.op.is_embedding_backward() {
+            // Zero the output buffer (embedding backward accumulates into zeroed buffer)
+            out.buffer.zero()?;
+            let grad_output = self.get_tensor(node.inputs[0])?;
+            let indices = self.get_tensor(node.inputs[1])?;
+            let seq_len = indices.meta.layout.shape.numel();
+            let embed_dim = node.out_shape.dims()[1];
+            let uint_params: Vec<u32> = vec![seq_len as u32, embed_dim as u32];
+            return REGISTRY.dispatch_cnn_3d_nb(
+                device, crate::compute::EMBEDDING_BACKWARD_KERNEL_SOURCE, "embedding_backward_f32", queue,
+                &[&grad_output.buffer, &indices.buffer], &out.buffer,
+                &uint_params, &[], (embed_dim as u32, seq_len as u32, 1),
+            );
+        }
+
+        if let crate::graph::OpKind::BatchNormBackward { eps } = node.op {
+            let grad_output = self.get_tensor(node.inputs[0])?;
+            let weight = self.get_tensor(node.inputs[1])?;
+            let running_var = self.get_tensor(node.inputs[2])?;
+            let in_dims = grad_output.meta.layout.shape.dims();
+            let batch = in_dims[0];
+            let channels = in_dims[1];
+            let spatial: usize = in_dims[2..].iter().product();
+            let uint_params: Vec<u32> = vec![batch as u32, channels as u32, spatial as u32];
+            let float_params: Vec<f32> = vec![eps];
+            return REGISTRY.dispatch_cnn_3d_nb(
+                device, crate::compute::BATCH_NORM_BACKWARD_KERNEL_SOURCE, "batch_norm_backward_f32", queue,
+                &[&grad_output.buffer, &weight.buffer, &running_var.buffer],
+                &out.buffer, &uint_params, &float_params,
+                (spatial as u32, channels as u32, batch as u32),
+            );
         }
 
         if let crate::graph::OpKind::Transpose { dim0, dim1 } = node.op {

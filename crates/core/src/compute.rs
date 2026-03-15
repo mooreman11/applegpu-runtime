@@ -681,6 +681,157 @@ kernel void layer_norm_f32(
 }
 "#;
 
+const SOFTMAX_BACKWARD_KERNEL_SOURCE: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void softmax_backward_f32(
+    device const float* grad_output [[buffer(0)]],
+    device const float* output [[buffer(1)]],
+    device float* grad_input [[buffer(2)]],
+    constant uint& total_rows [[buffer(3)]],
+    constant uint& cols [[buffer(4)]],
+    uint row [[thread_position_in_grid]]
+) {
+    if (row >= total_rows) return;
+    uint offset = row * cols;
+
+    // Compute dot product: sum(grad_output * output) for this row
+    float dot = 0.0f;
+    for (uint j = 0; j < cols; j++) {
+        dot += grad_output[offset + j] * output[offset + j];
+    }
+
+    // grad_input = output * (grad_output - dot)
+    for (uint j = 0; j < cols; j++) {
+        grad_input[offset + j] = output[offset + j] * (grad_output[offset + j] - dot);
+    }
+}
+"#;
+
+const SOFTMAX_BACKWARD_KERNEL_SOURCE_F16: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void softmax_backward_f16(
+    device const half* grad_output [[buffer(0)]],
+    device const half* output [[buffer(1)]],
+    device half* grad_input [[buffer(2)]],
+    constant uint& total_rows [[buffer(3)]],
+    constant uint& cols [[buffer(4)]],
+    uint row [[thread_position_in_grid]]
+) {
+    if (row >= total_rows) return;
+    uint offset = row * cols;
+
+    float dot = 0.0f;
+    for (uint j = 0; j < cols; j++) {
+        dot += float(grad_output[offset + j]) * float(output[offset + j]);
+    }
+
+    for (uint j = 0; j < cols; j++) {
+        grad_input[offset + j] = half(float(output[offset + j]) * (float(grad_output[offset + j]) - dot));
+    }
+}
+"#;
+
+const LAYER_NORM_BACKWARD_KERNEL_SOURCE: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void layer_norm_backward_f32(
+    device const float* grad_output [[buffer(0)]],
+    device const float* input [[buffer(1)]],
+    device const float* gamma [[buffer(2)]],
+    device float* grad_input [[buffer(3)]],
+    constant uint& total_rows [[buffer(4)]],
+    constant uint& cols [[buffer(5)]],
+    constant float& eps [[buffer(6)]],
+    uint row [[thread_position_in_grid]]
+) {
+    if (row >= total_rows) return;
+    uint offset = row * cols;
+
+    // Recompute mean and variance for this row
+    float mean = 0.0f;
+    for (uint j = 0; j < cols; j++) mean += input[offset + j];
+    mean /= float(cols);
+
+    float var = 0.0f;
+    for (uint j = 0; j < cols; j++) {
+        float diff = input[offset + j] - mean;
+        var += diff * diff;
+    }
+    var /= float(cols);
+    float inv_std = 1.0f / sqrt(var + eps);
+
+    // Compute intermediate sums
+    float sum_dy_gamma = 0.0f;
+    float sum_dy_gamma_xhat = 0.0f;
+    for (uint j = 0; j < cols; j++) {
+        float xhat = (input[offset + j] - mean) * inv_std;
+        float dy_gamma = grad_output[offset + j] * gamma[j];
+        sum_dy_gamma += dy_gamma;
+        sum_dy_gamma_xhat += dy_gamma * xhat;
+    }
+
+    // Compute grad_input for this row
+    float n = float(cols);
+    for (uint j = 0; j < cols; j++) {
+        float xhat = (input[offset + j] - mean) * inv_std;
+        float dy_gamma = grad_output[offset + j] * gamma[j];
+        grad_input[offset + j] = inv_std * (dy_gamma - sum_dy_gamma / n - xhat * sum_dy_gamma_xhat / n);
+    }
+}
+"#;
+
+const LAYER_NORM_BACKWARD_KERNEL_SOURCE_F16: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void layer_norm_backward_f16(
+    device const half* grad_output [[buffer(0)]],
+    device const half* input [[buffer(1)]],
+    device const half* gamma [[buffer(2)]],
+    device half* grad_input [[buffer(3)]],
+    constant uint& total_rows [[buffer(4)]],
+    constant uint& cols [[buffer(5)]],
+    constant float& eps [[buffer(6)]],
+    uint row [[thread_position_in_grid]]
+) {
+    if (row >= total_rows) return;
+    uint offset = row * cols;
+
+    float mean = 0.0f;
+    for (uint j = 0; j < cols; j++) mean += float(input[offset + j]);
+    mean /= float(cols);
+
+    float var = 0.0f;
+    for (uint j = 0; j < cols; j++) {
+        float diff = float(input[offset + j]) - mean;
+        var += diff * diff;
+    }
+    var /= float(cols);
+    float inv_std = 1.0f / sqrt(var + eps);
+
+    float sum_dy_gamma = 0.0f;
+    float sum_dy_gamma_xhat = 0.0f;
+    for (uint j = 0; j < cols; j++) {
+        float xhat = (float(input[offset + j]) - mean) * inv_std;
+        float dy_gamma = float(grad_output[offset + j]) * float(gamma[j]);
+        sum_dy_gamma += dy_gamma;
+        sum_dy_gamma_xhat += dy_gamma * xhat;
+    }
+
+    float n = float(cols);
+    for (uint j = 0; j < cols; j++) {
+        float xhat = (float(input[offset + j]) - mean) * inv_std;
+        float dy_gamma = float(grad_output[offset + j]) * float(gamma[j]);
+        grad_input[offset + j] = half(inv_std * (dy_gamma - sum_dy_gamma / n - xhat * sum_dy_gamma_xhat / n));
+    }
+}
+"#;
+
 const EMBEDDING_KERNEL_SOURCE: &str = r#"
 #include <metal_stdlib>
 using namespace metal;
@@ -1401,6 +1552,134 @@ kernel void batch_norm_f32(
 }
 "#;
 
+/// Conv2d backward input MSL kernel (transposed convolution).
+/// Buffer layout: grad_output(0), weight(1), grad_input(2),
+/// then uint params: batch(3), in_channels(4), out_channels(5), in_h(6), in_w(7),
+/// out_h(8), out_w(9), kh(10), kw(11), stride_h(12), stride_w(13), pad_h(14), pad_w(15).
+pub(crate) const CONV2D_BACKWARD_INPUT_KERNEL_SOURCE: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void conv2d_backward_input_f32(
+    device const float* grad_output [[buffer(0)]],
+    device const float* weight [[buffer(1)]],
+    device float* grad_input [[buffer(2)]],
+    constant uint& batch [[buffer(3)]],
+    constant uint& in_channels [[buffer(4)]],
+    constant uint& out_channels [[buffer(5)]],
+    constant uint& in_h [[buffer(6)]],
+    constant uint& in_w [[buffer(7)]],
+    constant uint& out_h [[buffer(8)]],
+    constant uint& out_w [[buffer(9)]],
+    constant uint& kh [[buffer(10)]],
+    constant uint& kw [[buffer(11)]],
+    constant uint& stride_h [[buffer(12)]],
+    constant uint& stride_w [[buffer(13)]],
+    constant uint& pad_h [[buffer(14)]],
+    constant uint& pad_w [[buffer(15)]],
+    uint3 gid [[thread_position_in_grid]]
+) {
+    uint iw = gid.x;
+    uint combined = gid.y;
+    uint b = gid.z;
+    uint ic = combined % in_channels;
+    uint ih = combined / in_channels;
+    if (iw >= in_w || ih >= in_h || b >= batch) return;
+
+    float sum = 0.0f;
+    for (uint oc = 0; oc < out_channels; oc++) {
+        for (uint i = 0; i < kh; i++) {
+            for (uint j = 0; j < kw; j++) {
+                int oh_candidate = int(ih + pad_h) - int(i);
+                int ow_candidate = int(iw + pad_w) - int(j);
+                if (oh_candidate >= 0 && oh_candidate % int(stride_h) == 0 &&
+                    ow_candidate >= 0 && ow_candidate % int(stride_w) == 0) {
+                    uint oh = uint(oh_candidate) / stride_h;
+                    uint ow = uint(ow_candidate) / stride_w;
+                    if (oh < out_h && ow < out_w) {
+                        sum += grad_output[b * out_channels * out_h * out_w + oc * out_h * out_w + oh * out_w + ow]
+                             * weight[oc * in_channels * kh * kw + ic * kh * kw + i * kw + j];
+                    }
+                }
+            }
+        }
+    }
+    grad_input[b * in_channels * in_h * in_w + ic * in_h * in_w + ih * in_w + iw] = sum;
+}
+"#;
+
+/// Embedding backward MSL kernel (atomic accumulation).
+/// Buffer layout: grad_output(0), indices(1), grad_weight(2),
+/// then uint params: seq_len(3), embed_dim(4).
+/// NOTE: grad_weight buffer must be pre-zeroed before dispatch.
+pub(crate) const EMBEDDING_BACKWARD_KERNEL_SOURCE: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+// Fallback for devices without native atomic float: use compare-and-swap loop.
+// This works on all Metal GPUs.
+inline void atomic_add_float(device float* addr, float val) {
+    float expected = *addr;
+    while (true) {
+        float desired = expected + val;
+        // atomic_compare_exchange_weak on uint, reinterpreted
+        device atomic_uint* addr_uint = (device atomic_uint*)addr;
+        uint expected_uint = as_type<uint>(expected);
+        uint desired_uint = as_type<uint>(desired);
+        if (atomic_compare_exchange_weak_explicit(addr_uint, &expected_uint, desired_uint,
+                memory_order_relaxed, memory_order_relaxed)) {
+            break;
+        }
+        expected = as_type<float>(expected_uint);
+    }
+}
+
+kernel void embedding_backward_f32(
+    device const float* grad_output [[buffer(0)]],
+    device const int* indices [[buffer(1)]],
+    device float* grad_weight [[buffer(2)]],
+    constant uint& seq_len [[buffer(3)]],
+    constant uint& embed_dim [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint j = gid.x;  // embedding dimension
+    uint i = gid.y;  // sequence position
+    if (i >= seq_len || j >= embed_dim) return;
+
+    int idx = indices[i];
+    atomic_add_float(&grad_weight[idx * embed_dim + j], grad_output[i * embed_dim + j]);
+}
+"#;
+
+/// Batch norm backward (inference mode) MSL kernel.
+/// grad_input = grad_output * weight / sqrt(running_var + eps)
+/// Buffer layout: grad_output(0), weight(1), running_var(2), grad_input(3),
+/// then uint params: batch(4), channels(5), spatial(6), then float param: eps(7).
+pub(crate) const BATCH_NORM_BACKWARD_KERNEL_SOURCE: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void batch_norm_backward_f32(
+    device const float* grad_output [[buffer(0)]],
+    device const float* weight [[buffer(1)]],
+    device const float* running_var [[buffer(2)]],
+    device float* grad_input [[buffer(3)]],
+    constant uint& batch [[buffer(4)]],
+    constant uint& channels [[buffer(5)]],
+    constant uint& spatial [[buffer(6)]],
+    constant float& eps [[buffer(7)]],
+    uint3 gid [[thread_position_in_grid]]
+) {
+    uint s = gid.x;
+    uint c = gid.y;
+    uint b = gid.z;
+    if (s >= spatial || c >= channels || b >= batch) return;
+    uint idx = b * channels * spatial + c * spatial + s;
+    float inv_std = 1.0f / sqrt(running_var[c] + eps);
+    grad_input[idx] = grad_output[idx] * weight[c] * inv_std;
+}
+"#;
+
 /// MaxPool2d MSL kernel. Buffer layout: input(0), output(1),
 /// then uint params: batch(2), channels(3), in_h(4), in_w(5), out_h(6), out_w(7),
 /// kh(8), kw(9), stride_h(10), stride_w(11), pad_h(12), pad_w(13).
@@ -1790,6 +2069,106 @@ impl ComputePipeline {
             )
         };
         if result == 0 { Ok(()) } else { Err(GpuError::ComputeFailed("LayerNorm dispatch failed".to_string())) }
+    }
+
+    /// Dispatch softmax backward: grad_input = output * (grad_output - sum(grad_output * output)).
+    pub fn dispatch_softmax_backward(
+        &self,
+        buf_grad_output: &Buffer,
+        buf_output: &Buffer,
+        buf_grad_input: &Buffer,
+        rows: usize,
+        cols: usize,
+    ) -> Result<()> {
+        let result = unsafe {
+            ffi::gpu_bridge_compute_softmax_backward(
+                self.handle,
+                buf_grad_output.raw_handle() as *const _,
+                buf_output.raw_handle() as *const _,
+                buf_grad_input.raw_handle(),
+                rows as u32,
+                cols as u32,
+            )
+        };
+        if result == 0 { Ok(()) } else { Err(GpuError::ComputeFailed("SoftmaxBackward dispatch failed".to_string())) }
+    }
+
+    /// Non-blocking softmax backward. Returns command buffer handle.
+    pub fn dispatch_softmax_backward_nb(
+        &self,
+        queue: *mut std::ffi::c_void,
+        buf_grad_output: &Buffer,
+        buf_output: &Buffer,
+        buf_grad_input: &Buffer,
+        rows: usize,
+        cols: usize,
+    ) -> Result<*mut std::ffi::c_void> {
+        let cb = unsafe {
+            ffi::gpu_bridge_compute_softmax_backward_nb(
+                self.handle,
+                queue,
+                buf_grad_output.raw_handle() as *const _,
+                buf_output.raw_handle() as *const _,
+                buf_grad_input.raw_handle(),
+                rows as u32,
+                cols as u32,
+            )
+        };
+        if cb.is_null() { Err(GpuError::ComputeFailed("Non-blocking softmax_backward dispatch failed".to_string())) } else { Ok(cb) }
+    }
+
+    /// Dispatch layer norm backward: computes grad_input from grad_output, input, gamma.
+    pub fn dispatch_layer_norm_backward(
+        &self,
+        buf_grad_output: &Buffer,
+        buf_input: &Buffer,
+        buf_gamma: &Buffer,
+        buf_grad_input: &Buffer,
+        rows: usize,
+        cols: usize,
+        eps: f32,
+    ) -> Result<()> {
+        let result = unsafe {
+            ffi::gpu_bridge_compute_layer_norm_backward(
+                self.handle,
+                buf_grad_output.raw_handle() as *const _,
+                buf_input.raw_handle() as *const _,
+                buf_gamma.raw_handle() as *const _,
+                buf_grad_input.raw_handle(),
+                rows as u32,
+                cols as u32,
+                eps,
+            )
+        };
+        if result == 0 { Ok(()) } else { Err(GpuError::ComputeFailed("LayerNormBackward dispatch failed".to_string())) }
+    }
+
+    /// Non-blocking layer norm backward. Returns command buffer handle.
+    pub fn dispatch_layer_norm_backward_nb(
+        &self,
+        queue: *mut std::ffi::c_void,
+        buf_grad_output: &Buffer,
+        buf_input: &Buffer,
+        buf_gamma: &Buffer,
+        buf_grad_input: &Buffer,
+        rows: usize,
+        cols: usize,
+        eps: f32,
+    ) -> Result<*mut std::ffi::c_void> {
+        let cb = unsafe {
+            ffi::gpu_bridge_compute_layer_norm_backward_nb(
+                self.handle,
+                queue,
+                buf_grad_output.raw_handle() as *const _,
+                buf_input.raw_handle() as *const _,
+                buf_gamma.raw_handle() as *const _,
+                buf_grad_input.raw_handle(),
+                rows as u32,
+                cols as u32,
+                eps,
+            )
+        };
+        if cb.is_null() { Err(GpuError::ComputeFailed("Non-blocking layer_norm_backward dispatch failed".to_string())) } else { Ok(cb) }
     }
 
     /// Dispatch embedding lookup: output[i,j] = weights[indices[i],j].
@@ -2835,6 +3214,8 @@ impl KernelRegistry {
                     "scalar_mul_f32" => SCALAR_MUL_KERNEL_SOURCE_F16,
                     "gelu_f32" => GELU_KERNEL_SOURCE_F16,
                     "layer_norm_f32" => LAYER_NORM_KERNEL_SOURCE_F16,
+                    "softmax_backward_f32" => SOFTMAX_BACKWARD_KERNEL_SOURCE_F16,
+                    "layer_norm_backward_f32" => LAYER_NORM_BACKWARD_KERNEL_SOURCE_F16,
                     "embedding_f32" => EMBEDDING_KERNEL_SOURCE_F16,
                     "slice_dim0_f32" => SLICE_DIM0_KERNEL_SOURCE_F16,
                     "slice_dim1_f32" => SLICE_DIM1_KERNEL_SOURCE_F16,
@@ -2880,6 +3261,8 @@ impl KernelRegistry {
                     "scalar_mul_f32" => SCALAR_MUL_KERNEL_SOURCE,
                     "gelu_f32" => GELU_KERNEL_SOURCE,
                     "layer_norm_f32" => LAYER_NORM_KERNEL_SOURCE,
+                    "softmax_backward_f32" => SOFTMAX_BACKWARD_KERNEL_SOURCE,
+                    "layer_norm_backward_f32" => LAYER_NORM_BACKWARD_KERNEL_SOURCE,
                     "embedding_f32" => EMBEDDING_KERNEL_SOURCE,
                     "slice_dim0_f32" => SLICE_DIM0_KERNEL_SOURCE,
                     "slice_dim1_f32" => SLICE_DIM1_KERNEL_SOURCE,
@@ -2904,6 +3287,9 @@ impl KernelRegistry {
                     "conv1d_f32" => CONV1D_KERNEL_SOURCE,
                     "conv2d_f32" => CONV2D_KERNEL_SOURCE,
                     "batch_norm_f32" => BATCH_NORM_KERNEL_SOURCE,
+                    "conv2d_backward_input_f32" => CONV2D_BACKWARD_INPUT_KERNEL_SOURCE,
+                    "embedding_backward_f32" => EMBEDDING_BACKWARD_KERNEL_SOURCE,
+                    "batch_norm_backward_f32" => BATCH_NORM_BACKWARD_KERNEL_SOURCE,
                     "max_pool2d_f32" => MAX_POOL2D_KERNEL_SOURCE,
                     "avg_pool2d_f32" => AVG_POOL2D_KERNEL_SOURCE,
                     _ => BINARY_KERNEL_SOURCE,
@@ -3286,6 +3672,26 @@ impl KernelRegistry {
         pipeline.dispatch_layer_norm(buf_input, buf_gamma, buf_beta, buf_out, rows, cols, eps)
     }
 
+    pub fn dispatch_softmax_backward_typed(
+        &self, device: &Device, dtype: DType,
+        buf_grad_output: &Buffer, buf_output: &Buffer, buf_grad_input: &Buffer,
+        rows: usize, cols: usize,
+    ) -> Result<()> {
+        let (source, func) = Self::resolve_kernel("softmax_backward_f32", dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_softmax_backward(buf_grad_output, buf_output, buf_grad_input, rows, cols)
+    }
+
+    pub fn dispatch_layer_norm_backward_typed(
+        &self, device: &Device, dtype: DType,
+        buf_grad_output: &Buffer, buf_input: &Buffer, buf_gamma: &Buffer, buf_grad_input: &Buffer,
+        rows: usize, cols: usize, eps: f32,
+    ) -> Result<()> {
+        let (source, func) = Self::resolve_kernel("layer_norm_backward_f32", dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_layer_norm_backward(buf_grad_output, buf_input, buf_gamma, buf_grad_input, rows, cols, eps)
+    }
+
     /// Dispatch embedding lookup with dtype-aware kernel selection.
     pub fn dispatch_embedding_typed(
         &self,
@@ -3488,6 +3894,26 @@ impl KernelRegistry {
         let (source, func) = Self::resolve_kernel("layer_norm_f32", dtype);
         let pipeline = self.get_or_create(device, source, &func)?;
         pipeline.dispatch_layer_norm_nb(queue, buf_input, buf_gamma, buf_beta, buf_out, rows, cols, eps)
+    }
+
+    pub fn dispatch_softmax_backward_typed_nb(
+        &self, device: &Device, dtype: DType, queue: *mut std::ffi::c_void,
+        buf_grad_output: &Buffer, buf_output: &Buffer, buf_grad_input: &Buffer,
+        rows: usize, cols: usize,
+    ) -> Result<*mut std::ffi::c_void> {
+        let (source, func) = Self::resolve_kernel("softmax_backward_f32", dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_softmax_backward_nb(queue, buf_grad_output, buf_output, buf_grad_input, rows, cols)
+    }
+
+    pub fn dispatch_layer_norm_backward_typed_nb(
+        &self, device: &Device, dtype: DType, queue: *mut std::ffi::c_void,
+        buf_grad_output: &Buffer, buf_input: &Buffer, buf_gamma: &Buffer, buf_grad_input: &Buffer,
+        rows: usize, cols: usize, eps: f32,
+    ) -> Result<*mut std::ffi::c_void> {
+        let (source, func) = Self::resolve_kernel("layer_norm_backward_f32", dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_layer_norm_backward_nb(queue, buf_grad_output, buf_input, buf_gamma, buf_grad_input, rows, cols, eps)
     }
 
     pub fn dispatch_embedding_typed_nb(

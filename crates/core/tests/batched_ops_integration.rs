@@ -253,6 +253,183 @@ fn test_batched_softmax_2d_still_works() {
     assert!((row1_sum - 1.0).abs() < 1e-5);
 }
 
+// ── General Transpose Tests ─────────────────────────────────────────────────
+
+#[test]
+fn test_transpose_dims_3d_swap_01() {
+    // [2, 3, 4] transpose(0, 1) -> [3, 2, 4]
+    let device = match get_device() { Some(d) => d, None => return };
+    let mut rt = LazyRuntime::new();
+
+    // Fill with sequential values 0..24
+    let data: Vec<f32> = (0..24).map(|x| x as f32).collect();
+    let input = Tensor::from_f32(&device, vec![2, 3, 4], &data).unwrap();
+    let input_id = input.meta.id;
+    rt.insert_tensor(input).unwrap();
+
+    let out_id = ops::transpose_dims(&mut rt, input_id, 0, 1).unwrap();
+    rt.eval(&device, out_id).unwrap();
+
+    let result = rt.read_f32(out_id).unwrap();
+    let shape = rt.shape(out_id).unwrap();
+    assert_eq!(shape, vec![3, 2, 4]);
+
+    // input[i][j][k] = i*12 + j*4 + k
+    // output[j][i][k] = input[i][j][k]
+    // output[0][0][*] = input[0][0][*] = [0,1,2,3]
+    // output[0][1][*] = input[1][0][*] = [12,13,14,15]
+    // output[1][0][*] = input[0][1][*] = [4,5,6,7]
+    // output[1][1][*] = input[1][1][*] = [16,17,18,19]
+    // output[2][0][*] = input[0][2][*] = [8,9,10,11]
+    // output[2][1][*] = input[1][2][*] = [20,21,22,23]
+    let expected: Vec<f32> = vec![
+        0.0, 1.0, 2.0, 3.0,   12.0, 13.0, 14.0, 15.0,
+        4.0, 5.0, 6.0, 7.0,   16.0, 17.0, 18.0, 19.0,
+        8.0, 9.0, 10.0, 11.0, 20.0, 21.0, 22.0, 23.0,
+    ];
+    assert_eq!(result, expected);
+}
+
+#[test]
+fn test_transpose_dims_3d_swap_02() {
+    // [2, 3, 4] transpose(0, 2) -> [4, 3, 2]
+    let device = match get_device() { Some(d) => d, None => return };
+    let mut rt = LazyRuntime::new();
+
+    let data: Vec<f32> = (0..24).map(|x| x as f32).collect();
+    let input = Tensor::from_f32(&device, vec![2, 3, 4], &data).unwrap();
+    let input_id = input.meta.id;
+    rt.insert_tensor(input).unwrap();
+
+    let out_id = ops::transpose_dims(&mut rt, input_id, 0, 2).unwrap();
+    rt.eval(&device, out_id).unwrap();
+
+    let result = rt.read_f32(out_id).unwrap();
+    let shape = rt.shape(out_id).unwrap();
+    assert_eq!(shape, vec![4, 3, 2]);
+
+    // output[k][j][i] = input[i][j][k] = i*12 + j*4 + k
+    // output[0][0][0] = input[0][0][0] = 0
+    // output[0][0][1] = input[1][0][0] = 12
+    // output[0][1][0] = input[0][1][0] = 4
+    // output[0][1][1] = input[1][1][0] = 16
+    // output[0][2][0] = input[0][2][0] = 8
+    // output[0][2][1] = input[1][2][0] = 20
+    // output[1][0][0] = input[0][0][1] = 1
+    // ...
+    let expected: Vec<f32> = vec![
+        0.0, 12.0, 4.0, 16.0, 8.0, 20.0,
+        1.0, 13.0, 5.0, 17.0, 9.0, 21.0,
+        2.0, 14.0, 6.0, 18.0, 10.0, 22.0,
+        3.0, 15.0, 7.0, 19.0, 11.0, 23.0,
+    ];
+    assert_eq!(result, expected);
+}
+
+#[test]
+fn test_transpose_dims_same_noop() {
+    // transpose(1, 1) should be a no-op (returns input_id)
+    let device = match get_device() { Some(d) => d, None => return };
+    let mut rt = LazyRuntime::new();
+
+    let data = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+    let input = Tensor::from_f32(&device, vec![2, 3], &data).unwrap();
+    let input_id = input.meta.id;
+    rt.insert_tensor(input).unwrap();
+
+    let out_id = ops::transpose_dims(&mut rt, input_id, 1, 1).unwrap();
+    // Should return the same tensor ID
+    assert_eq!(out_id, input_id);
+}
+
+#[test]
+fn test_transpose_dims_out_of_range() {
+    let device = match get_device() { Some(d) => d, None => return };
+    let mut rt = LazyRuntime::new();
+
+    let data = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+    let input = Tensor::from_f32(&device, vec![2, 3], &data).unwrap();
+    let input_id = input.meta.id;
+    rt.insert_tensor(input).unwrap();
+
+    let result = ops::transpose_dims(&mut rt, input_id, 0, 2);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_existing_transpose_unchanged() {
+    // [2, 3] transpose -> [3, 2] (backward compatibility)
+    let device = match get_device() { Some(d) => d, None => return };
+    let mut rt = LazyRuntime::new();
+
+    let data = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+    let input = Tensor::from_f32(&device, vec![2, 3], &data).unwrap();
+    let input_id = input.meta.id;
+    rt.insert_tensor(input).unwrap();
+
+    let out_id = ops::transpose(&mut rt, input_id).unwrap();
+    rt.eval(&device, out_id).unwrap();
+
+    let result = rt.read_f32(out_id).unwrap();
+    let shape = rt.shape(out_id).unwrap();
+    assert_eq!(shape, vec![3, 2]);
+    // [1,2,3; 4,5,6] -> [1,4; 2,5; 3,6]
+    assert_eq!(result, &[1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
+}
+
+#[test]
+fn test_transpose_dims_3d_last_two_uses_fast_path() {
+    // [2, 3, 4] transpose(1, 2) -> [2, 4, 3] — should use optimized batched kernel
+    let device = match get_device() { Some(d) => d, None => return };
+    let mut rt = LazyRuntime::new();
+
+    let data: Vec<f32> = (0..24).map(|x| x as f32).collect();
+    let input = Tensor::from_f32(&device, vec![2, 3, 4], &data).unwrap();
+    let input_id = input.meta.id;
+    rt.insert_tensor(input).unwrap();
+
+    let out_id = ops::transpose_dims(&mut rt, input_id, 1, 2).unwrap();
+    rt.eval(&device, out_id).unwrap();
+
+    let result = rt.read_f32(out_id).unwrap();
+    let shape = rt.shape(out_id).unwrap();
+    assert_eq!(shape, vec![2, 4, 3]);
+
+    // Batch 0: [0,1,2,3; 4,5,6,7; 8,9,10,11] transposed = [0,4,8; 1,5,9; 2,6,10; 3,7,11]
+    assert_eq!(&result[0..3], &[0.0, 4.0, 8.0]);
+    assert_eq!(&result[3..6], &[1.0, 5.0, 9.0]);
+    assert_eq!(&result[6..9], &[2.0, 6.0, 10.0]);
+    assert_eq!(&result[9..12], &[3.0, 7.0, 11.0]);
+}
+
+#[test]
+fn test_transpose_dims_4d_swap_12() {
+    // [2, 3, 4, 5] transpose(1, 2) -> [2, 4, 3, 5]
+    let device = match get_device() { Some(d) => d, None => return };
+    let mut rt = LazyRuntime::new();
+
+    let numel = 2 * 3 * 4 * 5;
+    let data: Vec<f32> = (0..numel).map(|x| x as f32).collect();
+    let input = Tensor::from_f32(&device, vec![2, 3, 4, 5], &data).unwrap();
+    let input_id = input.meta.id;
+    rt.insert_tensor(input).unwrap();
+
+    let out_id = ops::transpose_dims(&mut rt, input_id, 1, 2).unwrap();
+    rt.eval(&device, out_id).unwrap();
+
+    let result = rt.read_f32(out_id).unwrap();
+    let shape = rt.shape(out_id).unwrap();
+    assert_eq!(shape, vec![2, 4, 3, 5]);
+
+    // Verify a few elements: output[b][k][j][l] = input[b][j][k][l]
+    // input[0][0][0][0] = 0, output[0][0][0][0] = 0
+    assert_eq!(result[0], 0.0);
+    // input[0][1][0][0] = 20, output[0][0][1][0] = 20
+    assert_eq!(result[5], 20.0);
+    // input[0][0][1][0] = 5, output[0][1][0][0] = 5
+    assert_eq!(result[15], 5.0);
+}
+
 // ── Batched Softmax Causal Tests ────────────────────────────────────────────
 
 #[test]

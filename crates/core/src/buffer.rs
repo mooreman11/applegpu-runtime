@@ -76,6 +76,16 @@ impl Buffer {
         std::slice::from_raw_parts(self.contents() as *const T, count)
     }
 
+    /// Zero all bytes in the buffer (shared memory, so this is a CPU memset).
+    pub fn zero(&self) -> Result<()> {
+        let ptr = self.contents();
+        if ptr.is_null() {
+            return Err(GpuError::BufferAllocationFailed(0));
+        }
+        unsafe { std::ptr::write_bytes(ptr, 0, self.len) };
+        Ok(())
+    }
+
     /// Get the raw FFI handle. Used internally by compute module.
     pub(crate) fn raw_handle(&self) -> *mut ffi::GPUBufferHandle {
         self.handle
