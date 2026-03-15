@@ -137,6 +137,19 @@ def _op_add(a, b, alpha=1):
     return _wrap(gpu.add(_unwrap(a), b_gpu))
 
 
+@register_op(torch.ops.aten.add_.Tensor)
+def _op_add_inplace(a, b, alpha=1):
+    """In-place add: a += alpha * b."""
+    b_gpu = _unwrap_scalar(b)
+    if alpha != 1:
+        b_gpu = gpu.scalar_mul(b_gpu, float(alpha))
+    result_gpu = gpu.add(_unwrap(a), b_gpu)
+    if isinstance(a, ApplegpuTensor):
+        _gpu_tensor_registry[a.data_ptr()] = result_gpu
+        a._gpu_tensor = result_gpu
+    return _wrap(result_gpu)
+
+
 @register_op(torch.ops.aten.sub.Tensor)
 def _op_sub(a, b, alpha=1):
     b_gpu = _unwrap_scalar(b)
@@ -170,6 +183,17 @@ def _op_neg(a):
 @register_op(torch.ops.aten.relu.default)
 def _op_relu(a):
     return _wrap(gpu.relu(_unwrap(a)))
+
+
+@register_op(torch.ops.aten.relu_.default)
+def _op_relu_inplace(a):
+    """In-place relu: return new tensor (we don't mutate GPU buffers)."""
+    result = _wrap(gpu.relu(_unwrap(a)))
+    # Update the source tensor's registry entry so it reflects the new data
+    if isinstance(a, ApplegpuTensor):
+        _gpu_tensor_registry[a.data_ptr()] = result._gpu
+        a._gpu_tensor = result._gpu
+    return result
 
 
 @register_op(torch.ops.aten.gelu.default)
@@ -303,16 +327,46 @@ def _op_sum(a, dim, keepdim=False, dtype=None):
 
 @register_op(torch.ops.aten.mean.dim)
 def _op_mean(a, dim, keepdim=False, dtype=None):
-    ndim = len(_unwrap(a).shape)
-    dims = [d if d >= 0 else d + ndim for d in dim]
-    if dims != [ndim - 1]:
-        return NotImplemented
-    result = _wrap(gpu.mean(_unwrap(a)))
-    if keepdim:
-        new_shape = list(_unwrap(a).shape)
-        new_shape[-1] = 1
-        result = _wrap(gpu.reshape(_unwrap(result), new_shape))
-    return result
+    gpu_a = _unwrap(a)
+    shape = list(gpu_a.shape)
+    ndim = len(shape)
+    dims = sorted([d if d >= 0 else d + ndim for d in dim])
+
+    if dims == [ndim - 1]:
+        # Single last-dim reduction -- use native mean
+        result = _wrap(gpu.mean(gpu_a))
+        if keepdim:
+            new_shape = shape[:]
+            new_shape[-1] = 1
+            result = _wrap(gpu.reshape(_unwrap(result), new_shape))
+        return result
+
+    # Multi-dim reduction: reduce one dim at a time from highest to lowest
+    # to avoid shape index invalidation
+    current = gpu_a
+    current_shape = shape[:]
+    for d in reversed(dims):
+        # Reshape to merge the target dim into the last dim, reduce, then reshape back
+        # Simpler: use avg_pool2d for spatial dims, or fall back to CPU for complex cases
+        pass
+
+    # For now, handle the common case: reducing last two spatial dims [H, W]
+    # which is what adaptive_avg_pool2d(1) produces via mean
+    if len(dims) == 2 and dims[-1] == ndim - 1 and dims[-2] == ndim - 2:
+        # Reduce last dim first, then second-to-last
+        result = gpu.mean(current)  # reduces last dim
+        result_shape = current_shape[:-1]
+        result = gpu.reshape(result, result_shape)
+        result = gpu.mean(result)   # reduces what was second-to-last (now last)
+        result_shape = result_shape[:-1]
+        result = gpu.reshape(result, result_shape)
+        if keepdim:
+            for d in dims:
+                result_shape.insert(d, 1)
+            result = gpu.reshape(result, result_shape)
+        return _wrap(result)
+
+    return NotImplemented
 
 
 # ============================================================
@@ -610,6 +664,18 @@ def _batch_norm(input, weight, bias, running_mean, running_var, momentum, eps):
     return result, torch.tensor([]), torch.tensor([])
 
 
+@register_op(torch.ops.aten.native_batch_norm.default)
+def _native_batch_norm(input, weight, bias, running_mean, running_var, training, momentum, eps):
+    """native_batch_norm for eval mode (training=False)."""
+    if training:
+        return NotImplemented
+    result = _wrap(gpu.batch_norm(_unwrap(input), _unwrap(running_mean), _unwrap(running_var), _unwrap(weight), _unwrap(bias), eps))
+    # Returns (output, save_mean, save_invstd)
+    gpu_input = _unwrap(input)
+    n_channels = gpu_input.shape[1]
+    return result, torch.zeros(n_channels), torch.zeros(n_channels)
+
+
 @register_op(torch.ops.aten.max_pool2d_with_indices.default)
 def _max_pool2d(input, kernel_size, stride=None, padding=(0, 0), dilation=(1, 1), ceil_mode=False):
     if stride is None or len(stride) == 0:
@@ -630,6 +696,39 @@ def _avg_pool2d(input, kernel_size, stride=None, padding=(0, 0), ceil_mode=False
     sh, sw = stride[0], stride[1] if len(stride) > 1 else stride[0]
     ph, pw = padding[0], padding[1] if len(padding) > 1 else padding[0]
     return _wrap(gpu.avg_pool2d(_unwrap(input), kh, kw, sh, sw, ph, pw))
+
+
+@register_op(torch.ops.aten.adaptive_avg_pool2d.default)
+def _adaptive_avg_pool2d(input, output_size):
+    """Adaptive average pooling: compute kernel_size from input/output sizes."""
+    gpu_input = _unwrap(input)
+    in_h, in_w = gpu_input.shape[-2], gpu_input.shape[-1]
+    out_h = output_size[0] if isinstance(output_size, (list, tuple)) else output_size
+    out_w = output_size[1] if isinstance(output_size, (list, tuple)) and len(output_size) > 1 else out_h
+    kh = in_h // out_h
+    kw = in_w // out_w
+    return _wrap(gpu.avg_pool2d(gpu_input, kh, kw, kh, kw, 0, 0))
+
+
+@register_op(torch.ops.aten.flatten.using_ints)
+def _flatten(input, start_dim=0, end_dim=-1):
+    """Flatten dimensions from start_dim to end_dim into a single dimension."""
+    gpu_input = _unwrap(input)
+    shape = list(gpu_input.shape)
+    ndim = len(shape)
+    if start_dim < 0:
+        start_dim += ndim
+    if end_dim < 0:
+        end_dim += ndim
+
+    new_shape = shape[:start_dim]
+    flat_size = 1
+    for d in range(start_dim, end_dim + 1):
+        flat_size *= shape[d]
+    new_shape.append(flat_size)
+    new_shape += shape[end_dim + 1:]
+
+    return _wrap(gpu.reshape(gpu_input, new_shape))
 
 
 # ============================================================
