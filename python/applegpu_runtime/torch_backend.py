@@ -758,6 +758,20 @@ except AttributeError:
     pass
 
 
+@register_op(torch.ops.aten.alias.default)
+def _op_alias(a):
+    """Alias: create a new ApplegpuTensor sharing the same GPU data.
+
+    Must return a distinct tensor object to satisfy PyTorch autograd
+    invariant that views are not identical to their base.
+    """
+    if isinstance(a, ApplegpuTensor):
+        gt = a._gpu
+        if gt is not None:
+            return _wrap(gt, torch_dtype=a.dtype)
+    return _handle_clone((a,), {})
+
+
 @register_op(torch.ops.aten._unsafe_view.default)
 def _op_unsafe_view(a, size):
     size = list(size)
@@ -920,7 +934,17 @@ def _op_copy_(dst, src, non_blocking=False):
 
 @register_op(torch.ops.aten.cat.default)
 def _op_cat(tensors, dim=0):
-    gpu_tensors = [_unwrap(t) for t in tensors]
+    # Filter out empty tensors (0 elements) — these come from KV cache init
+    non_empty = []
+    for t in tensors:
+        if isinstance(t, torch.Tensor) and t.numel() == 0:
+            continue
+        non_empty.append(t)
+    if len(non_empty) == 0:
+        return tensors[0] if isinstance(tensors[0], ApplegpuTensor) else _wrap(_unwrap(tensors[0]))
+    if len(non_empty) == 1:
+        return non_empty[0] if isinstance(non_empty[0], ApplegpuTensor) else _wrap(_unwrap(non_empty[0]))
+    gpu_tensors = [_unwrap(t) for t in non_empty]
     result = gpu_tensors[0]
     for t in gpu_tensors[1:]:
         result = gpu.concat(result, t, dim)
@@ -960,9 +984,10 @@ def _op_slice(a, dim=0, start=None, end=None, step=1):
     if actual_end < 0:
         actual_end = max(0, shape[dim] + actual_end)
     actual_end = min(actual_end, shape[dim])
-    # If the slice is the full dimension, just return the tensor as-is
+    # If the slice is the full dimension, return a new wrapper (not the same object,
+    # to satisfy PyTorch autograd invariant that view ops return distinct tensors)
     if actual_start == 0 and actual_end == shape[dim]:
-        return a if isinstance(a, ApplegpuTensor) else _wrap(gpu_a)
+        return _wrap(gpu_a)
     # Non-float dtypes: fall back to CPU for slice
     if gpu_a.dtype not in ("float32", "float16"):
         return NotImplemented
