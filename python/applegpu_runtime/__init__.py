@@ -58,6 +58,29 @@ from applegpu_runtime.applegpu_runtime import (
 __version__ = version()
 
 
+def concat_all(tensors, dim=0):
+    """Concatenate a list of tensors along a dimension.
+
+    More efficient than repeated pairwise concat calls from Python,
+    as it avoids N-1 Python-to-Rust round trips.
+
+    Args:
+        tensors: list of GpuTensor objects to concatenate
+        dim: dimension along which to concatenate (default: 0)
+
+    Returns:
+        A new GpuTensor containing the concatenated result.
+    """
+    if len(tensors) == 0:
+        raise ValueError("concat_all requires at least 1 tensor")
+    if len(tensors) == 1:
+        return tensors[0]
+    result = tensors[0]
+    for t in tensors[1:]:
+        result = concat(result, t, dim=dim)
+    return result
+
+
 # High-level model API (lazy imports — transformers/torch only needed when called)
 def load_model(model_name="gpt2"):
     """Load a pretrained model from HuggingFace."""
@@ -142,6 +165,7 @@ __all__ = [
     "matmul",
     "slice",
     "concat",
+    "concat_all",
     "add_bias",
     "softmax_causal",
     "argmax",

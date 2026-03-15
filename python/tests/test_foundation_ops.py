@@ -122,9 +122,7 @@ def test_gpt2_attention_block():
         head_outputs.append(out_h)
 
     # Concat heads
-    result = head_outputs[0]
-    for h in head_outputs[1:]:
-        result = gpu.concat(result, h, dim=1)
+    result = gpu.concat_all(head_outputs, dim=1)
 
     output = result.to_numpy()
     assert output.shape == (seq_len, d_model)

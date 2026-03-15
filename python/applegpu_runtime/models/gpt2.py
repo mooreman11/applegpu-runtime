@@ -136,9 +136,7 @@ def gpt2_forward(model, input_ids, kv_cache=None):
         new_kv_cache.append(layer_kv)
 
         # Concat heads
-        attn_out = head_outputs[0]
-        for h in head_outputs[1:]:
-            attn_out = gpu.concat(attn_out, h, dim=1)
+        attn_out = gpu.concat_all(head_outputs, dim=1)
 
         # Output projection
         proj_w = w[f"{prefix}.attn.c_proj.weight"]
