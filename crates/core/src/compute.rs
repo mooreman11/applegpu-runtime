@@ -99,6 +99,11 @@ kernel void elementwise_sign(device const float* input [[buffer(0)]], device flo
     uint in_off = nd_index_to_offset(id, out_shape, in_strides, ndim);
     out[id] = sign(input[in_off]);
 }
+kernel void elementwise_tanh(device const float* input [[buffer(0)]], device float* out [[buffer(1)]], constant uint* in_strides [[buffer(2)]], constant uint* out_shape [[buffer(3)]], constant uint& ndim [[buffer(4)]], constant uint& numel [[buffer(5)]], uint id [[thread_position_in_grid]]) {
+    if (id >= numel) return;
+    uint in_off = nd_index_to_offset(id, out_shape, in_strides, ndim);
+    out[id] = tanh(input[in_off]);
+}
 "#
 );
 
@@ -775,6 +780,11 @@ kernel void elementwise_sign_f16(device const half* input [[buffer(0)]], device 
     if (id >= numel) return;
     uint in_off = nd_index_to_offset(id, out_shape, in_strides, ndim);
     out[id] = sign(input[in_off]);
+}
+kernel void elementwise_tanh_f16(device const half* input [[buffer(0)]], device half* out [[buffer(1)]], constant uint* in_strides [[buffer(2)]], constant uint* out_shape [[buffer(3)]], constant uint& ndim [[buffer(4)]], constant uint& numel [[buffer(5)]], uint id [[thread_position_in_grid]]) {
+    if (id >= numel) return;
+    uint in_off = nd_index_to_offset(id, out_shape, in_strides, ndim);
+    out[id] = (half)tanh((float)input[in_off]);
 }
 "#
 );

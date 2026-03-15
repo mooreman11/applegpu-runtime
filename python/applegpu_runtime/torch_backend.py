@@ -6,6 +6,7 @@ import applegpu_runtime as gpu
 
 _backend_enabled = False
 _warned_ops = set()
+_in_fallback = False
 
 # Global registry mapping CPU data_ptr -> GpuTensor.
 # When ApplegpuTensor is stored in nn.Parameter, custom attributes are lost.
@@ -216,6 +217,11 @@ def _op_sqrt(a):
     return _wrap(gpu.sqrt(_unwrap(a)))
 
 
+@register_op(torch.ops.aten.tanh.default)
+def _op_tanh(a):
+    return _wrap(gpu.tanh(_unwrap(a)))
+
+
 @register_op(torch.ops.aten.abs.default)
 def _op_abs(a):
     return _wrap(gpu.abs(_unwrap(a)))
@@ -240,7 +246,11 @@ def _op_clamp(a, min=None, max=None):
 
 @register_op(torch.ops.aten.where.self)
 def _op_where(condition, x, y):
-    return _wrap(gpu.where_cond(_unwrap(condition), _unwrap(x), _unwrap(y)))
+    cond_gpu = _unwrap(condition)
+    # where requires float condition on GPU; fall back if bool/int
+    if cond_gpu.dtype not in ("float32", "float16"):
+        return NotImplemented
+    return _wrap(gpu.where_cond(cond_gpu, _unwrap(x), _unwrap(y)))
 
 
 @register_op(torch.ops.aten.masked_fill.Scalar)
@@ -256,6 +266,22 @@ def _op_triu(input, diagonal=0):
 @register_op(torch.ops.aten.tril.default)
 def _op_tril(input, diagonal=0):
     return _wrap(gpu.tril(_unwrap(input), diagonal))
+
+
+@register_op(torch.ops.aten.bitwise_and.Tensor)
+def _op_bitwise_and(a, b):
+    """Handle bitwise_and by converting to CPU — used in attention masking."""
+    return NotImplemented
+
+
+@register_op(torch.ops.aten.bitwise_or.Tensor)
+def _op_bitwise_or(a, b):
+    return NotImplemented
+
+
+@register_op(torch.ops.aten.bitwise_not.default)
+def _op_bitwise_not(a):
+    return NotImplemented
 
 
 # ============================================================
@@ -375,12 +401,44 @@ def _op_mean(a, dim, keepdim=False, dtype=None):
 
 @register_op(torch.ops.aten.reshape.default)
 def _op_reshape(a, shape):
-    return _wrap(gpu.reshape(_unwrap(a), list(shape)))
+    shape = list(shape)
+    gpu_a = _unwrap(a)
+    # Handle -1 (infer dimension)
+    if -1 in shape:
+        total = 1
+        for s in gpu_a.shape:
+            total *= s
+        known = 1
+        neg_idx = -1
+        for i, s in enumerate(shape):
+            if s == -1:
+                neg_idx = i
+            else:
+                known *= s
+        if neg_idx >= 0 and known > 0:
+            shape[neg_idx] = total // known
+    return _wrap(gpu.reshape(gpu_a, shape))
 
 
 @register_op(torch.ops.aten.view.default)
 def _op_view(a, size):
-    return _wrap(gpu.reshape(_unwrap(a), list(size)))
+    size = list(size)
+    gpu_a = _unwrap(a)
+    # Handle -1 (infer dimension)
+    if -1 in size:
+        total = 1
+        for s in gpu_a.shape:
+            total *= s
+        known = 1
+        neg_idx = -1
+        for i, s in enumerate(size):
+            if s == -1:
+                neg_idx = i
+            else:
+                known *= s
+        if neg_idx >= 0 and known > 0:
+            size[neg_idx] = total // known
+    return _wrap(gpu.reshape(gpu_a, size))
 
 
 @register_op(torch.ops.aten.t.default)
@@ -409,6 +467,9 @@ def _op_expand(a, size, implicit=False):
     # Broadcasting via add with zeros
     # Create a zeros tensor with the target shape and add
     gpu_a = _unwrap(a)
+    # Non-float dtypes: fall back to CPU
+    if gpu_a.dtype not in ("float32", "float16"):
+        return NotImplemented
     n_elems = 1
     for s in size:
         if s == -1:
@@ -442,6 +503,91 @@ try:
     def _op_contiguous(a, memory_format=None):
         return a
 except AttributeError:
+    pass
+
+
+@register_op(torch.ops.aten._unsafe_view.default)
+def _op_unsafe_view(a, size):
+    size = list(size)
+    gpu_a = _unwrap(a)
+    if -1 in size:
+        total = 1
+        for s in gpu_a.shape:
+            total *= s
+        known = 1
+        neg_idx = -1
+        for i, s in enumerate(size):
+            if s == -1:
+                neg_idx = i
+            else:
+                known *= s
+        if neg_idx >= 0 and known > 0:
+            size[neg_idx] = total // known
+    return _wrap(gpu.reshape(gpu_a, size))
+
+
+@register_op(torch.ops.aten.native_dropout.default)
+def _native_dropout(input, p, train):
+    """Dropout: no-op in eval mode."""
+    if not train:
+        # Return (input, all-true mask)
+        gpu_input = _unwrap(input)
+        n_elems = 1
+        for s in gpu_input.shape:
+            n_elems *= s
+        ones = gpu.tensor([1.0] * n_elems, shape=list(gpu_input.shape))
+        return input, _wrap(ones, torch_dtype=torch.bool)
+    return NotImplemented
+
+
+@register_op(torch.ops.aten.rsub.Scalar)
+def _op_rsub_scalar(a, other, alpha=1):
+    """rsub: other - alpha * a."""
+    gpu_a = _unwrap(a)
+    n_elems = 1
+    for s in gpu_a.shape:
+        n_elems *= s
+    scalar_t = gpu.tensor([float(other)] * n_elems, shape=list(gpu_a.shape))
+    if alpha != 1:
+        gpu_a = gpu.scalar_mul(gpu_a, float(alpha))
+    return _wrap(gpu.sub(scalar_t, gpu_a))
+
+
+@register_op(torch.ops.aten.baddbmm.default)
+def _op_baddbmm(self_tensor, batch1, batch2, beta=1, alpha=1):
+    """baddbmm: beta * self + alpha * (batch1 @ batch2)."""
+    result = _wrap(gpu.matmul(_unwrap(batch1), _unwrap(batch2)))
+    if alpha != 1:
+        result = _wrap(gpu.scalar_mul(_unwrap(result), float(alpha)))
+    if beta != 0:
+        self_gpu = _unwrap(self_tensor)
+        if beta != 1:
+            self_gpu = gpu.scalar_mul(self_gpu, float(beta))
+        result = _wrap(gpu.add(_unwrap(result), self_gpu))
+    return result
+
+
+@register_op(torch.ops.aten.arange.default)
+def _op_arange(end, dtype=None, layout=None, device=None, pin_memory=None):
+    n = int(end)
+    gpu_t = gpu.tensor([float(i) for i in range(n)], shape=[n])
+    torch_dtype = dtype if dtype is not None else torch.float32
+    return _wrap(gpu_t, torch_dtype=torch_dtype)
+
+
+try:
+    @register_op(torch.ops.aten.arange.start)
+    def _op_arange_start(start, end, dtype=None, layout=None, device=None, pin_memory=None):
+        s, e = int(start), int(end)
+        vals = [float(i) for i in range(s, e)]
+        n = len(vals)
+        if n == 0:
+            vals = [0.0]
+            n = 1
+        gpu_t = gpu.tensor(vals, shape=[n])
+        torch_dtype = dtype if dtype is not None else torch.float32
+        return _wrap(gpu_t, torch_dtype=torch_dtype)
+except Exception:
     pass
 
 
@@ -565,6 +711,9 @@ def _op_slice(a, dim=0, start=None, end=None, step=1):
     # If the slice is the full dimension, just return the tensor as-is
     if actual_start == 0 and actual_end == shape[dim]:
         return a if isinstance(a, ApplegpuTensor) else _wrap(gpu_a)
+    # Non-float dtypes: fall back to CPU for slice
+    if gpu_a.dtype not in ("float32", "float16"):
+        return NotImplemented
     return _wrap(gpu.slice(gpu_a, dim, actual_start, actual_end))
 
 
@@ -627,7 +776,13 @@ def _op_native_layer_norm(a, normalized_shape, weight=None, bias=None, eps=1e-5)
 
 @register_op(torch.ops.aten.embedding.default)
 def _op_embedding(weight, indices, padding_idx=-1, scale_grad_by_freq=False, sparse=False):
-    return _wrap(gpu.embedding(_unwrap(weight), _unwrap(indices)))
+    idx_gpu = _unwrap(indices)
+    # Our embedding kernel requires Int32 indices; convert Int64 if needed
+    if idx_gpu.dtype == "int64":
+        idx_cpu = indices.to_torch_cpu() if isinstance(indices, ApplegpuTensor) else indices
+        idx_cpu = idx_cpu.to(torch.int32)
+        idx_gpu = gpu.from_torch(idx_cpu)
+    return _wrap(gpu.embedding(_unwrap(weight), idx_gpu))
 
 
 # ============================================================
@@ -793,7 +948,12 @@ class ApplegpuTensor(torch.Tensor):
 
     @classmethod
     def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
+        global _in_fallback
         kwargs = kwargs or {}
+
+        # If we're inside a CPU fallback, don't dispatch — let torch handle it natively
+        if _in_fallback:
+            return func(*args, **kwargs)
 
         # Tensor lifecycle ops
         if func == torch.ops.aten._to_copy.default:
@@ -924,22 +1084,50 @@ def _move_module_to_applegpu(module):
 
 def _cpu_fallback(func, args, kwargs):
     """Fallback: move all ApplegpuTensors to CPU, run op, move results back."""
+    global _in_fallback
     op_name = str(func.name())
     _warn_fallback(op_name)
 
     # Convert args
     def to_cpu(x):
         if isinstance(x, ApplegpuTensor):
-            return x.to_torch_cpu()
+            gt = x._gpu
+            if gt is not None:
+                cpu_t = _gpu_tensor_to_torch_cpu(gt)
+                # Restore original torch dtype if different from GPU dtype
+                if cpu_t.dtype != x.dtype:
+                    cpu_t = cpu_t.to(x.dtype)
+                return cpu_t
+            # _gpu lost: return backing zeros with correct shape/dtype
+            return torch.zeros(x.shape, dtype=x.dtype)
         if isinstance(x, (list, tuple)):
             return type(x)(to_cpu(v) for v in x)
         return x
 
-    cpu_args = to_cpu(args)
-    cpu_kwargs = {k: to_cpu(v) for k, v in kwargs.items()}
+    # Set flag to prevent __torch_dispatch__ recursion during to_cpu
+    was_in_fallback = _in_fallback
+    _in_fallback = True
+    try:
+        cpu_args = to_cpu(args)
+        cpu_kwargs = {k: to_cpu(v) for k, v in kwargs.items()}
 
-    # Run on CPU
-    result = func(*cpu_args, **cpu_kwargs)
+        # Run on CPU
+        try:
+            result = func(*cpu_args, **cpu_kwargs)
+        except (NotImplementedError, RuntimeError):
+            # Retry with dtype coercion for bitwise/comparison ops
+            # that fail when float is given instead of bool/int
+            def coerce_bool(x):
+                if isinstance(x, torch.Tensor) and x.is_floating_point():
+                    return x.bool()
+                if isinstance(x, (list, tuple)):
+                    return type(x)(coerce_bool(v) for v in x)
+                return x
+            cpu_args = coerce_bool(cpu_args)
+            cpu_kwargs = {k: coerce_bool(v) for k, v in cpu_kwargs.items()}
+            result = func(*cpu_args, **cpu_kwargs)
+    finally:
+        _in_fallback = was_in_fallback
 
     # Wrap results back
     def to_applegpu(x):

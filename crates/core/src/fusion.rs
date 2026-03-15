@@ -17,6 +17,7 @@ fn unary_msl(op: &OpKind, expr: &str, dtype: DType) -> String {
         OpKind::Exp => format!("exp({})", expr),
         OpKind::Log => format!("log({})", expr),
         OpKind::Sqrt => format!("sqrt({})", expr),
+        OpKind::Tanh => format!("tanh({})", expr),
         OpKind::Gelu => {
             format!("({expr} * 0.5f * (1.0f + tanh(clamp(0.7978845608f * ({expr} + 0.044715f * {expr} * {expr} * {expr}), -10.0f, 10.0f))))")
         }

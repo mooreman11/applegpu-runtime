@@ -31,6 +31,7 @@ pub enum OpKind {
     // Scalar multiply (carries the scalar value)
     ScalarMul(f32),
     // Transformer ops
+    Tanh,
     Gelu,
     LayerNorm { eps: f32 },
     Embedding,
@@ -96,6 +97,7 @@ impl OpKind {
             OpKind::Softmax => "softmax_f32",
             OpKind::Transpose { .. } => "transpose_f32",
             OpKind::ScalarMul(_) => "scalar_mul_f32",
+            OpKind::Tanh => "elementwise_tanh",
             OpKind::Gelu => "gelu_f32",
             OpKind::LayerNorm { .. } => "layer_norm_f32",
             OpKind::Embedding => "embedding_f32",
@@ -126,7 +128,7 @@ impl OpKind {
     }
 
     pub fn is_unary(&self) -> bool {
-        matches!(self, OpKind::Neg | OpKind::Relu | OpKind::Exp | OpKind::Log | OpKind::Sqrt | OpKind::Gelu | OpKind::Abs | OpKind::Sign)
+        matches!(self, OpKind::Neg | OpKind::Relu | OpKind::Exp | OpKind::Log | OpKind::Sqrt | OpKind::Tanh | OpKind::Gelu | OpKind::Abs | OpKind::Sign)
     }
 
     pub fn is_matmul(&self) -> bool {
@@ -139,7 +141,7 @@ impl OpKind {
 
     pub fn is_elementwise(&self) -> bool {
         matches!(self, OpKind::Add | OpKind::Sub | OpKind::Mul | OpKind::Div |
-                       OpKind::Neg | OpKind::Relu | OpKind::Exp | OpKind::Log | OpKind::Sqrt | OpKind::Gelu |
+                       OpKind::Neg | OpKind::Relu | OpKind::Exp | OpKind::Log | OpKind::Sqrt | OpKind::Tanh | OpKind::Gelu |
                        OpKind::Abs | OpKind::Sign)
     }
 
@@ -153,6 +155,10 @@ impl OpKind {
 
     pub fn is_scalar_mul(&self) -> bool {
         matches!(self, OpKind::ScalarMul(_))
+    }
+
+    pub fn is_tanh(&self) -> bool {
+        matches!(self, OpKind::Tanh)
     }
 
     pub fn is_gelu(&self) -> bool {

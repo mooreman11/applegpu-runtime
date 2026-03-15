@@ -95,6 +95,7 @@ fn op_to_discriminant(op: &OpKind) -> u32 {
         OpKind::BatchNorm { .. } => 37,
         OpKind::MaxPool2d { .. } => 38,
         OpKind::AvgPool2d { .. } => 39,
+        OpKind::Tanh => 40,
     }
 }
 
@@ -239,6 +240,7 @@ fn discriminant_to_op(d: u32, r: &mut impl Read) -> io::Result<OpKind> {
             let p1 = read_u64(r)? as usize;
             Ok(OpKind::AvgPool2d { kernel_size: (k0, k1), stride: (s0, s1), padding: (p0, p1) })
         }
+        40 => Ok(OpKind::Tanh),
         _ => Err(io::Error::new(io::ErrorKind::InvalidData, format!("Unknown op type: {}", d))),
     }
 }

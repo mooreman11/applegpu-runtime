@@ -330,6 +330,10 @@ pub fn reshape(rt: &mut LazyRuntime, input_id: u64, new_shape: Vec<usize>) -> Re
     Ok(out_id)
 }
 
+pub fn tanh(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
+    lazy_unary_op(rt, input_id, OpKind::Tanh)
+}
+
 pub fn gelu(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
     lazy_unary_op(rt, input_id, OpKind::Gelu)
 }
@@ -2583,6 +2587,23 @@ mod tests {
         let r_id = sign(&mut rt, a_id).unwrap();
         rt.eval(&device, r_id).unwrap();
         assert_eq!(rt.read_f32(r_id).unwrap(), &[-1.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn test_tanh() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        let a = Tensor::from_f32(&device, vec![5], &[0.0, 1.0, -1.0, 10.0, -10.0]).unwrap();
+        let a_id = a.meta.id;
+        rt.insert_tensor(a).unwrap();
+        let r_id = tanh(&mut rt, a_id).unwrap();
+        rt.eval(&device, r_id).unwrap();
+        let result = rt.read_f32(r_id).unwrap();
+        assert!((result[0] - 0.0).abs() < 1e-5, "tanh(0) should be 0, got {}", result[0]);
+        assert!((result[1] - 0.7615942).abs() < 1e-4, "tanh(1) should be ~0.7616, got {}", result[1]);
+        assert!((result[2] - (-0.7615942)).abs() < 1e-4, "tanh(-1) should be ~-0.7616, got {}", result[2]);
+        assert!((result[3] - 1.0).abs() < 1e-5, "tanh(10) should be ~1, got {}", result[3]);
+        assert!((result[4] - (-1.0)).abs() < 1e-5, "tanh(-10) should be ~-1, got {}", result[4]);
     }
 
     #[test]

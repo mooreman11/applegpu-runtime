@@ -277,6 +277,13 @@ impl GpuTensor {
         Ok(GpuTensor { id, destroyed: Cell::new(false) })
     }
 
+    fn tanh(&self) -> PyResult<GpuTensor> {
+        let mut rt = RUNTIME_LAZY.lock().unwrap();
+        let id = applegpu_core::ops::tanh(&mut rt, self.id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(GpuTensor { id, destroyed: Cell::new(false) })
+    }
+
     fn gelu(&self) -> PyResult<GpuTensor> {
         let mut rt = RUNTIME_LAZY.lock().unwrap();
         let id = applegpu_core::ops::gelu(&mut rt, self.id)
@@ -736,6 +743,9 @@ fn transpose(t: &GpuTensor) -> PyResult<GpuTensor> { t.transpose() }
 fn transpose_dims(t: &GpuTensor, dim0: usize, dim1: usize) -> PyResult<GpuTensor> { t.transpose_dims(dim0, dim1) }
 
 #[pyfunction]
+fn tanh(t: &GpuTensor) -> PyResult<GpuTensor> { t.tanh() }
+
+#[pyfunction]
 fn gelu(t: &GpuTensor) -> PyResult<GpuTensor> { t.gelu() }
 
 #[pyfunction]
@@ -1057,6 +1067,7 @@ fn applegpu_runtime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(softmax, m)?)?;
     m.add_function(wrap_pyfunction!(transpose, m)?)?;
     m.add_function(wrap_pyfunction!(transpose_dims, m)?)?;
+    m.add_function(wrap_pyfunction!(tanh, m)?)?;
     m.add_function(wrap_pyfunction!(gelu, m)?)?;
     m.add_function(wrap_pyfunction!(layer_norm, m)?)?;
     m.add_function(wrap_pyfunction!(embedding, m)?)?;
