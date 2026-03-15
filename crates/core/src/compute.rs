@@ -123,7 +123,9 @@ kernel void gelu_f32(
 ) {
     if (id < count) {
         float x = input[id];
-        output[id] = x * 0.5f * (1.0f + tanh(0.7978845608f * (x + 0.044715f * x * x * x)));
+        float inner = 0.7978845608f * (x + 0.044715f * x * x * x);
+        inner = clamp(inner, -10.0f, 10.0f);
+        output[id] = x * 0.5f * (1.0f + tanh(inner));
     }
 }
 "#;
@@ -283,7 +285,9 @@ kernel void gelu_f16(
 ) {
     if (id < count) {
         float x = float(input[id]);
-        output[id] = half(x * 0.5f * (1.0f + tanh(0.7978845608f * (x + 0.044715f * x * x * x))));
+        float inner = 0.7978845608f * (x + 0.044715f * x * x * x);
+        inner = clamp(inner, -10.0f, 10.0f);
+        output[id] = half(x * 0.5f * (1.0f + tanh(inner)));
     }
 }
 "#;

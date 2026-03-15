@@ -1368,4 +1368,24 @@ mod tests {
 
         assert!(attention_causal(&mut rt, q_id, k_id, v_id).is_err());
     }
+
+    #[test]
+    fn test_gelu_large_values_no_nan() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        // Values that previously caused NaN due to tanh overflow
+        let t = Tensor::from_f32(&device, vec![6], &[-20.0, -10.0, -5.0, 5.0, 10.0, 20.0]).unwrap();
+        let id = t.meta.id;
+        rt.insert_tensor(t).unwrap();
+        let out_id = gelu(&mut rt, id).unwrap();
+        rt.eval(&device, out_id).unwrap();
+        let result = rt.read_f32(out_id).unwrap();
+        // All values should be finite (no NaN or Inf)
+        for &v in &result {
+            assert!(v.is_finite(), "GELU produced non-finite value: {}", v);
+        }
+        // GELU(-20) ≈ 0.0, GELU(20) ≈ 20.0
+        assert!(result[0].abs() < 0.01);
+        assert!((result[5] - 20.0).abs() < 0.01);
+    }
 }

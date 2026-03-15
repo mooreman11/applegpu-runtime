@@ -3,23 +3,6 @@
 import numpy as np
 
 
-def _safe_gelu(tensor):
-    """GELU activation with numpy fallback for numerical stability.
-
-    The Metal GELU kernel uses a tanh approximation that produces NaN for
-    |x| > ~10. We fall back to a numpy-based GELU using the tanh
-    approximation with clamped input to avoid overflow.
-    """
-    import applegpu_runtime as gpu
-
-    x = tensor.to_numpy()
-    # Tanh-approximation GELU with clamped inner argument to prevent overflow
-    inner = 0.7978845608 * (x + 0.044715 * x * x * x)
-    inner = np.clip(inner, -20.0, 20.0)  # tanh saturates well before this
-    result = x * 0.5 * (1.0 + np.tanh(inner))
-    return gpu.from_numpy(result.astype(np.float32))
-
-
 def load_gpt2_weights(model_name="gpt2"):
     """Load GPT-2 weights from HuggingFace and convert to GPU tensors.
 
@@ -142,7 +125,7 @@ def gpt2_forward(model, input_ids):
         fc_b = w[f"{prefix}.mlp.c_fc.bias"]
         ffn = x_norm2 @ fc_w
         ffn = gpu.add_bias(ffn, fc_b)
-        ffn = _safe_gelu(ffn)
+        ffn = gpu.gelu(ffn)
 
         proj2_w = w[f"{prefix}.mlp.c_proj.weight"]
         proj2_b = w[f"{prefix}.mlp.c_proj.bias"]
