@@ -138,6 +138,12 @@ def generate_text(model, prompt, max_tokens=50, temperature=1.0, top_k=50, top_p
     return decode("gpt2", output_ids)
 
 
+def enable_torch_backend():
+    """Register applegpu as a PyTorch device backend. Requires torch >= 2.1."""
+    from applegpu_runtime.torch_backend import enable
+    enable()
+
+
 __all__ = [
     "GpuTensor",
     "version",
@@ -196,4 +202,5 @@ __all__ = [
     "load_model",
     "run_model",
     "generate_text",
+    "enable_torch_backend",
 ]
