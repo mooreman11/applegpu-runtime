@@ -150,7 +150,7 @@ _Make the device backend robust for real-world PyTorch workloads._
 - [ ] **Optimizer kernels** — SGD, Adam on GPU
 
 **Model targets:**
-- [ ] **ResNet-18/50** — test with conv2d + batch_norm + max_pool (all ops ready)
+- [x] **ResNet-18** — runs end-to-end on Metal GPU, output matches CPU within tolerance
 - [ ] **GPT-2 medium/large** — test with larger model variants
 - [ ] **BERT** — encoder-only transformer
 - [ ] **Whisper / audio models** — requires conv1d (ready)
