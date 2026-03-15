@@ -576,6 +576,7 @@ fn dtype_size(name: &str) -> PyResult<usize> {
 
 /// Create a GpuTensor from a NumPy ndarray (any supported dtype).
 /// Data is copied; mutations to the original array do not affect the tensor.
+/// Uses direct data_ptr access for C-contiguous arrays (fast path).
 #[pyfunction]
 #[pyo3(signature = (arr))]
 fn from_numpy(_py: Python<'_>, arr: &Bound<'_, pyo3::types::PyAny>) -> PyResult<GpuTensor> {
@@ -587,20 +588,43 @@ fn from_numpy(_py: Python<'_>, arr: &Bound<'_, pyo3::types::PyAny>) -> PyResult<
         )))?;
 
     let shape: Vec<usize> = arr.getattr("shape")?.extract()?;
-    let bytes: Vec<u8> = arr.call_method0("tobytes")?.extract()?;
+    let numel: usize = shape.iter().product();
+    let nbytes = numel * dtype.size_bytes();
+
+    // Fast path: read raw bytes via ctypes data pointer for C-contiguous arrays
+    let is_c_contiguous: bool = arr.getattr("flags")
+        .and_then(|f| f.get_item("C_CONTIGUOUS"))
+        .and_then(|v| v.extract())
+        .unwrap_or(false);
 
     let runtime = get_device_runtime()?;
-    let t = Tensor::from_data(&runtime.device, shape, dtype, &bytes)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    let id = t.meta.id;
-    RUNTIME_LAZY.lock().unwrap().insert_tensor(t)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    Ok(GpuTensor { id, destroyed: Cell::new(false) })
+
+    if is_c_contiguous && nbytes > 0 {
+        let data_ptr: usize = arr.getattr("ctypes")?.getattr("data")?.extract()?;
+        // Safety: array is C-contiguous, data_ptr points to nbytes of valid memory,
+        // and the `arr` Python reference keeps the data alive during this call.
+        let data = unsafe { std::slice::from_raw_parts(data_ptr as *const u8, nbytes) };
+        let t = Tensor::from_data(&runtime.device, shape, dtype, data)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let id = t.meta.id;
+        RUNTIME_LAZY.lock().unwrap().insert_tensor(t)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(GpuTensor { id, destroyed: Cell::new(false) })
+    } else {
+        // Fallback: use tobytes() for non-contiguous or empty arrays
+        let bytes: Vec<u8> = arr.call_method0("tobytes")?.extract()?;
+        let t = Tensor::from_data(&runtime.device, shape, dtype, &bytes)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let id = t.meta.id;
+        RUNTIME_LAZY.lock().unwrap().insert_tensor(t)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(GpuTensor { id, destroyed: Cell::new(false) })
+    }
 }
 
 /// Create a GpuTensor from a PyTorch tensor (any supported dtype).
-/// Internally converts via NumPy: detach -> cpu -> contiguous -> numpy -> from_numpy.
-/// Data is copied; mutations to the original tensor do not affect the GPU tensor.
+/// Uses direct data_ptr() access for fast zero-copy reads from CPU tensor memory.
+/// Data is copied to GPU; mutations to the original tensor do not affect the GPU tensor.
 #[pyfunction]
 fn from_torch(py: Python<'_>, tensor: &Bound<'_, pyo3::types::PyAny>) -> PyResult<GpuTensor> {
     // Prepare: detach from autograd, move to CPU, make contiguous
@@ -609,11 +633,70 @@ fn from_torch(py: Python<'_>, tensor: &Bound<'_, pyo3::types::PyAny>) -> PyResul
         .call_method0("cpu")?
         .call_method0("contiguous")?;
 
-    // Convert to numpy (zero-copy for contiguous CPU tensors)
-    let np_array = prepared.call_method0("numpy")?;
+    // Map torch dtype to our dtype string
+    let torch = py.import_bound("torch")?;
+    let tensor_dtype = prepared.getattr("dtype")?;
+    let dtype_str = if tensor_dtype.eq(torch.getattr("float16")?)? { "float16" }
+        else if tensor_dtype.eq(torch.getattr("float32")?)? { "float32" }
+        else if tensor_dtype.eq(torch.getattr("float64")?)? { "float64" }
+        else if tensor_dtype.eq(torch.getattr("int8")?)? { "int8" }
+        else if tensor_dtype.eq(torch.getattr("int16")?)? { "int16" }
+        else if tensor_dtype.eq(torch.getattr("int32")?)? { "int32" }
+        else if tensor_dtype.eq(torch.getattr("int64")?)? { "int64" }
+        else if tensor_dtype.eq(torch.getattr("uint8")?)? { "uint8" }
+        else if tensor_dtype.eq(torch.getattr("bool")?)? { "bool" }
+        else {
+            return Err(PyValueError::new_err(format!(
+                "Unsupported torch dtype: {}", tensor_dtype
+            )));
+        };
 
-    // Delegate to existing from_numpy (handles all dtypes)
-    from_numpy(py, &np_array)
+    let dtype = DType::from_name(dtype_str)
+        .ok_or_else(|| PyValueError::new_err(format!("Unknown dtype: {}", dtype_str)))?;
+    let shape: Vec<usize> = prepared.getattr("shape")?.extract()?;
+    let numel: usize = prepared.call_method0("numel")?.extract()?;
+    let element_size: usize = prepared.call_method0("element_size")?.extract()?;
+    let nbytes = numel * element_size;
+
+    let runtime = get_device_runtime()?;
+
+    if nbytes > 0 {
+        // Fast path: read raw bytes directly from torch tensor's data_ptr().
+        // Safety: tensor is CPU + contiguous (guaranteed by .cpu().contiguous()),
+        // data_ptr() returns a valid pointer to numel * element_size bytes,
+        // and the `prepared` Python reference keeps the data alive.
+        let data_ptr: usize = prepared.call_method0("data_ptr")?.extract()?;
+        let data = unsafe { std::slice::from_raw_parts(data_ptr as *const u8, nbytes) };
+        let t = Tensor::from_data(&runtime.device, shape, dtype, data)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let id = t.meta.id;
+        RUNTIME_LAZY.lock().unwrap().insert_tensor(t)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(GpuTensor { id, destroyed: Cell::new(false) })
+    } else {
+        // Empty tensor
+        let t = Tensor::from_data(&runtime.device, shape, dtype, &[])
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let id = t.meta.id;
+        RUNTIME_LAZY.lock().unwrap().insert_tensor(t)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(GpuTensor { id, destroyed: Cell::new(false) })
+    }
+}
+
+/// Create a GpuTensor from raw bytes with explicit shape and dtype.
+/// This is the fastest path for tensor creation -- no numpy/torch overhead.
+#[pyfunction]
+fn from_bytes(_py: Python<'_>, data: &[u8], shape: Vec<usize>, dtype: &str) -> PyResult<GpuTensor> {
+    let dtype = DType::from_name(dtype)
+        .ok_or_else(|| PyValueError::new_err(format!("Unknown dtype: {}", dtype)))?;
+    let runtime = get_device_runtime()?;
+    let t = Tensor::from_data(&runtime.device, shape, dtype, data)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let id = t.meta.id;
+    RUNTIME_LAZY.lock().unwrap().insert_tensor(t)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(GpuTensor { id, destroyed: Cell::new(false) })
 }
 
 /// Create a tensor from data. Returns a GpuTensor object.
@@ -1079,6 +1162,7 @@ fn applegpu_runtime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(dtype_size, m)?)?;
     m.add_function(wrap_pyfunction!(from_numpy, m)?)?;
     m.add_function(wrap_pyfunction!(from_torch, m)?)?;
+    m.add_function(wrap_pyfunction!(from_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(tensor, m)?)?;
     m.add_function(wrap_pyfunction!(eval, m)?)?;
     m.add_function(wrap_pyfunction!(to_list, m)?)?;
