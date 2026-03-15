@@ -157,8 +157,11 @@ _Training support: PyTorch autograd works natively on Metal GPU for MLP training
 ### Now on Metal (no CPU fallback):
 - [x] **Backward ops for softmax** — native Metal kernel (grad_input = output * (grad_output - dot))
 - [x] **Backward ops for layer_norm** — native Metal kernel for grad_input, CPU for grad_weight/grad_beta
-- [ ] **Backward ops for CNN** — grad_conv2d, grad_batch_norm, grad_max_pool2d, grad_avg_pool2d
-- [ ] **Backward ops for embedding** — grad_embedding (scatter gradients to weight rows)
+- [x] **Backward ops for conv2d** — transposed convolution kernel for grad_input on Metal, CPU for grad_weight
+- [x] **Backward ops for embedding** — atomic scatter-add for grad_weight on Metal
+- [x] **Backward ops for batch_norm** — inference-mode grad_input on Metal, CPU for grad_weight/bias
+- [ ] **Backward for max_pool2d / avg_pool2d** — CPU fallback (low priority)
+- [ ] **Int64 compute kernels** — currently Int64 ops (e.g., batch_norm's num_batches_tracked += 1) fall back to CPU. Need Int64 add/mul MSL kernels for full GPU execution.
 - [ ] **Gradient accumulation** — in-place parameter updates for large batch training
 - [ ] **Adam optimizer** — may work via dispatch, needs verification
 
@@ -170,9 +173,9 @@ _Scale training to real models. Verify all backward ops. Optimize dispatch overh
 **Training at scale:**
 - [x] **Softmax backward on Metal** — native kernel, zero CPU fallback
 - [x] **Layer norm backward on Metal** — native kernel for grad_input, CPU for grad_weight/beta
-- [ ] **Verify/fix conv2d backward** — test in ResNet training
-- [ ] **Verify/fix batch_norm backward** — test in ResNet training
-- [ ] **Verify/fix embedding backward** — test in GPT-2 fine-tuning
+- [x] **Conv2d backward on Metal** — transposed convolution grad_input, CPU grad_weight
+- [x] **Batch norm backward on Metal** — inference-mode grad_input
+- [x] **Embedding backward on Metal** — atomic scatter-add
 - [ ] **GPT-2 fine-tuning** — backward through full transformer, cross-entropy loss
 - [ ] **ResNet training** — CNN training loop end-to-end
 - [ ] **Adam optimizer** — verify adaptive learning rate works

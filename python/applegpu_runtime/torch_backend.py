@@ -210,6 +210,11 @@ def _op_add(a, b, alpha=1):
 @register_op(torch.ops.aten.add_.Tensor)
 def _op_add_inplace(a, b, alpha=1):
     """In-place add: a += alpha * b."""
+    # TODO: Int64 compute kernels needed — currently falls back to CPU for non-float types
+    # (e.g., batch_norm's num_batches_tracked is Int64). See backlog.
+    a_gpu = _unwrap(a) if isinstance(a, ApplegpuTensor) else None
+    if a_gpu is not None and a_gpu.dtype not in ("float32", "float16"):
+        return NotImplemented
     b_gpu = _unwrap_scalar(b)
     if alpha != 1:
         b_gpu = gpu.scalar_mul(b_gpu, float(alpha))
