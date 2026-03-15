@@ -1,0 +1,13 @@
+[package]
+name = "applegpu-client"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "applegpu_client"
+
+[dependencies]
+applegpu-wire = { path = "../wire" }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
