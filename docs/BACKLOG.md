@@ -99,11 +99,15 @@ _Almost everything on the roadmap is blocked by 2D-only tensors. This is the arc
 - [x] **N-D reshape** — reshape to any compatible shape
 - [x] **Python bindings verified** — 12 N-D tests (3D/4D creation, broadcasting, relu/gelu on 3D, ndim validation for 2D-only ops, backward compat), GPT-2 unchanged
 
-**Phase 2: Batched transformer ops**
-- [ ] **Batched attention** — `[batch, heads, seq, d_head]` in one kernel dispatch (replaces 12× slice+attention+concat)
-- [ ] **Batched layer_norm** — normalize over last dim for any number of leading dims
-- [ ] **Batched embedding** — `[batch, seq]` indices
-- [ ] **Batched softmax** — softmax over last dim for any shape
+**Phase 2: Batched transformer ops** _(DONE)_
+- [x] **Batched attention** — `[batch, heads, seq, d_head]` in one kernel dispatch (replaces 12× slice+attention+concat)
+- [x] **Batched layer_norm** — normalize over last dim for any number of leading dims
+- [x] **Batched embedding** — `[batch, seq]` indices
+- [x] **Batched softmax** — softmax over last dim for any shape
+- [x] **Batched matmul** — `[..., M, K] @ [..., K, N]` with batch broadcasting
+- [x] **Batched transpose** — swaps last 2 dims for any ndim
+- [x] **Batched softmax_causal** — causal masking with batch dims
+- [x] **20 Python tests** in `test_batched_ops.py` covering all batched ops with numeric verification
 
 **Phase 3: Batch inference**
 - [ ] **Batch inference pipeline** — process multiple sequences simultaneously

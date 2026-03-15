@@ -88,12 +88,13 @@ def test_layer_norm_method():
     assert len(result) == 4
 
 
-def test_layer_norm_shape_validation():
-    x = gpu.tensor([1.0, 2.0, 3.0], shape=[3])  # 1D, not 2D
+def test_layer_norm_1d_works():
+    """Layer norm now supports any dimensionality including 1D."""
+    x = gpu.tensor([1.0, 2.0, 3.0], shape=[3])
     g = gpu.tensor([1.0, 1.0, 1.0], shape=[3])
     b = gpu.tensor([0.0, 0.0, 0.0], shape=[3])
-    with pytest.raises(ValueError):
-        gpu.layer_norm(x, g, b)
+    result = gpu.layer_norm(x, g, b).to_list()
+    assert len(result) == 3
 
 
 # --- Embedding ---

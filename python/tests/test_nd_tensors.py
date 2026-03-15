@@ -46,16 +46,18 @@ def test_3d_gelu():
     assert result.shape == (1, 2, 2)
     assert np.all(np.isfinite(result))
 
-def test_softmax_rejects_3d():
+def test_softmax_accepts_3d():
     t = gpu.tensor([1.0] * 8, shape=[2, 2, 2])
-    with pytest.raises(ValueError):
-        gpu.softmax(t)
+    result = gpu.softmax(t).to_numpy()
+    assert result.shape == (2, 2, 2)
+    # Each last-dim row should sum to 1
+    assert abs(result[0, 0].sum() - 1.0) < 0.001
 
-def test_matmul_rejects_3d():
+def test_matmul_accepts_3d():
     a = gpu.tensor([1.0] * 8, shape=[2, 2, 2])
     b = gpu.tensor([1.0] * 8, shape=[2, 2, 2])
-    with pytest.raises(ValueError):
-        a @ b
+    c = (a @ b).to_numpy()
+    assert c.shape == (2, 2, 2)
 
 def test_reshape_to_3d():
     t = gpu.tensor([float(i) for i in range(12)], shape=[12])
