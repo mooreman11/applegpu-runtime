@@ -10,6 +10,14 @@ crate-type = ["cdylib"]
 [dependencies]
 pyo3 = { version = "0.22", features = ["extension-module"] }
 numpy = "0.22"
-applegpu-core = { path = "../core" }
 half = "2"
 once_cell = "1"
+
+# Wire crate is platform-independent — always available
+applegpu-wire = { path = "../wire" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+applegpu-core = { path = "../core" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+applegpu-client = { path = "../client" }

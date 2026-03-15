@@ -810,6 +810,226 @@ pub fn peek_magic(data: &[u8]) -> io::Result<[u8; 4]> {
     Ok(magic)
 }
 
+// ---------------------------------------------------------------------------
+// WireDType — platform-independent dtype enum for socket backend
+// ---------------------------------------------------------------------------
+
+/// Data type for tensor elements (wire-protocol level).
+///
+/// Mirrors `applegpu_core::tensor::DType` but lives in the wire crate so it
+/// can be used on Linux without pulling in Metal/Swift dependencies.
+/// Wire discriminants match the dtype field in `WireTensorData`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum WireDType {
+    Float32  = 0,
+    Float16  = 1,
+    Float64  = 2,
+    Int8     = 3,
+    Int16    = 4,
+    Int32    = 5,
+    Int64    = 6,
+    UInt8    = 7,
+    UInt32   = 8,
+    Bool     = 9,
+    BFloat16 = 10,
+}
+
+impl WireDType {
+    pub fn from_discriminant(d: u32) -> Option<Self> {
+        match d {
+            0 => Some(WireDType::Float32),
+            1 => Some(WireDType::Float16),
+            2 => Some(WireDType::Float64),
+            3 => Some(WireDType::Int8),
+            4 => Some(WireDType::Int16),
+            5 => Some(WireDType::Int32),
+            6 => Some(WireDType::Int64),
+            7 => Some(WireDType::UInt8),
+            8 => Some(WireDType::UInt32),
+            9 => Some(WireDType::Bool),
+            10 => Some(WireDType::BFloat16),
+            _ => None,
+        }
+    }
+
+    pub fn discriminant(&self) -> u32 {
+        *self as u32
+    }
+
+    /// Size of one element in bytes.
+    pub fn size_bytes(&self) -> usize {
+        match self {
+            WireDType::Bool | WireDType::Int8 | WireDType::UInt8 => 1,
+            WireDType::Float16 | WireDType::BFloat16 | WireDType::Int16 => 2,
+            WireDType::Float32 | WireDType::Int32 | WireDType::UInt32 => 4,
+            WireDType::Float64 | WireDType::Int64 => 8,
+        }
+    }
+
+    /// Map from string name to WireDType.
+    pub fn from_name(name: &str) -> Option<WireDType> {
+        match name {
+            "float16" | "f16" => Some(WireDType::Float16),
+            "float32" | "f32" => Some(WireDType::Float32),
+            "float64" | "f64" => Some(WireDType::Float64),
+            "int8" | "i8" => Some(WireDType::Int8),
+            "int16" | "i16" => Some(WireDType::Int16),
+            "int32" | "i32" => Some(WireDType::Int32),
+            "int64" | "i64" => Some(WireDType::Int64),
+            "uint8" | "u8" => Some(WireDType::UInt8),
+            "uint32" | "u32" => Some(WireDType::UInt32),
+            "bool" | "bool_" => Some(WireDType::Bool),
+            "bfloat16" | "bf16" => Some(WireDType::BFloat16),
+            _ => None,
+        }
+    }
+
+    /// Map to string name.
+    pub fn name(&self) -> &'static str {
+        match self {
+            WireDType::Float16 => "float16",
+            WireDType::Float32 => "float32",
+            WireDType::Float64 => "float64",
+            WireDType::Int8 => "int8",
+            WireDType::Int16 => "int16",
+            WireDType::Int32 => "int32",
+            WireDType::Int64 => "int64",
+            WireDType::UInt8 => "uint8",
+            WireDType::UInt32 => "uint32",
+            WireDType::Bool => "bool",
+            WireDType::BFloat16 => "bfloat16",
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shape inference — platform-independent, used by SocketBackend on Linux
+// ---------------------------------------------------------------------------
+
+/// Broadcast two shapes element-wise (NumPy-style broadcasting).
+/// Returns the output shape, or an error if shapes are incompatible.
+pub fn infer_broadcast_shape(a: &[usize], b: &[usize]) -> Result<Vec<usize>, String> {
+    let ndim = a.len().max(b.len());
+    let mut result = vec![0usize; ndim];
+    for i in 0..ndim {
+        let da = if i < a.len() { a[a.len() - 1 - i] } else { 1 };
+        let db = if i < b.len() { b[b.len() - 1 - i] } else { 1 };
+        if da == db {
+            result[ndim - 1 - i] = da;
+        } else if da == 1 {
+            result[ndim - 1 - i] = db;
+        } else if db == 1 {
+            result[ndim - 1 - i] = da;
+        } else {
+            return Err(format!(
+                "Shapes {:?} and {:?} are not broadcast-compatible", a, b
+            ));
+        }
+    }
+    Ok(result)
+}
+
+/// Infer the output shape of matmul(a, b).
+/// Supports 2D ([M,K] @ [K,N] -> [M,N]) and batched matmul.
+pub fn infer_matmul_shape(a: &[usize], b: &[usize]) -> Result<Vec<usize>, String> {
+    if a.len() < 2 || b.len() < 2 {
+        return Err(format!(
+            "Matmul requires at least 2D tensors, got {:?} and {:?}", a, b
+        ));
+    }
+    let m = a[a.len() - 2];
+    let k1 = a[a.len() - 1];
+    let k2 = b[b.len() - 2];
+    let n = b[b.len() - 1];
+    if k1 != k2 {
+        return Err(format!(
+            "Matmul inner dimensions mismatch: {:?} vs {:?}", a, b
+        ));
+    }
+    // Batch dimensions
+    let a_batch = &a[..a.len() - 2];
+    let b_batch = &b[..b.len() - 2];
+    let mut batch = infer_broadcast_shape(a_batch, b_batch)?;
+    batch.push(m);
+    batch.push(n);
+    Ok(batch)
+}
+
+/// Infer the output shape of a transpose (swap last two dims).
+pub fn infer_transpose_shape(a: &[usize]) -> Result<Vec<usize>, String> {
+    if a.len() < 2 {
+        return Err("Transpose requires at least 2D tensor".to_string());
+    }
+    let mut out = a.to_vec();
+    let n = out.len();
+    out.swap(n - 2, n - 1);
+    Ok(out)
+}
+
+/// Infer the output shape of transpose_dims(a, dim0, dim1).
+pub fn infer_transpose_dims_shape(a: &[usize], dim0: usize, dim1: usize) -> Result<Vec<usize>, String> {
+    if dim0 >= a.len() || dim1 >= a.len() {
+        return Err(format!(
+            "Transpose dims {} and {} out of range for {:?}", dim0, dim1, a
+        ));
+    }
+    let mut out = a.to_vec();
+    out.swap(dim0, dim1);
+    Ok(out)
+}
+
+/// Infer the output shape of a reduction to scalar (e.g. sum, mean).
+pub fn infer_reduce_shape(_a: &[usize]) -> Vec<usize> {
+    vec![1]
+}
+
+/// Infer the output shape of argmax (reduces to 1D of length batch_size or 1).
+pub fn infer_argmax_shape(a: &[usize]) -> Vec<usize> {
+    // Argmax over the last dim, returns shape without last dim (or [1] for 1D)
+    if a.len() <= 1 {
+        vec![1]
+    } else {
+        a[..a.len() - 1].to_vec()
+    }
+}
+
+/// Infer the output shape of slice(a, dim, start, end).
+pub fn infer_slice_shape(a: &[usize], dim: usize, start: usize, end: usize) -> Result<Vec<usize>, String> {
+    if dim >= a.len() {
+        return Err(format!("Slice dim {} out of range for {:?}", dim, a));
+    }
+    if end > a[dim] || start > end {
+        return Err(format!(
+            "Invalid slice range [{}..{}) for dim {} of {:?}", start, end, dim, a
+        ));
+    }
+    let mut out = a.to_vec();
+    out[dim] = end - start;
+    Ok(out)
+}
+
+/// Infer the output shape of concat(a, b, dim).
+pub fn infer_concat_shape(a: &[usize], b: &[usize], dim: usize) -> Result<Vec<usize>, String> {
+    if a.len() != b.len() {
+        return Err(format!(
+            "Concat requires same number of dims, got {:?} and {:?}", a, b
+        ));
+    }
+    if dim >= a.len() {
+        return Err(format!("Concat dim {} out of range for {:?}", dim, a));
+    }
+    for i in 0..a.len() {
+        if i != dim && a[i] != b[i] {
+            return Err(format!(
+                "Concat shapes {:?} and {:?} differ on non-concat dim {}", a, b, i
+            ));
+        }
+    }
+    let mut out = a.to_vec();
+    out[dim] = a[dim] + b[dim];
+    Ok(out)
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================
@@ -1021,5 +1241,112 @@ mod tests {
     #[test]
     fn peek_magic_too_short() {
         assert!(peek_magic(&[0u8; 3]).is_err());
+    }
+
+    // --- WireDType tests ---
+
+    #[test]
+    fn wire_dtype_roundtrip() {
+        for d in 0..=10u32 {
+            let dt = WireDType::from_discriminant(d).unwrap();
+            assert_eq!(dt.discriminant(), d);
+        }
+        assert!(WireDType::from_discriminant(99).is_none());
+    }
+
+    #[test]
+    fn wire_dtype_from_name() {
+        assert_eq!(WireDType::from_name("float32"), Some(WireDType::Float32));
+        assert_eq!(WireDType::from_name("bool"), Some(WireDType::Bool));
+        assert_eq!(WireDType::from_name("int64"), Some(WireDType::Int64));
+        assert!(WireDType::from_name("unknown").is_none());
+    }
+
+    #[test]
+    fn wire_dtype_size_bytes() {
+        assert_eq!(WireDType::Float32.size_bytes(), 4);
+        assert_eq!(WireDType::Float16.size_bytes(), 2);
+        assert_eq!(WireDType::Bool.size_bytes(), 1);
+        assert_eq!(WireDType::Int64.size_bytes(), 8);
+    }
+
+    // --- Shape inference tests ---
+
+    #[test]
+    fn broadcast_same_shape() {
+        assert_eq!(infer_broadcast_shape(&[2, 3], &[2, 3]).unwrap(), vec![2, 3]);
+    }
+
+    #[test]
+    fn broadcast_scalar() {
+        assert_eq!(infer_broadcast_shape(&[2, 3], &[1]).unwrap(), vec![2, 3]);
+        assert_eq!(infer_broadcast_shape(&[1], &[4, 5]).unwrap(), vec![4, 5]);
+    }
+
+    #[test]
+    fn broadcast_expand() {
+        assert_eq!(infer_broadcast_shape(&[1, 3], &[2, 1]).unwrap(), vec![2, 3]);
+        assert_eq!(infer_broadcast_shape(&[3], &[2, 3]).unwrap(), vec![2, 3]);
+    }
+
+    #[test]
+    fn broadcast_incompatible() {
+        assert!(infer_broadcast_shape(&[2, 3], &[4]).is_err());
+    }
+
+    #[test]
+    fn matmul_2d() {
+        assert_eq!(infer_matmul_shape(&[2, 3], &[3, 4]).unwrap(), vec![2, 4]);
+    }
+
+    #[test]
+    fn matmul_batched() {
+        assert_eq!(
+            infer_matmul_shape(&[5, 2, 3], &[5, 3, 4]).unwrap(),
+            vec![5, 2, 4]
+        );
+    }
+
+    #[test]
+    fn matmul_inner_mismatch() {
+        assert!(infer_matmul_shape(&[2, 3], &[4, 5]).is_err());
+    }
+
+    #[test]
+    fn matmul_1d_fails() {
+        assert!(infer_matmul_shape(&[3], &[3, 4]).is_err());
+    }
+
+    #[test]
+    fn transpose_shape() {
+        assert_eq!(infer_transpose_shape(&[2, 3]).unwrap(), vec![3, 2]);
+        assert_eq!(infer_transpose_shape(&[5, 2, 3]).unwrap(), vec![5, 3, 2]);
+    }
+
+    #[test]
+    fn transpose_dims_shape() {
+        assert_eq!(
+            infer_transpose_dims_shape(&[2, 3, 4], 0, 2).unwrap(),
+            vec![4, 3, 2]
+        );
+    }
+
+    #[test]
+    fn slice_shape() {
+        assert_eq!(infer_slice_shape(&[4, 5], 0, 1, 3).unwrap(), vec![2, 5]);
+        assert_eq!(infer_slice_shape(&[4, 5], 1, 0, 2).unwrap(), vec![4, 2]);
+    }
+
+    #[test]
+    fn concat_shape() {
+        assert_eq!(
+            infer_concat_shape(&[2, 3], &[2, 4], 1).unwrap(),
+            vec![2, 7]
+        );
+    }
+
+    #[test]
+    fn concat_shape_mismatch() {
+        assert!(infer_concat_shape(&[2, 3], &[4, 3], 1).is_err());
     }
 }

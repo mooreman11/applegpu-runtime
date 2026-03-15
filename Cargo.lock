@@ -24,7 +24,9 @@ dependencies = [
 name = "applegpu-python"
 version = "0.1.0"
 dependencies = [
+ "applegpu-client",
  "applegpu-core",
+ "applegpu-wire",
  "half",
  "numpy",
  "once_cell",

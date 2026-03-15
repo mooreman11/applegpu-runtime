@@ -1,9 +1,16 @@
-use applegpu_core::tensor::DType;
 use std::collections::HashMap;
 
 pub type BackendResult<T> = std::result::Result<T, String>;
 
-/// Backend trait abstracting over Metal (macOS) and future Socket (Linux) implementations.
+// On macOS, use DType from applegpu-core (has Metal deps).
+// On Linux, use WireDType from applegpu-wire (platform-independent).
+#[cfg(target_os = "macos")]
+pub use applegpu_core::tensor::DType as BackendDType;
+
+#[cfg(target_os = "linux")]
+pub use applegpu_wire::WireDType as BackendDType;
+
+/// Backend trait abstracting over Metal (macOS) and Socket (Linux) implementations.
 ///
 /// All tensor operations go through this trait. Tensor IDs (u64) are opaque handles
 /// managed by the backend. The trait is Send + Sync to allow a global static instance.
@@ -13,14 +20,14 @@ pub trait Backend: Send + Sync {
     fn device_name(&self) -> BackendResult<String>;
 
     // Tensor creation
-    fn tensor_from_data(&self, data: &[u8], shape: Vec<usize>, dtype: DType) -> BackendResult<u64>;
-    fn insert_tensor_from_raw(&self, data: &[u8], shape: Vec<usize>, dtype: DType) -> BackendResult<u64>;
+    fn tensor_from_data(&self, data: &[u8], shape: Vec<usize>, dtype: BackendDType) -> BackendResult<u64>;
+    fn insert_tensor_from_raw(&self, data: &[u8], shape: Vec<usize>, dtype: BackendDType) -> BackendResult<u64>;
     fn destroy(&self, id: u64) -> BackendResult<()>;
     fn try_destroy(&self, id: u64);
 
     // Tensor queries
     fn shape(&self, id: u64) -> BackendResult<Vec<usize>>;
-    fn dtype(&self, id: u64) -> BackendResult<DType>;
+    fn dtype(&self, id: u64) -> BackendResult<BackendDType>;
     fn read_bytes(&self, id: u64) -> BackendResult<Vec<u8>>;
     fn eval(&self, id: u64) -> BackendResult<()>;
     fn is_materialized(&self, id: u64) -> bool;

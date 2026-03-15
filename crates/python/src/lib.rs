@@ -1,18 +1,20 @@
 mod backend;
 #[cfg(target_os = "macos")]
 mod metal_backend;
+#[cfg(target_os = "linux")]
+mod socket_backend;
 
 use pyo3::prelude::*;
 use pyo3::exceptions::PyValueError;
 use std::cell::Cell;
 use std::collections::HashMap;
 
-use applegpu_core::tensor::DType;
-
-use backend::Backend;
+use backend::{Backend, BackendDType};
 
 #[cfg(target_os = "macos")]
 type ActiveBackend = metal_backend::MetalBackend;
+#[cfg(target_os = "linux")]
+type ActiveBackend = socket_backend::SocketBackend;
 
 static BACKEND: once_cell::sync::Lazy<ActiveBackend> = once_cell::sync::Lazy::new(|| {
     ActiveBackend::new()
@@ -30,57 +32,57 @@ fn wrap_tensor(r: Result<u64, String>) -> PyResult<GpuTensor> {
 }
 
 /// Convert Python data (list of floats, ints, or bools) to raw bytes for the given dtype.
-fn python_data_to_bytes(_py: Python<'_>, data: &Bound<'_, PyAny>, shape: &[usize], dtype: DType) -> PyResult<Vec<u8>> {
+fn python_data_to_bytes(_py: Python<'_>, data: &Bound<'_, PyAny>, shape: &[usize], dtype: BackendDType) -> PyResult<Vec<u8>> {
     let expected_len: usize = shape.iter().product();
 
     match dtype {
-        DType::Float32 => {
+        BackendDType::Float32 => {
             let vals: Vec<f64> = data.extract()?;
             if vals.len() != expected_len { return Err(PyValueError::new_err("data length mismatch")); }
             Ok(vals.iter().flat_map(|&v| (v as f32).to_le_bytes()).collect())
         }
-        DType::Float64 => {
+        BackendDType::Float64 => {
             let vals: Vec<f64> = data.extract()?;
             if vals.len() != expected_len { return Err(PyValueError::new_err("data length mismatch")); }
             Ok(vals.iter().flat_map(|v| v.to_le_bytes()).collect())
         }
-        DType::Float16 => {
+        BackendDType::Float16 => {
             use half::f16;
             let vals: Vec<f64> = data.extract()?;
             if vals.len() != expected_len { return Err(PyValueError::new_err("data length mismatch")); }
             Ok(vals.iter().flat_map(|&v| f16::from_f64(v).to_le_bytes()).collect())
         }
-        DType::Int8 => {
+        BackendDType::Int8 => {
             let vals: Vec<i64> = data.extract()?;
             if vals.len() != expected_len { return Err(PyValueError::new_err("data length mismatch")); }
             Ok(vals.iter().flat_map(|&v| (v as i8).to_le_bytes()).collect())
         }
-        DType::Int16 => {
+        BackendDType::Int16 => {
             let vals: Vec<i64> = data.extract()?;
             if vals.len() != expected_len { return Err(PyValueError::new_err("data length mismatch")); }
             Ok(vals.iter().flat_map(|&v| (v as i16).to_le_bytes()).collect())
         }
-        DType::Int32 => {
+        BackendDType::Int32 => {
             let vals: Vec<i64> = data.extract()?;
             if vals.len() != expected_len { return Err(PyValueError::new_err("data length mismatch")); }
             Ok(vals.iter().flat_map(|&v| (v as i32).to_le_bytes()).collect())
         }
-        DType::Int64 => {
+        BackendDType::Int64 => {
             let vals: Vec<i64> = data.extract()?;
             if vals.len() != expected_len { return Err(PyValueError::new_err("data length mismatch")); }
             Ok(vals.iter().flat_map(|v| v.to_le_bytes()).collect())
         }
-        DType::UInt8 => {
+        BackendDType::UInt8 => {
             let vals: Vec<i64> = data.extract()?;
             if vals.len() != expected_len { return Err(PyValueError::new_err("data length mismatch")); }
             Ok(vals.iter().flat_map(|&v| (v as u8).to_le_bytes()).collect())
         }
-        DType::UInt32 => {
+        BackendDType::UInt32 => {
             let vals: Vec<i64> = data.extract()?;
             if vals.len() != expected_len { return Err(PyValueError::new_err("data length mismatch")); }
             Ok(vals.iter().flat_map(|&v| (v as u32).to_le_bytes()).collect())
         }
-        DType::Bool => {
+        BackendDType::Bool => {
             let vals: Vec<bool> = data.extract()?;
             if vals.len() != expected_len { return Err(PyValueError::new_err("data length mismatch")); }
             Ok(vals.iter().map(|&v| if v { 1u8 } else { 0u8 }).collect())
@@ -154,58 +156,58 @@ impl GpuTensor {
         let bytes = py_err(BACKEND.read_bytes(self.id))?;
 
         match dtype {
-            DType::Float32 => {
+            BackendDType::Float32 => {
                 let data: Vec<f64> = bytes.chunks_exact(4)
                     .map(|c| f32::from_le_bytes(c.try_into().unwrap()) as f64)
                     .collect();
                 Ok(pyo3::types::PyList::new_bound(py, &data).into())
             }
-            DType::Float16 => {
+            BackendDType::Float16 => {
                 use half::f16;
                 let data: Vec<f64> = bytes.chunks_exact(2)
                     .map(|c| f16::from_le_bytes(c.try_into().unwrap()).to_f64())
                     .collect();
                 Ok(pyo3::types::PyList::new_bound(py, &data).into())
             }
-            DType::Float64 => {
+            BackendDType::Float64 => {
                 let data: Vec<f64> = bytes.chunks_exact(8)
                     .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
                     .collect();
                 Ok(pyo3::types::PyList::new_bound(py, &data).into())
             }
-            DType::Int8 => {
+            BackendDType::Int8 => {
                 let data: Vec<i64> = bytes.iter().map(|&b| b as i8 as i64).collect();
                 Ok(pyo3::types::PyList::new_bound(py, &data).into())
             }
-            DType::Int16 => {
+            BackendDType::Int16 => {
                 let data: Vec<i64> = bytes.chunks_exact(2)
                     .map(|c| i16::from_le_bytes(c.try_into().unwrap()) as i64)
                     .collect();
                 Ok(pyo3::types::PyList::new_bound(py, &data).into())
             }
-            DType::Int32 => {
+            BackendDType::Int32 => {
                 let data: Vec<i64> = bytes.chunks_exact(4)
                     .map(|c| i32::from_le_bytes(c.try_into().unwrap()) as i64)
                     .collect();
                 Ok(pyo3::types::PyList::new_bound(py, &data).into())
             }
-            DType::Int64 => {
+            BackendDType::Int64 => {
                 let data: Vec<i64> = bytes.chunks_exact(8)
                     .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
                     .collect();
                 Ok(pyo3::types::PyList::new_bound(py, &data).into())
             }
-            DType::UInt8 => {
+            BackendDType::UInt8 => {
                 let data: Vec<i64> = bytes.iter().map(|&b| b as i64).collect();
                 Ok(pyo3::types::PyList::new_bound(py, &data).into())
             }
-            DType::UInt32 => {
+            BackendDType::UInt32 => {
                 let data: Vec<i64> = bytes.chunks_exact(4)
                     .map(|c| u32::from_le_bytes(c.try_into().unwrap()) as i64)
                     .collect();
                 Ok(pyo3::types::PyList::new_bound(py, &data).into())
             }
-            DType::Bool => {
+            BackendDType::Bool => {
                 let data: Vec<bool> = bytes.iter().map(|&b| b != 0).collect();
                 Ok(pyo3::types::PyList::new_bound(py, &data).into())
             }
@@ -359,7 +361,10 @@ impl Drop for GpuTensor {
 
 #[pyfunction]
 fn version() -> &'static str {
-    applegpu_core::version()
+    #[cfg(target_os = "macos")]
+    { applegpu_core::version() }
+    #[cfg(not(target_os = "macos"))]
+    { env!("CARGO_PKG_VERSION") }
 }
 
 #[pyfunction]
@@ -374,19 +379,18 @@ fn device_name() -> PyResult<String> {
 
 #[pyfunction]
 fn dtype_size(name: &str) -> PyResult<usize> {
-    use applegpu_core::tensor::DType;
     let dt = match name {
-        "float16" | "f16" => DType::Float16,
-        "float32" | "f32" => DType::Float32,
-        "float64" | "f64" => DType::Float64,
-        "bfloat16" | "bf16" => DType::BFloat16,
-        "int8" | "i8" => DType::Int8,
-        "int16" | "i16" => DType::Int16,
-        "int32" | "i32" => DType::Int32,
-        "int64" | "i64" => DType::Int64,
-        "uint8" | "u8" => DType::UInt8,
-        "uint32" | "u32" => DType::UInt32,
-        "bool" => DType::Bool,
+        "float16" | "f16" => BackendDType::Float16,
+        "float32" | "f32" => BackendDType::Float32,
+        "float64" | "f64" => BackendDType::Float64,
+        "bfloat16" | "bf16" => BackendDType::BFloat16,
+        "int8" | "i8" => BackendDType::Int8,
+        "int16" | "i16" => BackendDType::Int16,
+        "int32" | "i32" => BackendDType::Int32,
+        "int64" | "i64" => BackendDType::Int64,
+        "uint8" | "u8" => BackendDType::UInt8,
+        "uint32" | "u32" => BackendDType::UInt32,
+        "bool" => BackendDType::Bool,
         _ => return Err(PyValueError::new_err(format!("Unknown dtype: {}", name))),
     };
     Ok(dt.size_bytes())
@@ -399,7 +403,7 @@ fn dtype_size(name: &str) -> PyResult<usize> {
 #[pyo3(signature = (arr))]
 fn from_numpy(_py: Python<'_>, arr: &Bound<'_, pyo3::types::PyAny>) -> PyResult<GpuTensor> {
     let np_dtype_name: String = arr.getattr("dtype")?.getattr("name")?.extract()?;
-    let dtype = DType::from_name(&np_dtype_name)
+    let dtype = BackendDType::from_name(&np_dtype_name)
         .ok_or_else(|| PyValueError::new_err(format!(
             "Unsupported numpy dtype: {}. Supported: float16, float32, float64, int8, int16, int32, int64, uint8, uint32, bool",
             np_dtype_name
@@ -457,7 +461,7 @@ fn from_torch(py: Python<'_>, tensor: &Bound<'_, pyo3::types::PyAny>) -> PyResul
             )));
         };
 
-    let dtype = DType::from_name(dtype_str)
+    let dtype = BackendDType::from_name(dtype_str)
         .ok_or_else(|| PyValueError::new_err(format!("Unknown dtype: {}", dtype_str)))?;
     let shape: Vec<usize> = prepared.getattr("shape")?.extract()?;
     let numel: usize = prepared.call_method0("numel")?.extract()?;
@@ -482,7 +486,7 @@ fn from_torch(py: Python<'_>, tensor: &Bound<'_, pyo3::types::PyAny>) -> PyResul
 /// This is the fastest path for tensor creation -- no numpy/torch overhead.
 #[pyfunction]
 fn from_bytes(_py: Python<'_>, data: &[u8], shape: Vec<usize>, dtype: &str) -> PyResult<GpuTensor> {
-    let dtype = DType::from_name(dtype)
+    let dtype = BackendDType::from_name(dtype)
         .ok_or_else(|| PyValueError::new_err(format!("Unknown dtype: {}", dtype)))?;
     wrap_tensor(BACKEND.tensor_from_data(data, shape, dtype))
 }
@@ -494,7 +498,7 @@ fn from_bytes(_py: Python<'_>, data: &[u8], shape: Vec<usize>, dtype: &str) -> P
 #[pyo3(signature = (data, shape, dtype=None))]
 fn tensor(py: Python<'_>, data: &Bound<'_, PyAny>, shape: Vec<usize>, dtype: Option<&str>) -> PyResult<GpuTensor> {
     let dtype_str = dtype.unwrap_or("float32");
-    let dtype = DType::from_name(dtype_str)
+    let dtype = BackendDType::from_name(dtype_str)
         .ok_or_else(|| PyValueError::new_err(format!("Unsupported dtype: {}", dtype_str)))?;
 
     let bytes = python_data_to_bytes(py, data, &shape, dtype)?;
