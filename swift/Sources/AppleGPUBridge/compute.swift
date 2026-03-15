@@ -488,6 +488,65 @@ final class GPUCompute {
         commandBuffer.waitUntilCompleted()
         return commandBuffer.status == .completed
     }
+
+    /// Dispatch gather/index_select: 3 buffers (input, indices, output) + 3 uint params.
+    func dispatchGather(bufIn: MTLBuffer, bufIndices: MTLBuffer, bufOut: MTLBuffer,
+                        rows: Int, inCols: Int, outCols: Int) -> Bool {
+        if rows == 0 || outCols == 0 { return true }
+
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder() else { return false }
+
+        encoder.setComputePipelineState(pipelineState)
+        encoder.setBuffer(bufIn, offset: 0, index: 0)
+        encoder.setBuffer(bufIndices, offset: 0, index: 1)
+        encoder.setBuffer(bufOut, offset: 0, index: 2)
+
+        var r = UInt32(rows), ic = UInt32(inCols), oc = UInt32(outCols)
+        encoder.setBytes(&r, length: MemoryLayout<UInt32>.size, index: 3)
+        encoder.setBytes(&ic, length: MemoryLayout<UInt32>.size, index: 4)
+        encoder.setBytes(&oc, length: MemoryLayout<UInt32>.size, index: 5)
+
+        let w = pipelineState.threadExecutionWidth
+        let h = pipelineState.maxTotalThreadsPerThreadgroup / w
+        let threadsPerGroup = MTLSize(width: w, height: h, depth: 1)
+        let gridSize = MTLSize(width: outCols, height: rows, depth: 1)
+
+        encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadsPerGroup)
+        encoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        return commandBuffer.status == .completed
+    }
+
+    /// Non-blocking gather dispatch.
+    func dispatchGatherNB(queue: MTLCommandQueue, bufIn: MTLBuffer, bufIndices: MTLBuffer,
+                          bufOut: MTLBuffer, rows: Int, inCols: Int, outCols: Int) -> AnyObject? {
+        if rows == 0 || outCols == 0 { return nil }
+
+        guard let commandBuffer = queue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
+
+        encoder.setComputePipelineState(pipelineState)
+        encoder.setBuffer(bufIn, offset: 0, index: 0)
+        encoder.setBuffer(bufIndices, offset: 0, index: 1)
+        encoder.setBuffer(bufOut, offset: 0, index: 2)
+
+        var r = UInt32(rows), ic = UInt32(inCols), oc = UInt32(outCols)
+        encoder.setBytes(&r, length: MemoryLayout<UInt32>.size, index: 3)
+        encoder.setBytes(&ic, length: MemoryLayout<UInt32>.size, index: 4)
+        encoder.setBytes(&oc, length: MemoryLayout<UInt32>.size, index: 5)
+
+        let w = pipelineState.threadExecutionWidth
+        let h = pipelineState.maxTotalThreadsPerThreadgroup / w
+        let threadsPerGroup = MTLSize(width: w, height: h, depth: 1)
+        let gridSize = MTLSize(width: outCols, height: rows, depth: 1)
+
+        encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadsPerGroup)
+        encoder.endEncoding()
+        commandBuffer.commit()
+        return commandBuffer
+    }
 }
 
 // MARK: - C ABI exports
@@ -830,6 +889,66 @@ public func gpuBridgeComputeEmbedding(
         bufOut: bufOut.buffer, seqLen: Int(seqLen), embedDim: Int(embedDim)
     )
     return success ? 0 : -1
+}
+
+// MARK: - Gather C ABI exports
+
+@_cdecl("gpu_bridge_compute_gather")
+public func gpuBridgeComputeGather(
+    _ computePtr: UnsafeMutableRawPointer?,
+    _ bufInPtr: UnsafeRawPointer?,
+    _ bufIndicesPtr: UnsafeRawPointer?,
+    _ bufOutPtr: UnsafeMutableRawPointer?,
+    _ rows: UInt32,
+    _ inCols: UInt32,
+    _ outCols: UInt32
+) -> Int32 {
+    guard let computePtr = computePtr,
+          let bufInPtr = bufInPtr,
+          let bufIndicesPtr = bufIndicesPtr,
+          let bufOutPtr = bufOutPtr else { return -1 }
+
+    let compute = Unmanaged<GPUCompute>.fromOpaque(computePtr).takeUnretainedValue()
+    let bufIn = Unmanaged<GPUBuffer>.fromOpaque(bufInPtr).takeUnretainedValue()
+    let bufIndices = Unmanaged<GPUBuffer>.fromOpaque(bufIndicesPtr).takeUnretainedValue()
+    let bufOut = Unmanaged<GPUBuffer>.fromOpaque(bufOutPtr).takeUnretainedValue()
+
+    let success = compute.dispatchGather(
+        bufIn: bufIn.buffer, bufIndices: bufIndices.buffer,
+        bufOut: bufOut.buffer, rows: Int(rows), inCols: Int(inCols), outCols: Int(outCols)
+    )
+    return success ? 0 : -1
+}
+
+@_cdecl("gpu_bridge_compute_gather_nb")
+public func gpuBridgeComputeGatherNB(
+    _ computePtr: UnsafeMutableRawPointer?,
+    _ queuePtr: UnsafeMutableRawPointer?,
+    _ bufInPtr: UnsafeRawPointer?,
+    _ bufIndicesPtr: UnsafeRawPointer?,
+    _ bufOutPtr: UnsafeMutableRawPointer?,
+    _ rows: UInt32,
+    _ inCols: UInt32,
+    _ outCols: UInt32
+) -> UnsafeMutableRawPointer? {
+    guard let computePtr = computePtr,
+          let queuePtr = queuePtr,
+          let bufInPtr = bufInPtr,
+          let bufIndicesPtr = bufIndicesPtr,
+          let bufOutPtr = bufOutPtr else { return nil }
+
+    let compute = Unmanaged<GPUCompute>.fromOpaque(computePtr).takeUnretainedValue()
+    let queue = Unmanaged<MTLCommandQueue>.fromOpaque(queuePtr).takeUnretainedValue()
+    let bufIn = Unmanaged<GPUBuffer>.fromOpaque(bufInPtr).takeUnretainedValue()
+    let bufIndices = Unmanaged<GPUBuffer>.fromOpaque(bufIndicesPtr).takeUnretainedValue()
+    let bufOut = Unmanaged<GPUBuffer>.fromOpaque(bufOutPtr).takeUnretainedValue()
+
+    guard let cb = compute.dispatchGatherNB(
+        queue: queue, bufIn: bufIn.buffer, bufIndices: bufIndices.buffer,
+        bufOut: bufOut.buffer, rows: Int(rows), inCols: Int(inCols), outCols: Int(outCols)
+    ) else { return nil }
+
+    return Unmanaged.passRetained(cb).toOpaque()
 }
 
 // MARK: - Slice C ABI exports

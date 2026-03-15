@@ -66,6 +66,10 @@ pub enum OpKind {
     Triu { diagonal: i32 },
     // Lower triangular: zero above diagonal
     Tril { diagonal: i32 },
+    // Gather values from input along dim using index tensor
+    Gather { dim: usize },
+    // Select rows/columns by 1D index tensor
+    IndexSelect { dim: usize },
 }
 
 impl OpKind {
@@ -105,6 +109,8 @@ impl OpKind {
             OpKind::MaskedFill { .. } => "masked_fill_f32",
             OpKind::Triu { .. } => "triu_f32",
             OpKind::Tril { .. } => "tril_f32",
+            OpKind::Gather { dim } => if *dim == 0 { "gather_dim0_f32" } else { "gather_dim1_f32" },
+            OpKind::IndexSelect { dim } => if *dim == 0 { "index_select_dim0_f32" } else { "index_select_dim1_f32" },
         }
     }
 
@@ -212,6 +218,14 @@ impl OpKind {
 
     pub fn is_tril(&self) -> bool {
         matches!(self, OpKind::Tril { .. })
+    }
+
+    pub fn is_gather(&self) -> bool {
+        matches!(self, OpKind::Gather { .. })
+    }
+
+    pub fn is_index_select(&self) -> bool {
+        matches!(self, OpKind::IndexSelect { .. })
     }
 }
 

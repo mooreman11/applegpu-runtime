@@ -378,6 +378,45 @@ impl LazyRuntime {
             return Ok(out);
         }
 
+        if let crate::graph::OpKind::Gather { dim } = node.op {
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+            let input = self.get_tensor(node.inputs[0])?;
+            let indices = self.get_tensor(node.inputs[1])?;
+            let in_dims = input.meta.layout.shape.dims();
+            let out_dims = node.out_shape.dims();
+            let kernel_base = if dim == 0 { "gather_dim0_f32" } else { "gather_dim1_f32" };
+            REGISTRY.dispatch_gather_typed(
+                device, dtype, kernel_base,
+                &input.buffer, &indices.buffer, &out.buffer,
+                out_dims[0], in_dims[1], out_dims[1],
+            )?;
+            return Ok(out);
+        }
+
+        if let crate::graph::OpKind::IndexSelect { dim } = node.op {
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+            let input = self.get_tensor(node.inputs[0])?;
+            let indices = self.get_tensor(node.inputs[1])?;
+            let in_dims = input.meta.layout.shape.dims();
+            let num_indices = indices.meta.layout.shape.numel();
+            if dim == 0 {
+                REGISTRY.dispatch_index_select_dim0_typed(
+                    device, dtype,
+                    &input.buffer, &indices.buffer, &out.buffer,
+                    num_indices, in_dims[1],
+                )?;
+            } else {
+                REGISTRY.dispatch_index_select_dim1_typed(
+                    device, dtype,
+                    &input.buffer, &indices.buffer, &out.buffer,
+                    in_dims[0], in_dims[1], num_indices,
+                )?;
+            }
+            return Ok(out);
+        }
+
         if node.op.is_reshape() {
             let out_buf = self.pool.acquire(device, out_size)?;
             let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
@@ -738,6 +777,39 @@ impl LazyRuntime {
             let seq_len = indices.meta.layout.shape.numel();
             let embed_dim = weights.meta.layout.shape.dims()[1];
             return REGISTRY.dispatch_embedding_typed_nb(device, dtype, queue, &weights.buffer, &indices.buffer, &out.buffer, seq_len, embed_dim);
+        }
+
+        if let crate::graph::OpKind::Gather { dim } = node.op {
+            let input = self.get_tensor(node.inputs[0])?;
+            let indices = self.get_tensor(node.inputs[1])?;
+            let in_dims = input.meta.layout.shape.dims();
+            let out_dims = node.out_shape.dims();
+            let kernel_base = if dim == 0 { "gather_dim0_f32" } else { "gather_dim1_f32" };
+            return REGISTRY.dispatch_gather_typed_nb(
+                device, dtype, kernel_base, queue,
+                &input.buffer, &indices.buffer, &out.buffer,
+                out_dims[0], in_dims[1], out_dims[1],
+            );
+        }
+
+        if let crate::graph::OpKind::IndexSelect { dim } = node.op {
+            let input = self.get_tensor(node.inputs[0])?;
+            let indices = self.get_tensor(node.inputs[1])?;
+            let in_dims = input.meta.layout.shape.dims();
+            let num_indices = indices.meta.layout.shape.numel();
+            if dim == 0 {
+                return REGISTRY.dispatch_index_select_dim0_typed_nb(
+                    device, dtype, queue,
+                    &input.buffer, &indices.buffer, &out.buffer,
+                    num_indices, in_dims[1],
+                );
+            } else {
+                return REGISTRY.dispatch_index_select_dim1_typed_nb(
+                    device, dtype, queue,
+                    &input.buffer, &indices.buffer, &out.buffer,
+                    in_dims[0], in_dims[1], num_indices,
+                );
+            }
         }
 
         if node.op.is_reshape() {

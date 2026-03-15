@@ -88,6 +88,8 @@ fn op_to_discriminant(op: &OpKind) -> u32 {
         OpKind::MaskedFill { .. } => 30,
         OpKind::Triu { .. } => 31,
         OpKind::Tril { .. } => 32,
+        OpKind::Gather { .. } => 33,
+        OpKind::IndexSelect { .. } => 34,
     }
 }
 
@@ -189,6 +191,14 @@ fn discriminant_to_op(d: u32, r: &mut impl Read) -> io::Result<OpKind> {
             r.read_exact(&mut diag_bytes)?;
             Ok(OpKind::Tril { diagonal: i32::from_le_bytes(diag_bytes) })
         }
+        33 => {
+            let dim = read_u32(r)? as usize;
+            Ok(OpKind::Gather { dim })
+        }
+        34 => {
+            let dim = read_u32(r)? as usize;
+            Ok(OpKind::IndexSelect { dim })
+        }
         _ => Err(io::Error::new(io::ErrorKind::InvalidData, format!("Unknown op type: {}", d))),
     }
 }
@@ -272,6 +282,12 @@ impl EvalRequest {
             }
             if let OpKind::Tril { diagonal } = node.op {
                 buf.write_all(&diagonal.to_le_bytes()).unwrap();
+            }
+            if let OpKind::Gather { dim } = node.op {
+                write_u32(&mut buf, dim as u32).unwrap();
+            }
+            if let OpKind::IndexSelect { dim } = node.op {
+                write_u32(&mut buf, dim as u32).unwrap();
             }
         }
 

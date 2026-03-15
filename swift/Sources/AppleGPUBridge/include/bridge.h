@@ -591,6 +591,28 @@ void* gpu_bridge_compute_masked_fill_nd_nb(
     float fill_value
 );
 
+// Gather dispatch: 3 buffers (input, indices, output) + 3 uint params
+int32_t gpu_bridge_compute_gather(
+    GPUComputeHandle* compute,
+    const GPUBufferHandle* buf_input,
+    const GPUBufferHandle* buf_indices,
+    GPUBufferHandle* buf_output,
+    uint32_t rows,
+    uint32_t in_cols,
+    uint32_t out_cols
+);
+
+void* gpu_bridge_compute_gather_nb(
+    GPUComputeHandle* compute,
+    void* queue,
+    const GPUBufferHandle* buf_input,
+    const GPUBufferHandle* buf_indices,
+    GPUBufferHandle* buf_output,
+    uint32_t rows,
+    uint32_t in_cols,
+    uint32_t out_cols
+);
+
 // Triangular (triu/tril) dispatch
 int32_t gpu_bridge_compute_triangular(
     GPUComputeHandle* compute,

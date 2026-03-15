@@ -834,6 +834,111 @@ pub fn tril(rt: &mut LazyRuntime, input_id: u64, diagonal: i32) -> Result<u64> {
     Ok(out_id)
 }
 
+/// Gather values from input along a dimension using index tensor.
+/// Input and index must be 2D. Index must be Int32.
+/// Output has same shape as index, same dtype as input.
+pub fn gather(rt: &mut LazyRuntime, input_id: u64, dim: usize, index_id: u64) -> Result<u64> {
+    let input_dtype = rt.dtype(input_id)?;
+    validate_compute_dtype(input_dtype)?;
+    let input_shape = rt.shape(input_id)?;
+    let index_shape = rt.shape(index_id)?;
+    let index_dtype = rt.dtype(index_id)?;
+
+    if index_dtype != DType::Int32 {
+        return Err(GpuError::InvalidTensor(format!(
+            "gather indices must be Int32, got {:?}", index_dtype
+        )));
+    }
+    if input_shape.len() != 2 {
+        return Err(GpuError::InvalidTensor(
+            "gather currently supports only 2D tensors".to_string()
+        ));
+    }
+    if index_shape.len() != 2 {
+        return Err(GpuError::InvalidTensor(
+            "gather index must be 2D (same ndim as input)".to_string()
+        ));
+    }
+    if dim > 1 {
+        return Err(GpuError::InvalidTensor(format!(
+            "gather dim {} not supported for 2D tensors (must be 0 or 1)", dim
+        )));
+    }
+    // For dim=0: index rows must match input rows (the non-gather dim)
+    // Actually: for gather, index shape determines output shape.
+    // The non-gather dimensions must match between input and index.
+    if dim == 0 && index_shape[1] != input_shape[1] {
+        return Err(GpuError::InvalidTensor(format!(
+            "gather dim=0: index cols {} must match input cols {}", index_shape[1], input_shape[1]
+        )));
+    }
+    if dim == 1 && index_shape[0] != input_shape[0] {
+        return Err(GpuError::InvalidTensor(format!(
+            "gather dim=1: index rows {} must match input rows {}", index_shape[0], input_shape[0]
+        )));
+    }
+
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op: OpKind::Gather { dim },
+        inputs: vec![input_id, index_id],
+        out_shape: Shape::new(index_shape)?,
+        out_dtype: input_dtype,
+        container_id: ContainerId::DEFAULT,
+    });
+    Ok(out_id)
+}
+
+/// Select rows/columns from input by 1D index tensor.
+/// Input must be 2D, index must be 1D Int32.
+pub fn index_select(rt: &mut LazyRuntime, input_id: u64, dim: usize, index_id: u64) -> Result<u64> {
+    let input_dtype = rt.dtype(input_id)?;
+    validate_compute_dtype(input_dtype)?;
+    let input_shape = rt.shape(input_id)?;
+    let index_shape = rt.shape(index_id)?;
+    let index_dtype = rt.dtype(index_id)?;
+
+    if index_dtype != DType::Int32 {
+        return Err(GpuError::InvalidTensor(format!(
+            "index_select indices must be Int32, got {:?}", index_dtype
+        )));
+    }
+    if input_shape.len() != 2 {
+        return Err(GpuError::InvalidTensor(
+            "index_select currently supports only 2D tensors".to_string()
+        ));
+    }
+    if index_shape.len() != 1 {
+        return Err(GpuError::InvalidTensor(
+            "index_select index must be 1D".to_string()
+        ));
+    }
+    if dim > 1 {
+        return Err(GpuError::InvalidTensor(format!(
+            "index_select dim {} not supported for 2D tensors (must be 0 or 1)", dim
+        )));
+    }
+
+    let num_indices = index_shape[0];
+    let out_shape = if dim == 0 {
+        vec![num_indices, input_shape[1]]
+    } else {
+        vec![input_shape[0], num_indices]
+    };
+
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op: OpKind::IndexSelect { dim },
+        inputs: vec![input_id, index_id],
+        out_shape: Shape::new(out_shape)?,
+        out_dtype: input_dtype,
+        container_id: ContainerId::DEFAULT,
+    });
+    Ok(out_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2380,5 +2485,172 @@ mod tests {
         let a_id = a.meta.id;
         rt.insert_tensor(a).unwrap();
         assert!(triu(&mut rt, a_id, 0).is_err());
+    }
+
+    // ── Gather tests ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_gather_dim1() {
+        // input [[1,2,3],[4,5,6]], indices [[0,2],[1,0]] → [[1,3],[5,4]]
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        let input = Tensor::from_f32(&device, vec![2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
+        let indices_data: [i32; 4] = [0, 2, 1, 0];
+        let indices_bytes = unsafe {
+            std::slice::from_raw_parts(indices_data.as_ptr() as *const u8, 16)
+        };
+        let indices = Tensor::from_data(&device, vec![2, 2], DType::Int32, indices_bytes).unwrap();
+        let i_id = input.meta.id;
+        let idx_id = indices.meta.id;
+        rt.insert_tensor(input).unwrap();
+        rt.insert_tensor(indices).unwrap();
+
+        let out_id = gather(&mut rt, i_id, 1, idx_id).unwrap();
+        assert_eq!(rt.shape(out_id).unwrap(), vec![2, 2]);
+
+        rt.eval(&device, out_id).unwrap();
+        let result = rt.read_f32(out_id).unwrap();
+        assert_eq!(result, &[1.0, 3.0, 5.0, 4.0]);
+    }
+
+    #[test]
+    fn test_gather_dim0() {
+        // input [[1,2],[3,4],[5,6]], indices [[0,2],[1,0]] → [[1,6],[3,2]]
+        // dim=0: output[i][j] = input[indices[i][j]][j]
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        let input = Tensor::from_f32(&device, vec![3, 2], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
+        let indices_data: [i32; 4] = [0, 2, 1, 0];
+        let indices_bytes = unsafe {
+            std::slice::from_raw_parts(indices_data.as_ptr() as *const u8, 16)
+        };
+        let indices = Tensor::from_data(&device, vec![2, 2], DType::Int32, indices_bytes).unwrap();
+        let i_id = input.meta.id;
+        let idx_id = indices.meta.id;
+        rt.insert_tensor(input).unwrap();
+        rt.insert_tensor(indices).unwrap();
+
+        let out_id = gather(&mut rt, i_id, 0, idx_id).unwrap();
+        assert_eq!(rt.shape(out_id).unwrap(), vec![2, 2]);
+
+        rt.eval(&device, out_id).unwrap();
+        let result = rt.read_f32(out_id).unwrap();
+        assert_eq!(result, &[1.0, 6.0, 3.0, 2.0]);
+    }
+
+    #[test]
+    fn test_gather_rejects_non_int32_indices() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        let input = Tensor::from_f32(&device, vec![2, 3], &[1.0; 6]).unwrap();
+        let bad_indices = Tensor::from_f32(&device, vec![2, 2], &[0.0; 4]).unwrap();
+        let i_id = input.meta.id;
+        let idx_id = bad_indices.meta.id;
+        rt.insert_tensor(input).unwrap();
+        rt.insert_tensor(bad_indices).unwrap();
+        assert!(gather(&mut rt, i_id, 1, idx_id).is_err());
+    }
+
+    #[test]
+    fn test_gather_rejects_1d() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        let input = Tensor::from_f32(&device, vec![6], &[1.0; 6]).unwrap();
+        let indices_data: [i32; 2] = [0, 1];
+        let indices_bytes = unsafe {
+            std::slice::from_raw_parts(indices_data.as_ptr() as *const u8, 8)
+        };
+        let indices = Tensor::from_data(&device, vec![2], DType::Int32, indices_bytes).unwrap();
+        let i_id = input.meta.id;
+        let idx_id = indices.meta.id;
+        rt.insert_tensor(input).unwrap();
+        rt.insert_tensor(indices).unwrap();
+        assert!(gather(&mut rt, i_id, 0, idx_id).is_err());
+    }
+
+    // ── IndexSelect tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_index_select_dim0() {
+        // input [[1,2,3],[4,5,6],[7,8,9]], indices [0,2] → [[1,2,3],[7,8,9]]
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        let input = Tensor::from_f32(&device, vec![3, 3], &[
+            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0
+        ]).unwrap();
+        let indices_data: [i32; 2] = [0, 2];
+        let indices_bytes = unsafe {
+            std::slice::from_raw_parts(indices_data.as_ptr() as *const u8, 8)
+        };
+        let indices = Tensor::from_data(&device, vec![2], DType::Int32, indices_bytes).unwrap();
+        let i_id = input.meta.id;
+        let idx_id = indices.meta.id;
+        rt.insert_tensor(input).unwrap();
+        rt.insert_tensor(indices).unwrap();
+
+        let out_id = index_select(&mut rt, i_id, 0, idx_id).unwrap();
+        assert_eq!(rt.shape(out_id).unwrap(), vec![2, 3]);
+
+        rt.eval(&device, out_id).unwrap();
+        let result = rt.read_f32(out_id).unwrap();
+        assert_eq!(result, &[1.0, 2.0, 3.0, 7.0, 8.0, 9.0]);
+    }
+
+    #[test]
+    fn test_index_select_dim1() {
+        // input [[1,2,3],[4,5,6]], indices [0,2] → [[1,3],[4,6]]
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        let input = Tensor::from_f32(&device, vec![2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
+        let indices_data: [i32; 2] = [0, 2];
+        let indices_bytes = unsafe {
+            std::slice::from_raw_parts(indices_data.as_ptr() as *const u8, 8)
+        };
+        let indices = Tensor::from_data(&device, vec![2], DType::Int32, indices_bytes).unwrap();
+        let i_id = input.meta.id;
+        let idx_id = indices.meta.id;
+        rt.insert_tensor(input).unwrap();
+        rt.insert_tensor(indices).unwrap();
+
+        let out_id = index_select(&mut rt, i_id, 1, idx_id).unwrap();
+        assert_eq!(rt.shape(out_id).unwrap(), vec![2, 2]);
+
+        rt.eval(&device, out_id).unwrap();
+        let result = rt.read_f32(out_id).unwrap();
+        assert_eq!(result, &[1.0, 3.0, 4.0, 6.0]);
+    }
+
+    #[test]
+    fn test_index_select_rejects_non_int32() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        let input = Tensor::from_f32(&device, vec![3, 2], &[1.0; 6]).unwrap();
+        let bad_indices = Tensor::from_f32(&device, vec![2], &[0.0, 1.0]).unwrap();
+        let i_id = input.meta.id;
+        let idx_id = bad_indices.meta.id;
+        rt.insert_tensor(input).unwrap();
+        rt.insert_tensor(bad_indices).unwrap();
+        assert!(index_select(&mut rt, i_id, 0, idx_id).is_err());
+    }
+
+    #[test]
+    fn test_index_select_rejects_2d_index() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        let input = Tensor::from_f32(&device, vec![3, 2], &[1.0; 6]).unwrap();
+        let indices_data: [i32; 4] = [0, 1, 0, 1];
+        let indices_bytes = unsafe {
+            std::slice::from_raw_parts(indices_data.as_ptr() as *const u8, 16)
+        };
+        let indices = Tensor::from_data(&device, vec![2, 2], DType::Int32, indices_bytes).unwrap();
+        let i_id = input.meta.id;
+        let idx_id = indices.meta.id;
+        rt.insert_tensor(input).unwrap();
+        rt.insert_tensor(indices).unwrap();
+        assert!(index_select(&mut rt, i_id, 0, idx_id).is_err());
     }
 }

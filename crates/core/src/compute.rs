@@ -448,6 +448,176 @@ kernel void tril_f16(
 }
 "#;
 
+// ── Gather kernel sources ───────────────────────────────────────────────────
+
+const GATHER_DIM0_KERNEL_SOURCE: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void gather_dim0_f32(
+    device const float* input [[buffer(0)]],
+    device const int* indices [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    constant uint& rows [[buffer(3)]],
+    constant uint& in_cols [[buffer(4)]],
+    constant uint& out_cols [[buffer(5)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint row = gid.y;
+    uint col = gid.x;
+    if (row >= rows || col >= out_cols) return;
+    int idx = indices[row * out_cols + col];
+    output[row * out_cols + col] = input[idx * in_cols + col];
+}
+"#;
+
+const GATHER_DIM0_KERNEL_SOURCE_F16: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void gather_dim0_f16(
+    device const half* input [[buffer(0)]],
+    device const int* indices [[buffer(1)]],
+    device half* output [[buffer(2)]],
+    constant uint& rows [[buffer(3)]],
+    constant uint& in_cols [[buffer(4)]],
+    constant uint& out_cols [[buffer(5)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint row = gid.y;
+    uint col = gid.x;
+    if (row >= rows || col >= out_cols) return;
+    int idx = indices[row * out_cols + col];
+    output[row * out_cols + col] = input[idx * in_cols + col];
+}
+"#;
+
+const GATHER_DIM1_KERNEL_SOURCE: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void gather_dim1_f32(
+    device const float* input [[buffer(0)]],
+    device const int* indices [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    constant uint& rows [[buffer(3)]],
+    constant uint& in_cols [[buffer(4)]],
+    constant uint& out_cols [[buffer(5)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint row = gid.y;
+    uint col = gid.x;
+    if (row >= rows || col >= out_cols) return;
+    int idx = indices[row * out_cols + col];
+    output[row * out_cols + col] = input[row * in_cols + idx];
+}
+"#;
+
+const GATHER_DIM1_KERNEL_SOURCE_F16: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void gather_dim1_f16(
+    device const half* input [[buffer(0)]],
+    device const int* indices [[buffer(1)]],
+    device half* output [[buffer(2)]],
+    constant uint& rows [[buffer(3)]],
+    constant uint& in_cols [[buffer(4)]],
+    constant uint& out_cols [[buffer(5)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint row = gid.y;
+    uint col = gid.x;
+    if (row >= rows || col >= out_cols) return;
+    int idx = indices[row * out_cols + col];
+    output[row * out_cols + col] = input[row * in_cols + idx];
+}
+"#;
+
+// ── IndexSelect kernel sources ──────────────────────────────────────────────
+
+const INDEX_SELECT_DIM0_KERNEL_SOURCE: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void index_select_dim0_f32(
+    device const float* input [[buffer(0)]],
+    device const int* indices [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    constant uint& num_indices [[buffer(3)]],
+    constant uint& cols [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint i = gid.y;
+    uint j = gid.x;
+    if (i >= num_indices || j >= cols) return;
+    int idx = indices[i];
+    output[i * cols + j] = input[idx * cols + j];
+}
+"#;
+
+const INDEX_SELECT_DIM0_KERNEL_SOURCE_F16: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void index_select_dim0_f16(
+    device const half* input [[buffer(0)]],
+    device const int* indices [[buffer(1)]],
+    device half* output [[buffer(2)]],
+    constant uint& num_indices [[buffer(3)]],
+    constant uint& cols [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint i = gid.y;
+    uint j = gid.x;
+    if (i >= num_indices || j >= cols) return;
+    int idx = indices[i];
+    output[i * cols + j] = input[idx * cols + j];
+}
+"#;
+
+const INDEX_SELECT_DIM1_KERNEL_SOURCE: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void index_select_dim1_f32(
+    device const float* input [[buffer(0)]],
+    device const int* indices [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    constant uint& rows [[buffer(3)]],
+    constant uint& in_cols [[buffer(4)]],
+    constant uint& num_indices [[buffer(5)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint row = gid.y;
+    uint i = gid.x;
+    if (row >= rows || i >= num_indices) return;
+    int idx = indices[i];
+    output[row * num_indices + i] = input[row * in_cols + idx];
+}
+"#;
+
+const INDEX_SELECT_DIM1_KERNEL_SOURCE_F16: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void index_select_dim1_f16(
+    device const half* input [[buffer(0)]],
+    device const int* indices [[buffer(1)]],
+    device half* output [[buffer(2)]],
+    constant uint& rows [[buffer(3)]],
+    constant uint& in_cols [[buffer(4)]],
+    constant uint& num_indices [[buffer(5)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint row = gid.y;
+    uint i = gid.x;
+    if (row >= rows || i >= num_indices) return;
+    int idx = indices[i];
+    output[row * num_indices + i] = input[row * in_cols + idx];
+}
+"#;
+
 const GELU_KERNEL_SOURCE: &str = const_format::concatcp!(
     r#"
 #include <metal_stdlib>
@@ -1421,6 +1591,155 @@ impl ComputePipeline {
         if result == 0 { Ok(()) } else { Err(GpuError::ComputeFailed("Embedding dispatch failed".to_string())) }
     }
 
+    /// Dispatch gather: output[i][j] uses indices to select from input along a dimension.
+    /// Uses the same 3-buffer + 3-uint pattern.
+    pub fn dispatch_gather(
+        &self,
+        buf_input: &Buffer,
+        buf_indices: &Buffer,
+        buf_out: &Buffer,
+        rows: usize,
+        in_cols: usize,
+        out_cols: usize,
+    ) -> Result<()> {
+        let result = unsafe {
+            ffi::gpu_bridge_compute_gather(
+                self.handle,
+                buf_input.raw_handle() as *const _,
+                buf_indices.raw_handle() as *const _,
+                buf_out.raw_handle(),
+                rows as u32,
+                in_cols as u32,
+                out_cols as u32,
+            )
+        };
+        if result == 0 { Ok(()) } else { Err(GpuError::ComputeFailed("Gather dispatch failed".to_string())) }
+    }
+
+    /// Non-blocking gather. Returns command buffer handle.
+    pub fn dispatch_gather_nb(
+        &self,
+        queue: *mut std::ffi::c_void,
+        buf_input: &Buffer,
+        buf_indices: &Buffer,
+        buf_out: &Buffer,
+        rows: usize,
+        in_cols: usize,
+        out_cols: usize,
+    ) -> Result<*mut std::ffi::c_void> {
+        let cb = unsafe {
+            ffi::gpu_bridge_compute_gather_nb(
+                self.handle,
+                queue,
+                buf_input.raw_handle() as *const _,
+                buf_indices.raw_handle() as *const _,
+                buf_out.raw_handle(),
+                rows as u32,
+                in_cols as u32,
+                out_cols as u32,
+            )
+        };
+        if cb.is_null() { Err(GpuError::ComputeFailed("Non-blocking gather dispatch failed".to_string())) } else { Ok(cb) }
+    }
+
+    /// Dispatch index_select_dim0: output[i,j] = input[indices[i], j].
+    /// Same buffer layout as embedding.
+    pub fn dispatch_index_select_dim0(
+        &self,
+        buf_input: &Buffer,
+        buf_indices: &Buffer,
+        buf_out: &Buffer,
+        num_indices: usize,
+        cols: usize,
+    ) -> Result<()> {
+        // Reuse embedding FFI (same signature: input, indices, output, count, dim)
+        let result = unsafe {
+            ffi::gpu_bridge_compute_embedding(
+                self.handle,
+                buf_input.raw_handle() as *const _,
+                buf_indices.raw_handle() as *const _,
+                buf_out.raw_handle(),
+                num_indices as u32,
+                cols as u32,
+            )
+        };
+        if result == 0 { Ok(()) } else { Err(GpuError::ComputeFailed("IndexSelect dim0 dispatch failed".to_string())) }
+    }
+
+    /// Non-blocking index_select_dim0. Returns command buffer handle.
+    pub fn dispatch_index_select_dim0_nb(
+        &self,
+        queue: *mut std::ffi::c_void,
+        buf_input: &Buffer,
+        buf_indices: &Buffer,
+        buf_out: &Buffer,
+        num_indices: usize,
+        cols: usize,
+    ) -> Result<*mut std::ffi::c_void> {
+        let cb = unsafe {
+            ffi::gpu_bridge_compute_embedding_nb(
+                self.handle,
+                queue,
+                buf_input.raw_handle() as *const _,
+                buf_indices.raw_handle() as *const _,
+                buf_out.raw_handle(),
+                num_indices as u32,
+                cols as u32,
+            )
+        };
+        if cb.is_null() { Err(GpuError::ComputeFailed("Non-blocking index_select dim0 dispatch failed".to_string())) } else { Ok(cb) }
+    }
+
+    /// Dispatch index_select_dim1: output[row, i] = input[row, indices[i]].
+    pub fn dispatch_index_select_dim1(
+        &self,
+        buf_input: &Buffer,
+        buf_indices: &Buffer,
+        buf_out: &Buffer,
+        rows: usize,
+        in_cols: usize,
+        num_indices: usize,
+    ) -> Result<()> {
+        let result = unsafe {
+            ffi::gpu_bridge_compute_gather(
+                self.handle,
+                buf_input.raw_handle() as *const _,
+                buf_indices.raw_handle() as *const _,
+                buf_out.raw_handle(),
+                rows as u32,
+                in_cols as u32,
+                num_indices as u32,
+            )
+        };
+        if result == 0 { Ok(()) } else { Err(GpuError::ComputeFailed("IndexSelect dim1 dispatch failed".to_string())) }
+    }
+
+    /// Non-blocking index_select_dim1. Returns command buffer handle.
+    pub fn dispatch_index_select_dim1_nb(
+        &self,
+        queue: *mut std::ffi::c_void,
+        buf_input: &Buffer,
+        buf_indices: &Buffer,
+        buf_out: &Buffer,
+        rows: usize,
+        in_cols: usize,
+        num_indices: usize,
+    ) -> Result<*mut std::ffi::c_void> {
+        let cb = unsafe {
+            ffi::gpu_bridge_compute_gather_nb(
+                self.handle,
+                queue,
+                buf_input.raw_handle() as *const _,
+                buf_indices.raw_handle() as *const _,
+                buf_out.raw_handle(),
+                rows as u32,
+                in_cols as u32,
+                num_indices as u32,
+            )
+        };
+        if cb.is_null() { Err(GpuError::ComputeFailed("Non-blocking index_select dim1 dispatch failed".to_string())) } else { Ok(cb) }
+    }
+
     /// Dispatch slice_dim0: output[row,col] = input[(start_row+row), col].
     pub fn dispatch_slice_dim0(
         &self, buf_input: &Buffer, buf_output: &Buffer, cols: usize, start_row: usize, out_rows: usize,
@@ -2244,6 +2563,10 @@ impl KernelRegistry {
                     "masked_fill_f32" => MASKED_FILL_KERNEL_SOURCE_F16,
                     "triu_f32" => TRIU_KERNEL_SOURCE_F16,
                     "tril_f32" => TRIL_KERNEL_SOURCE_F16,
+                    "gather_dim0_f32" => GATHER_DIM0_KERNEL_SOURCE_F16,
+                    "gather_dim1_f32" => GATHER_DIM1_KERNEL_SOURCE_F16,
+                    "index_select_dim0_f32" => INDEX_SELECT_DIM0_KERNEL_SOURCE_F16,
+                    "index_select_dim1_f32" => INDEX_SELECT_DIM1_KERNEL_SOURCE_F16,
                     _ => BINARY_KERNEL_SOURCE_F16, // fallback
                 };
                 // For named kernels like matmul_f32 -> matmul_f16
@@ -2285,6 +2608,10 @@ impl KernelRegistry {
                     "masked_fill_f32" => MASKED_FILL_KERNEL_SOURCE,
                     "triu_f32" => TRIU_KERNEL_SOURCE,
                     "tril_f32" => TRIL_KERNEL_SOURCE,
+                    "gather_dim0_f32" => GATHER_DIM0_KERNEL_SOURCE,
+                    "gather_dim1_f32" => GATHER_DIM1_KERNEL_SOURCE,
+                    "index_select_dim0_f32" => INDEX_SELECT_DIM0_KERNEL_SOURCE,
+                    "index_select_dim1_f32" => INDEX_SELECT_DIM1_KERNEL_SOURCE,
                     _ => BINARY_KERNEL_SOURCE,
                 };
                 (source, base_name.to_string())
@@ -3025,6 +3352,73 @@ impl KernelRegistry {
         let (source, func) = Self::resolve_kernel(function_name, dtype);
         let pipeline = self.get_or_create(device, source, &func)?;
         pipeline.dispatch_unary_nd_nb(queue, buf_input, in_strides, buf_out, out_shape, ndim, numel)
+    }
+
+    // ── Gather dispatch (typed) ──────────────────────────────────────────
+
+    pub fn dispatch_gather_typed(
+        &self, device: &Device, dtype: DType, kernel_base: &str,
+        buf_input: &Buffer, buf_indices: &Buffer, buf_out: &Buffer,
+        rows: usize, in_cols: usize, out_cols: usize,
+    ) -> Result<()> {
+        let (source, func) = Self::resolve_kernel(kernel_base, dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_gather(buf_input, buf_indices, buf_out, rows, in_cols, out_cols)
+    }
+
+    pub fn dispatch_gather_typed_nb(
+        &self, device: &Device, dtype: DType, kernel_base: &str,
+        queue: *mut std::ffi::c_void,
+        buf_input: &Buffer, buf_indices: &Buffer, buf_out: &Buffer,
+        rows: usize, in_cols: usize, out_cols: usize,
+    ) -> Result<*mut std::ffi::c_void> {
+        let (source, func) = Self::resolve_kernel(kernel_base, dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_gather_nb(queue, buf_input, buf_indices, buf_out, rows, in_cols, out_cols)
+    }
+
+    // ── IndexSelect dispatch (typed) ─────────────────────────────────────
+
+    pub fn dispatch_index_select_dim0_typed(
+        &self, device: &Device, dtype: DType,
+        buf_input: &Buffer, buf_indices: &Buffer, buf_out: &Buffer,
+        num_indices: usize, cols: usize,
+    ) -> Result<()> {
+        let (source, func) = Self::resolve_kernel("index_select_dim0_f32", dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_index_select_dim0(buf_input, buf_indices, buf_out, num_indices, cols)
+    }
+
+    pub fn dispatch_index_select_dim0_typed_nb(
+        &self, device: &Device, dtype: DType,
+        queue: *mut std::ffi::c_void,
+        buf_input: &Buffer, buf_indices: &Buffer, buf_out: &Buffer,
+        num_indices: usize, cols: usize,
+    ) -> Result<*mut std::ffi::c_void> {
+        let (source, func) = Self::resolve_kernel("index_select_dim0_f32", dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_index_select_dim0_nb(queue, buf_input, buf_indices, buf_out, num_indices, cols)
+    }
+
+    pub fn dispatch_index_select_dim1_typed(
+        &self, device: &Device, dtype: DType,
+        buf_input: &Buffer, buf_indices: &Buffer, buf_out: &Buffer,
+        rows: usize, in_cols: usize, num_indices: usize,
+    ) -> Result<()> {
+        let (source, func) = Self::resolve_kernel("index_select_dim1_f32", dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_index_select_dim1(buf_input, buf_indices, buf_out, rows, in_cols, num_indices)
+    }
+
+    pub fn dispatch_index_select_dim1_typed_nb(
+        &self, device: &Device, dtype: DType,
+        queue: *mut std::ffi::c_void,
+        buf_input: &Buffer, buf_indices: &Buffer, buf_out: &Buffer,
+        rows: usize, in_cols: usize, num_indices: usize,
+    ) -> Result<*mut std::ffi::c_void> {
+        let (source, func) = Self::resolve_kernel("index_select_dim1_f32", dtype);
+        let pipeline = self.get_or_create(device, source, &func)?;
+        pipeline.dispatch_index_select_dim1_nb(queue, buf_input, buf_indices, buf_out, rows, in_cols, num_indices)
     }
 }
 

@@ -311,6 +311,28 @@ extern "C" {
         embed_dim: u32,
     ) -> *mut std::ffi::c_void;
 
+    // Gather: 3 buffers (input, indices, output) + 3 uint params (rows, in_cols, out_cols)
+    pub fn gpu_bridge_compute_gather(
+        compute: *mut GPUComputeHandle,
+        buf_input: *const GPUBufferHandle,
+        buf_indices: *const GPUBufferHandle,
+        buf_output: *mut GPUBufferHandle,
+        rows: u32,
+        in_cols: u32,
+        out_cols: u32,
+    ) -> i32;
+
+    pub fn gpu_bridge_compute_gather_nb(
+        compute: *mut GPUComputeHandle,
+        queue: *mut std::ffi::c_void,
+        buf_input: *const GPUBufferHandle,
+        buf_indices: *const GPUBufferHandle,
+        buf_output: *mut GPUBufferHandle,
+        rows: u32,
+        in_cols: u32,
+        out_cols: u32,
+    ) -> *mut std::ffi::c_void;
+
     pub fn gpu_bridge_blit_copy_nb(
         device: *mut GPUDeviceHandle,
         queue: *mut std::ffi::c_void,

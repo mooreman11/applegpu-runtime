@@ -368,6 +368,20 @@ impl GpuTensor {
         Ok(GpuTensor { id, destroyed: Cell::new(false) })
     }
 
+    fn gather(&self, dim: usize, index: &GpuTensor) -> PyResult<GpuTensor> {
+        let mut rt = RUNTIME_LAZY.lock().unwrap();
+        let id = applegpu_core::ops::gather(&mut rt, self.id, dim, index.id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(GpuTensor { id, destroyed: Cell::new(false) })
+    }
+
+    fn index_select(&self, dim: usize, index: &GpuTensor) -> PyResult<GpuTensor> {
+        let mut rt = RUNTIME_LAZY.lock().unwrap();
+        let id = applegpu_core::ops::index_select(&mut rt, self.id, dim, index.id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(GpuTensor { id, destroyed: Cell::new(false) })
+    }
+
     #[pyo3(signature = (scale))]
     fn scalar_mul(&self, scale: f32) -> PyResult<GpuTensor> {
         let mut rt = RUNTIME_LAZY.lock().unwrap();
@@ -739,6 +753,22 @@ fn embedding(weights: &GpuTensor, indices: &GpuTensor) -> PyResult<GpuTensor> {
 }
 
 #[pyfunction]
+fn gather(input: &GpuTensor, dim: usize, index: &GpuTensor) -> PyResult<GpuTensor> {
+    let mut rt = RUNTIME_LAZY.lock().unwrap();
+    let id = applegpu_core::ops::gather(&mut rt, input.id, dim, index.id)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(GpuTensor { id, destroyed: Cell::new(false) })
+}
+
+#[pyfunction]
+fn index_select(input: &GpuTensor, dim: usize, index: &GpuTensor) -> PyResult<GpuTensor> {
+    let mut rt = RUNTIME_LAZY.lock().unwrap();
+    let id = applegpu_core::ops::index_select(&mut rt, input.id, dim, index.id)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(GpuTensor { id, destroyed: Cell::new(false) })
+}
+
+#[pyfunction]
 fn attention(q: &GpuTensor, k: &GpuTensor, v: &GpuTensor) -> PyResult<GpuTensor> {
     let mut rt = RUNTIME_LAZY.lock().unwrap();
     let id = applegpu_core::ops::attention(&mut rt, q.id, k.id, v.id)
@@ -981,6 +1011,8 @@ fn applegpu_runtime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(gelu, m)?)?;
     m.add_function(wrap_pyfunction!(layer_norm, m)?)?;
     m.add_function(wrap_pyfunction!(embedding, m)?)?;
+    m.add_function(wrap_pyfunction!(gather, m)?)?;
+    m.add_function(wrap_pyfunction!(index_select, m)?)?;
     m.add_function(wrap_pyfunction!(attention, m)?)?;
     m.add_function(wrap_pyfunction!(matmul, m)?)?;
     m.add_function(wrap_pyfunction!(slice, m)?)?;
