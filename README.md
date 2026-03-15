@@ -124,6 +124,30 @@ All ops support N-D tensors (up to 8 dimensions) with NumPy-style broadcasting a
 - **Multi-dtype** — 10 types (float16/32/64, int8/16/32/64, uint8/32, bool) with NumPy/PyTorch roundtrip
 - **Kernel fusion** — auto-detect element-wise chains, generate fused MSL at runtime
 - **Two backends** — MLX-native (direct Metal) and VM (IPC to GPU service)
+- **Container GPU bridge** — multi-client GPU service for containers, thread-per-connection with fair scheduling, dual transport (Unix socket + vsock)
+
+## Container GPU Bridge
+
+Containers on macOS (Apple Containerization Framework, Docker) can't access Metal directly. The GPU service bridges this gap:
+
+```bash
+# Start the GPU service on the host
+cargo run -p applegpu-service
+# Listens on ~/.applegpu/runtime.sock (Unix socket)
+# Containers connect, handshake, and submit GPU workloads
+```
+
+```
+Container (Linux)              Host (macOS)
+┌──────────────────┐           ┌──────────────────┐
+│ applegpu-client  │──vsock──▶ │  gpu-service     │
+│ (crates/client)  │  or unix  │  ├─ Scheduler    │
+│                  │  socket   │  ├─ BufferPool   │
+└──────────────────┘           │  └─ Metal GPU    │
+                               └──────────────────┘
+```
+
+Each connection gets a `ContainerId` with isolated resource quotas. The scheduler ensures fair GPU sharing across containers.
 
 ### Performance
 
