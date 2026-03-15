@@ -2,6 +2,8 @@
 
 A unified Metal GPU runtime library for Apple Silicon. One API, two backends.
 
+**License:** [AGPL-3.0](LICENSE.md)
+
 ## Architecture
 
 ```
