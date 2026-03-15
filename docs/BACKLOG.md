@@ -92,12 +92,12 @@ _Eliminate GPU idle time between ops, then enable true parallel execution._
 ### PRIORITY 1: N-Dimensional Tensor Support
 _Almost everything on the roadmap is blocked by 2D-only tensors. This is the architectural foundation that unlocks batch inference, efficient multi-head attention (1 dispatch instead of 36), proper broadcasting, conv1d, and compatibility with standard ML tensor layouts._
 
-**Phase 1: Core N-D infrastructure**
-- [ ] **N-D Shape and strides** — extend Shape to track strides for non-contiguous views, support arbitrary dimensions
-- [ ] **N-D matmul** — batched matrix multiplication `[..., M, K] @ [..., K, N] → [..., M, N]`
-- [ ] **N-D element-wise ops** — add/sub/mul/div/neg/relu/gelu/exp/log/sqrt on arbitrary-dimensional tensors
-- [ ] **N-D broadcasting** — NumPy-style shape broadcasting for element-wise ops (replaces add_bias)
-- [ ] **N-D reshape** — reshape to any compatible shape
+**Phase 1: Core N-D infrastructure** _(DONE)_
+- [x] **N-D Shape and strides** — fixed-size Shape (up to 8 dims), TensorLayout with contiguous strides, broadcast_strides_for
+- [x] **N-D element-wise ops** — add/sub/mul/div/neg/relu/gelu/exp/log/sqrt on arbitrary-dimensional tensors with stride-based MSL kernels
+- [x] **N-D broadcasting** — NumPy-style shape broadcasting for element-wise ops
+- [x] **N-D reshape** — reshape to any compatible shape
+- [x] **Python bindings verified** — 12 N-D tests (3D/4D creation, broadcasting, relu/gelu on 3D, ndim validation for 2D-only ops, backward compat), GPT-2 unchanged
 
 **Phase 2: Batched transformer ops**
 - [ ] **Batched attention** — `[batch, heads, seq, d_head]` in one kernel dispatch (replaces 12× slice+attention+concat)

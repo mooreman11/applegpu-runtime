@@ -111,9 +111,10 @@ v0.2.0. Current capabilities:
 - **Lazy execution** — ops build a DAG, computation deferred until materialization
 - **Transformer ops** — GELU, LayerNorm (with affine), Embedding (Int32), softmax_causal, attention_causal, argmax
 - **GPT-2 inference** — `gpu.run_model("gpt2", "Hello", max_tokens=50)` for end-to-end text generation on Metal GPU
+- **N-D tensors (up to 8 dimensions)** — stride-based MSL kernels, NumPy-style broadcasting for all element-wise ops, N-D reshape, 3D/4D tensor creation and roundtrip via NumPy
 - **Tensor manipulation** — reshape, slice, concat, add_bias (broadcast)
 - 25 GPU operations (f32 + f16): add, sub, mul, div, neg, relu, gelu, exp, log, sqrt, matmul, softmax, softmax_causal, layer_norm, transpose, scalar_mul, embedding, attention, attention_causal, reshape, slice, concat, add_bias, argmax + kernel fusion
-- 340 tests passing across all layers (179 Rust + 13 Swift + 148 Python)
+- 387 tests passing across all layers (202 Rust + 13 Swift + 172 Python)
 
 ### NumPy & PyTorch Interop
 
