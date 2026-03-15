@@ -539,6 +539,49 @@ pub fn attention(rt: &mut LazyRuntime, q_id: u64, k_id: u64, v_id: u64) -> Resul
     Ok(output_id)
 }
 
+/// Causal scaled dot-product attention: softmax_causal(Q @ K^T / sqrt(d_k)) @ V
+/// Q: [q_len, d_k], K: [kv_len, d_k], V: [kv_len, d_v]
+/// Output: [q_len, d_v]
+pub fn attention_causal(rt: &mut LazyRuntime, q_id: u64, k_id: u64, v_id: u64) -> Result<u64> {
+    let q_shape = rt.shape(q_id)?;
+    let k_shape = rt.shape(k_id)?;
+    let v_shape = rt.shape(v_id)?;
+
+    if q_shape.len() != 2 || k_shape.len() != 2 || v_shape.len() != 2 {
+        return Err(GpuError::InvalidTensor(
+            "attention_causal requires 2D tensors".to_string()
+        ));
+    }
+
+    let d_k = q_shape[1];
+    if k_shape[1] != d_k {
+        return Err(GpuError::InvalidTensor(format!(
+            "Q and K must have same d_k: Q[{},{}] K[{},{}]",
+            q_shape[0], q_shape[1], k_shape[0], k_shape[1]
+        )));
+    }
+    if k_shape[0] != v_shape[0] {
+        return Err(GpuError::InvalidTensor(format!(
+            "K and V must have same seq_len: K[{},{}] V[{},{}]",
+            k_shape[0], k_shape[1], v_shape[0], v_shape[1]
+        )));
+    }
+
+    // K^T: [kv_len, d_k] → [d_k, kv_len]
+    let kt_id = transpose(rt, k_id)?;
+    // scores = Q @ K^T: [q_len, d_k] @ [d_k, kv_len] → [q_len, kv_len]
+    let scores_id = matmul(rt, q_id, kt_id)?;
+    // Scale by 1/sqrt(d_k)
+    let scale = 1.0 / (d_k as f32).sqrt();
+    let scaled_scores_id = scalar_mul(rt, scores_id, scale)?;
+    // Causal softmax (masks future positions)
+    let attn_weights_id = softmax_causal(rt, scaled_scores_id)?;
+    // output = attn_weights @ V: [q_len, kv_len] @ [kv_len, d_v] → [q_len, d_v]
+    let output_id = matmul(rt, attn_weights_id, v_id)?;
+
+    Ok(output_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1278,5 +1321,51 @@ mod tests {
         let bytes = rt.read_bytes(a_id).unwrap();
         let idx = i32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
         assert_eq!(idx, 2); // max at index 2
+    }
+
+    // ── AttentionCausal tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_attention_causal() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        let q = Tensor::from_f32(&device, vec![2, 2], &[1.0, 0.0, 0.0, 1.0]).unwrap();
+        let k = Tensor::from_f32(&device, vec![2, 2], &[1.0, 0.0, 0.0, 1.0]).unwrap();
+        let v = Tensor::from_f32(&device, vec![2, 2], &[1.0, 2.0, 3.0, 4.0]).unwrap();
+        let q_id = q.meta.id;
+        let k_id = k.meta.id;
+        let v_id = v.meta.id;
+        rt.insert_tensor(q).unwrap();
+        rt.insert_tensor(k).unwrap();
+        rt.insert_tensor(v).unwrap();
+
+        let out_id = attention_causal(&mut rt, q_id, k_id, v_id).unwrap();
+        assert_eq!(rt.shape(out_id).unwrap(), vec![2, 2]);
+
+        rt.eval(&device, out_id).unwrap();
+        let result = rt.read_f32(out_id).unwrap();
+        assert_eq!(result.len(), 4);
+        // Row 0 can only attend to position 0 (causal), so output[0] ≈ v[0] = [1.0, 2.0]
+        assert!((result[0] - 1.0).abs() < 0.1);
+        assert!((result[1] - 2.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_attention_causal_rejects_non_2d() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        let q = Tensor::from_f32(&device, vec![4], &[1.0; 4]).unwrap();
+        let k = Tensor::from_f32(&device, vec![4], &[1.0; 4]).unwrap();
+        let v = Tensor::from_f32(&device, vec![4], &[1.0; 4]).unwrap();
+        let q_id = q.meta.id;
+        let k_id = k.meta.id;
+        let v_id = v.meta.id;
+        rt.insert_tensor(q).unwrap();
+        rt.insert_tensor(k).unwrap();
+        rt.insert_tensor(v).unwrap();
+
+        assert!(attention_causal(&mut rt, q_id, k_id, v_id).is_err());
     }
 }

@@ -322,6 +322,20 @@ impl GpuTensor {
         Ok(GpuTensor { id, destroyed: Cell::new(false) })
     }
 
+    fn argmax(&self) -> PyResult<GpuTensor> {
+        let mut rt = RUNTIME_LAZY.lock().unwrap();
+        let id = applegpu_core::ops::argmax(&mut rt, self.id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(GpuTensor { id, destroyed: Cell::new(false) })
+    }
+
+    fn softmax_causal(&self) -> PyResult<GpuTensor> {
+        let mut rt = RUNTIME_LAZY.lock().unwrap();
+        let id = applegpu_core::ops::softmax_causal(&mut rt, self.id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(GpuTensor { id, destroyed: Cell::new(false) })
+    }
+
     // Binary ops
 
     fn add(&self, other: &GpuTensor) -> PyResult<GpuTensor> {
@@ -631,6 +645,54 @@ fn attention(q: &GpuTensor, k: &GpuTensor, v: &GpuTensor) -> PyResult<GpuTensor>
     Ok(GpuTensor { id, destroyed: Cell::new(false) })
 }
 
+#[pyfunction]
+fn slice(t: &GpuTensor, dim: usize, start: usize, end: usize) -> PyResult<GpuTensor> {
+    let mut rt = RUNTIME_LAZY.lock().unwrap();
+    let id = applegpu_core::ops::slice(&mut rt, t.id, dim, start, end)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(GpuTensor { id, destroyed: Cell::new(false) })
+}
+
+#[pyfunction]
+fn concat(a: &GpuTensor, b: &GpuTensor, dim: usize) -> PyResult<GpuTensor> {
+    let mut rt = RUNTIME_LAZY.lock().unwrap();
+    let id = applegpu_core::ops::concat(&mut rt, a.id, b.id, dim)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(GpuTensor { id, destroyed: Cell::new(false) })
+}
+
+#[pyfunction]
+fn add_bias(input: &GpuTensor, bias: &GpuTensor) -> PyResult<GpuTensor> {
+    let mut rt = RUNTIME_LAZY.lock().unwrap();
+    let id = applegpu_core::ops::add_bias(&mut rt, input.id, bias.id)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(GpuTensor { id, destroyed: Cell::new(false) })
+}
+
+#[pyfunction]
+fn softmax_causal(t: &GpuTensor) -> PyResult<GpuTensor> {
+    let mut rt = RUNTIME_LAZY.lock().unwrap();
+    let id = applegpu_core::ops::softmax_causal(&mut rt, t.id)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(GpuTensor { id, destroyed: Cell::new(false) })
+}
+
+#[pyfunction]
+fn argmax(t: &GpuTensor) -> PyResult<GpuTensor> {
+    let mut rt = RUNTIME_LAZY.lock().unwrap();
+    let id = applegpu_core::ops::argmax(&mut rt, t.id)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(GpuTensor { id, destroyed: Cell::new(false) })
+}
+
+#[pyfunction]
+fn attention_causal(q: &GpuTensor, k: &GpuTensor, v: &GpuTensor) -> PyResult<GpuTensor> {
+    let mut rt = RUNTIME_LAZY.lock().unwrap();
+    let id = applegpu_core::ops::attention_causal(&mut rt, q.id, k.id, v.id)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(GpuTensor { id, destroyed: Cell::new(false) })
+}
+
 // ============================================================
 // Scheduler bindings
 // ============================================================
@@ -795,6 +857,12 @@ fn applegpu_runtime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(embedding, m)?)?;
     m.add_function(wrap_pyfunction!(attention, m)?)?;
     m.add_function(wrap_pyfunction!(matmul, m)?)?;
+    m.add_function(wrap_pyfunction!(slice, m)?)?;
+    m.add_function(wrap_pyfunction!(concat, m)?)?;
+    m.add_function(wrap_pyfunction!(add_bias, m)?)?;
+    m.add_function(wrap_pyfunction!(softmax_causal, m)?)?;
+    m.add_function(wrap_pyfunction!(argmax, m)?)?;
+    m.add_function(wrap_pyfunction!(attention_causal, m)?)?;
     m.add_function(wrap_pyfunction!(register_container, m)?)?;
     m.add_function(wrap_pyfunction!(deregister_container, m)?)?;
     m.add_function(wrap_pyfunction!(pause_container, m)?)?;
