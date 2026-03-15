@@ -99,9 +99,10 @@ v0.1.0. Current capabilities:
 - **Command buffer batching** — non-blocking GPU dispatch with single wait per eval, eliminating per-op GPU stalls in chain evaluations
 - **Resource limits** — configurable max tensor size, total GPU memory, and tensor count via `gpu.set_limits()` or env vars, enforced per-container and globally
 - **Lazy execution** — ops build a DAG, computation deferred until materialization
-- **Transformer ops** — GELU activation, LayerNorm with affine params, Embedding lookup (Int32 indices)
-- 17 GPU operations (f32 + f16): add, sub, mul, div, neg, relu, gelu, exp, log, sqrt, matmul, softmax, layer_norm, transpose, scalar_mul, embedding, attention
-- 308 tests passing across all layers (162 Rust + 13 Swift + 133 Python)
+- **Transformer ops** — GELU, LayerNorm (with affine), Embedding (Int32), softmax_causal, attention_causal, argmax
+- **Tensor manipulation** — reshape, slice, concat, add_bias (broadcast)
+- 25 GPU operations (f32 + f16): add, sub, mul, div, neg, relu, gelu, exp, log, sqrt, matmul, softmax, softmax_causal, layer_norm, transpose, scalar_mul, embedding, attention, attention_causal, reshape, slice, concat, add_bias, argmax + kernel fusion
+- 335 tests passing across all layers (179 Rust + 13 Swift + 143 Python)
 
 ### NumPy & PyTorch Interop
 
