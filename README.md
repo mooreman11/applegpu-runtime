@@ -42,13 +42,19 @@ import applegpu_runtime as gpu
 
 gpu.enable_torch_backend()
 
-# Use applegpu tensors with standard PyTorch ops
-from applegpu_runtime.torch_backend import ApplegpuTensor
+# Move a model to Metal GPU — parameters dispatch through Metal
+model = torch.nn.Sequential(
+    torch.nn.Linear(64, 128),
+    torch.nn.ReLU(),
+    torch.nn.Linear(128, 10),
+)
+model = gpu.to_applegpu(model)
 
+# Forward pass runs on Metal GPU
+from applegpu_runtime.torch_backend import ApplegpuTensor
 x = ApplegpuTensor.from_torch(torch.randn(32, 64))
-w = ApplegpuTensor.from_torch(torch.randn(64, 128))
-y = torch.relu(x @ w)        # matmul + relu on Metal GPU
-result = y.to_torch_cpu()    # back to CPU when needed
+output = model(x)             # matmul + bias + relu on Metal
+result = output.to_torch_cpu() # back to CPU when needed
 ```
 
 ## GPT-2 Inference
@@ -136,9 +142,9 @@ v0.3.0. Current capabilities:
 - **Tensor manipulation** — reshape, slice, concat, add_bias (broadcast)
 - 25 GPU operations (f32 + f16): add, sub, mul, div, neg, relu, gelu, exp, log, sqrt, matmul, softmax, softmax_causal, layer_norm, transpose, scalar_mul, embedding, attention, attention_causal, reshape, slice, concat, add_bias, argmax + kernel fusion
 - **General transpose** — `gpu.transpose_dims(t, dim0, dim1)` for arbitrary dimension swaps, enabling batched multi-head attention via reshape + transpose
-- **PyTorch device backend** — `gpu.enable_torch_backend()` registers "applegpu" as a custom device. `ApplegpuTensor` with `__torch_dispatch__` routes 25+ aten ops to Metal. CPU fallback with warnings for unsupported ops.
+- **PyTorch device backend** — `gpu.enable_torch_backend()` + `gpu.to_applegpu(model)` moves nn.Module parameters to Metal GPU. `ApplegpuTensor` with `__torch_dispatch__` routes 27+ aten ops to Metal. CPU fallback with warnings for unsupported ops.
 - **Text generation sampling** — temperature, top-k, and top-p (nucleus) sampling for diverse, coherent output
-- 490 tests passing across all layers (228 Rust + 13 Swift + 249 Python)
+- 505 tests passing across all layers (234 Rust + 13 Swift + 258 Python)
 
 ### NumPy & PyTorch Interop
 
