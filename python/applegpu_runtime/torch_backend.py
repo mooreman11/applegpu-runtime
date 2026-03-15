@@ -333,6 +333,37 @@ def _op_ones(size, dtype=None, layout=None, device=None, pin_memory=None):
     return _wrap(gpu_t, torch_dtype=torch_dtype)
 
 
+@register_op(torch.ops.aten.full.default)
+def _op_full(size, fill_value, dtype=None, layout=None, device=None, pin_memory=None):
+    n_elems = 1
+    for s in size:
+        n_elems *= s
+    gpu_t = gpu.tensor([float(fill_value)] * max(n_elems, 1), shape=list(size) if n_elems > 0 else [1])
+    torch_dtype = dtype if dtype is not None else torch.float32
+    return _wrap(gpu_t, torch_dtype=torch_dtype)
+
+
+@register_op(torch.ops.aten.scalar_tensor.default)
+def _op_scalar_tensor(val, dtype=None, layout=None, device=None, pin_memory=None):
+    torch_dtype = dtype if dtype is not None else torch.float32
+    gpu_dtype = _TORCH_TO_GPU_DTYPE.get(torch_dtype, "float32")
+    gpu_t = gpu.tensor([float(val)], shape=[1], dtype=gpu_dtype)
+    return _wrap(gpu_t, torch_dtype=torch_dtype)
+
+
+@register_op(torch.ops.aten.copy_.default)
+def _op_copy_(dst, src, non_blocking=False):
+    """In-place copy of src into dst."""
+    if isinstance(src, ApplegpuTensor):
+        cpu_data = src.to_torch_cpu()
+        dst._gpu_tensor = gpu.from_torch(cpu_data)
+        return dst
+    elif isinstance(src, torch.Tensor):
+        dst._gpu_tensor = gpu.from_torch(src)
+        return dst
+    return dst
+
+
 # ============================================================
 # Tensor manipulation ops
 # ============================================================
