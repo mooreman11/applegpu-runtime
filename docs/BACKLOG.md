@@ -83,9 +83,38 @@ _Eliminate GPU idle time between ops, then enable true parallel execution._
 - [x] **Tag v0.2.0** — shipped
 
 ### Post-v0.2.0 inference optimizations
-- [ ] **KV cache** — reuse past key/value computations for autoregressive generation (major speedup)
+- [x] **KV cache** — reuse past key/value computations for autoregressive generation
+- [x] **N-way concat** — concat_all convenience function for multi-head concat
 - [ ] **Top-k / top-p sampling** — temperature-based sampling for non-greedy generation
-- [ ] **Batch inference** — multiple sequences in parallel
+
+## Up Next
+
+### PRIORITY 1: N-Dimensional Tensor Support
+_Almost everything on the roadmap is blocked by 2D-only tensors. This is the architectural foundation that unlocks batch inference, efficient multi-head attention (1 dispatch instead of 36), proper broadcasting, conv1d, and compatibility with standard ML tensor layouts._
+
+**Phase 1: Core N-D infrastructure**
+- [ ] **N-D Shape and strides** — extend Shape to track strides for non-contiguous views, support arbitrary dimensions
+- [ ] **N-D matmul** — batched matrix multiplication `[..., M, K] @ [..., K, N] → [..., M, N]`
+- [ ] **N-D element-wise ops** — add/sub/mul/div/neg/relu/gelu/exp/log/sqrt on arbitrary-dimensional tensors
+- [ ] **N-D broadcasting** — NumPy-style shape broadcasting for element-wise ops (replaces add_bias)
+- [ ] **N-D reshape** — reshape to any compatible shape
+
+**Phase 2: Batched transformer ops**
+- [ ] **Batched attention** — `[batch, heads, seq, d_head]` in one kernel dispatch (replaces 12× slice+attention+concat)
+- [ ] **Batched layer_norm** — normalize over last dim for any number of leading dims
+- [ ] **Batched embedding** — `[batch, seq]` indices
+- [ ] **Batched softmax** — softmax over last dim for any shape
+
+**Phase 3: Batch inference**
+- [ ] **Batch inference pipeline** — process multiple sequences simultaneously
+- [ ] **GPT-2 batched forward** — rewrite forward pass using N-D ops
+- [ ] **Tag v0.3.0** — ship with N-D tensors and batch inference
+
+### Other improvements (unblocked after N-D tensors)
+- [ ] **Top-k / top-p sampling** — temperature-based sampling for non-greedy generation
+- [ ] **Conv1d** — needs 3D `[batch, channels, length]`
+- [ ] **Gather/scatter** — index-based tensor operations
+- [ ] **More models** — GPT-2 medium/large, other architectures
 
 ## Further Backlog
 
