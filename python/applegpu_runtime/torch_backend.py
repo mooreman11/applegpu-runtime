@@ -195,6 +195,35 @@ def _wrap(gpu_t, torch_dtype=None, requires_grad=False):
     return result
 
 
+def _update_inplace(a, result_gpu):
+    """Update an ApplegpuTensor in-place with a new GpuTensor result.
+
+    Evaluates eagerly if needed, updates the registry and attribute,
+    and syncs the CPU backing storage so _unwrap can reconstruct if
+    the Rust tensor ID is later freed.
+    """
+    if _eager_mode:
+        gpu.eval(result_gpu)
+    if isinstance(a, ApplegpuTensor):
+        _gpu_tensor_registry[a.data_ptr()] = result_gpu
+        a._gpu_tensor = result_gpu
+        if _eager_mode:
+            try:
+                cpu_data = result_gpu.to_torch()
+                global _in_fallback
+                was = _in_fallback
+                _in_fallback = True
+                try:
+                    backing = a.data
+                    if backing.shape == cpu_data.shape:
+                        backing.copy_(cpu_data)
+                finally:
+                    _in_fallback = was
+            except Exception:
+                pass
+    return a
+
+
 # ============================================================
 # Element-wise binary ops
 # ============================================================
@@ -219,10 +248,69 @@ def _op_add_inplace(a, b, alpha=1):
     if alpha != 1:
         b_gpu = gpu.scalar_mul(b_gpu, float(alpha))
     result_gpu = gpu.add(_unwrap(a), b_gpu)
-    if isinstance(a, ApplegpuTensor):
-        _gpu_tensor_registry[a.data_ptr()] = result_gpu
-        a._gpu_tensor = result_gpu
-    return _wrap(result_gpu)
+    _update_inplace(a, result_gpu)
+    return a
+
+
+@register_op(torch.ops.aten.add_.Scalar)
+def _op_add_inplace_scalar(a, scalar):
+    """In-place scalar add: a += scalar. Used by Adam (eps addition)."""
+    a_gpu = _unwrap(a)
+    scalar_t = gpu.tensor([float(scalar)], shape=[1])
+    result_gpu = gpu.add(a_gpu, scalar_t)
+    return _update_inplace(a, result_gpu)
+
+
+@register_op(torch.ops.aten.mul_.Tensor)
+def _op_mul_inplace_tensor(a, b):
+    """In-place tensor mul: a *= b. Used by Adam/AdamW weight decay."""
+    if isinstance(b, (int, float)):
+        result_gpu = gpu.scalar_mul(_unwrap(a), float(b))
+    else:
+        result_gpu = gpu.mul(_unwrap(a), _unwrap(b))
+    return _update_inplace(a, result_gpu)
+
+
+@register_op(torch.ops.aten.mul_.Scalar)
+def _op_mul_inplace_scalar(a, scalar):
+    """In-place scalar mul: a *= scalar. Used by Adam beta scaling."""
+    result_gpu = gpu.scalar_mul(_unwrap(a), float(scalar))
+    return _update_inplace(a, result_gpu)
+
+
+@register_op(torch.ops.aten.addcmul_.default)
+def _op_addcmul_inplace(a, b, c, value=1):
+    """In-place addcmul: a += value * b * c. Used by Adam for variance update."""
+    bc = gpu.mul(_unwrap(b), _unwrap(c))
+    if value != 1:
+        bc = gpu.scalar_mul(bc, float(value))
+    result_gpu = gpu.add(_unwrap(a), bc)
+    return _update_inplace(a, result_gpu)
+
+
+@register_op(torch.ops.aten.addcdiv_.default)
+def _op_addcdiv_inplace(a, b, c, value=1):
+    """In-place addcdiv: a += value * b / c. Used by Adam for parameter update."""
+    bc = gpu.div(_unwrap(b), _unwrap(c))
+    if value != 1:
+        bc = gpu.scalar_mul(bc, float(value))
+    result_gpu = gpu.add(_unwrap(a), bc)
+    return _update_inplace(a, result_gpu)
+
+
+@register_op(torch.ops.aten.lerp_.Scalar)
+def _op_lerp_inplace(a, b, weight):
+    """In-place lerp: a = a + weight * (b - a). Used by Adam for EMA updates."""
+    diff = gpu.sub(_unwrap(b), _unwrap(a))
+    scaled = gpu.scalar_mul(diff, float(weight))
+    result_gpu = gpu.add(_unwrap(a), scaled)
+    return _update_inplace(a, result_gpu)
+
+
+@register_op(torch.ops.aten.reciprocal.default)
+def _op_reciprocal(a):
+    """Reciprocal: 1/x via pow(x, -1). Used by Adam for inverse sqrt."""
+    return _wrap(gpu.pow(_unwrap(a), -1.0))
 
 
 @register_op(torch.ops.aten.sub.Tensor)

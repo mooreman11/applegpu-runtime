@@ -137,6 +137,66 @@ def test_mlp_loss_decreases():
         loss.backward()
         optimizer.step()
 
-    print(f"Losses: {[f'{l:.4f}' for l in losses]}")
+    print(f"SGD Losses: {[f'{l:.4f}' for l in losses]}")
     # Loss should generally decrease
     assert losses[-1] < losses[0], f"Loss didn't decrease: {losses}"
+
+
+def test_adam_loss_decreases():
+    """Training with Adam optimizer -- loss should decrease over steps."""
+    torch.manual_seed(42)
+
+    model = nn.Sequential(
+        nn.Linear(8, 32),
+        nn.ReLU(),
+        nn.Linear(32, 4),
+    )
+    model = gpu.to_applegpu(model)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+
+    x = ApplegpuTensor.from_torch(torch.randn(16, 8))
+    target = ApplegpuTensor.from_torch(torch.randn(16, 4))
+
+    losses = []
+    for step in range(10):
+        optimizer.zero_grad()
+        output = model(x)
+        diff = output - target
+        loss = (diff * diff).mean()
+
+        loss_val = loss.to_torch_cpu().item() if isinstance(loss, ApplegpuTensor) else loss.item()
+        losses.append(loss_val)
+
+        loss.backward()
+        optimizer.step()
+
+    print(f"Adam losses: {[f'{l:.4f}' for l in losses]}")
+    assert losses[-1] < losses[0], f"Adam didn't decrease loss: {losses}"
+
+
+def test_adamw_with_weight_decay():
+    """Training with AdamW optimizer (weight decay) -- loss should decrease."""
+    torch.manual_seed(42)
+
+    model = nn.Linear(4, 2)
+    model = gpu.to_applegpu(model)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.01, weight_decay=0.1)
+
+    x = ApplegpuTensor.from_torch(torch.randn(8, 4))
+    target = ApplegpuTensor.from_torch(torch.randn(8, 2))
+
+    losses = []
+    for step in range(10):
+        optimizer.zero_grad()
+        output = model(x)
+        diff = output - target
+        loss = (diff * diff).mean()
+
+        loss_val = loss.to_torch_cpu().item() if isinstance(loss, ApplegpuTensor) else loss.item()
+        losses.append(loss_val)
+
+        loss.backward()
+        optimizer.step()
+
+    print(f"AdamW losses: {[f'{l:.4f}' for l in losses]}")
+    assert losses[-1] < losses[0], f"AdamW didn't decrease loss: {losses}"
