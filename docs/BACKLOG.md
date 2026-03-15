@@ -161,9 +161,9 @@ _Training support: PyTorch autograd works natively on Metal GPU for MLP training
 - [x] **Backward ops for embedding** — atomic scatter-add for grad_weight on Metal
 - [x] **Backward ops for batch_norm** — inference-mode grad_input on Metal, CPU for grad_weight/bias
 - [x] **Backward for max_pool2d** — forward now returns real indices (CPU), backward routes gradients correctly. ResNet training unblocked.
-- [ ] **Int64 compute kernels** — currently Int64 ops (e.g., batch_norm's num_batches_tracked += 1) fall back to CPU. Need Int64 add/mul MSL kernels for full GPU execution.
-- [ ] **Gradient accumulation** — in-place parameter updates for large batch training
-- [ ] **Adam optimizer** — may work via dispatch, needs verification
+- [x] **Adam/AdamW optimizer** — in-place ops (mul_, addcmul_, addcdiv_, lerp_) fixed, loss decreases
+- [ ] **Int64 compute kernels** — batch_norm's num_batches_tracked falls back to CPU
+- [ ] **Gradient accumulation** — for large batch training across multiple micro-batches
 
 ## Up Next
 
@@ -179,8 +179,8 @@ _Scale training to real models. Verify all backward ops. Optimize dispatch overh
 - [x] **Transformer training** — 3-layer GELU+LayerNorm model trains on Metal (loss decreases over 10 steps)
 - [x] **GPT-2 fine-tuning** — tiny GPT-2 trains on Metal (loss 4.39 → 3.79 over 5 steps, CE loss via CPU fallback)
 - [x] **ResNet training** — ResNet-18 trains on Metal GPU (loss 1.11 → 0.73 over 3 steps)
-- [ ] **Adam optimizer** — verify adaptive learning rate works
-- [ ] **Gradient clipping** — prevent exploding gradients
+- [x] **Adam/AdamW optimizer** — in-place ops (mul_, addcmul_, addcdiv_, lerp_) fixed, loss decreases
+- [x] **Gradient clipping** — torch.nn.utils.clip_grad_norm_ works (linalg_vector_norm via CPU fallback)
 
 **Performance:**
 - [ ] **torch.compile() support** — graph-level fusion, eliminate Python dispatch overhead
