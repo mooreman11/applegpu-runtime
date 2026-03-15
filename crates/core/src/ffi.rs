@@ -370,6 +370,31 @@ extern "C" {
         element_count: u64,
     ) -> *mut std::ffi::c_void;
 
+    // ── N-D fused element-wise dispatch ─────────────────────────────────
+
+    pub fn gpu_bridge_compute_fused_nd(
+        compute: *mut GPUComputeHandle,
+        input_buffers: *const *const GPUBufferHandle,
+        buffer_count: u32,
+        output: *mut GPUBufferHandle,
+        input_strides: *const *const u32,
+        out_shape: *const u32,
+        ndim: u32,
+        numel: u32,
+    ) -> i32;
+
+    pub fn gpu_bridge_compute_fused_nd_nb(
+        compute: *mut GPUComputeHandle,
+        queue: *mut std::ffi::c_void,
+        input_buffers: *const *const GPUBufferHandle,
+        buffer_count: u32,
+        output: *mut GPUBufferHandle,
+        input_strides: *const *const u32,
+        out_shape: *const u32,
+        ndim: u32,
+        numel: u32,
+    ) -> *mut std::ffi::c_void;
+
     // ── N-D stride-based element-wise dispatch ──────────────────────────
 
     pub fn gpu_bridge_compute_binary_nd(

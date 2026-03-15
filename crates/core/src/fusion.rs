@@ -133,19 +133,41 @@ fn find_fusible_chains(graph: &Graph, exec_order: &[u64]) -> Vec<FusionChain> {
     chains
 }
 
+/// MSL helper for N-D stride-based indexing (same as in compute.rs kernels).
+const ND_INDEX_HELPER_MSL: &str = r#"
+uint nd_index_to_offset(uint flat_id, constant uint* shape, constant uint* strides, constant uint& ndim) {
+    uint offset = 0;
+    for (uint d = ndim; d > 0; d--) {
+        uint i = d - 1;
+        offset += (flat_id % shape[i]) * strides[i];
+        flat_id /= shape[i];
+    }
+    return offset;
+}
+"#;
+
 /// Generate MSL kernel source for a fusion chain.
 /// Returns (kernel_source, function_name, leaf_input_ids_in_buffer_order).
+///
+/// Buffer layout for N inputs:
+///   buffer(0)..buffer(N-1)  = input data buffers
+///   buffer(N)               = output data buffer
+///   buffer(N+1)..buffer(2N) = input stride arrays (constant uint*)
+///   buffer(2N+1)            = output shape array (constant uint*)
+///   buffer(2N+2)            = ndim (constant uint&)
+///   buffer(2N+3)            = numel (constant uint&)
 fn generate_fused_msl(graph: &Graph, chain: &FusionChain) -> (String, String, Vec<u64>) {
     let func_name = format!("fused_{}", FUSED_ID_COUNTER.fetch_add(1, Ordering::Relaxed));
     let leaf_inputs = &chain.leaf_inputs;
+    let n = leaf_inputs.len();
     let dtype = chain.out_dtype;
     let metal_type = if dtype == DType::Float16 { "half" } else { "float" };
 
-    // Map each leaf input to a buffer name
+    // Map each leaf input to a stride-indexed expression
     let mut expr_map: std::collections::HashMap<u64, String> = std::collections::HashMap::new();
 
     for (i, &leaf_id) in leaf_inputs.iter().enumerate() {
-        expr_map.insert(leaf_id, format!("in{}[id]", i));
+        expr_map.insert(leaf_id, format!("in{}[nd_index_to_offset(id, out_shape, in{}_strides, ndim)]", i, i));
     }
 
     // Build expressions for each chain node in order
@@ -165,27 +187,40 @@ fn generate_fused_msl(graph: &Graph, chain: &FusionChain) -> (String, String, Ve
     let last_id = *chain.node_ids.last().unwrap();
     let final_expr = expr_map.get(&last_id).unwrap();
 
-    // Generate buffer parameters
+    // Generate buffer parameters with N-D stride layout
     let mut params = Vec::new();
-    for (i, _) in leaf_inputs.iter().enumerate() {
+    // Input data buffers: buffer(0)..buffer(N-1)
+    for i in 0..n {
         params.push(format!("    device const {}* in{} [[buffer({})]]", metal_type, i, i));
     }
-    let out_idx = leaf_inputs.len();
+    // Output data buffer: buffer(N)
+    let out_idx = n;
     params.push(format!("    device {}* out [[buffer({})]]", metal_type, out_idx));
-    params.push(format!("    constant uint& count [[buffer({})]]", out_idx + 1));
+    // Per-input stride arrays: buffer(N+1)..buffer(2N)
+    for i in 0..n {
+        params.push(format!("    constant uint* in{}_strides [[buffer({})]]", i, n + 1 + i));
+    }
+    // Output shape array: buffer(2N+1)
+    let shape_idx = 2 * n + 1;
+    params.push(format!("    constant uint* out_shape [[buffer({})]]", shape_idx));
+    // ndim: buffer(2N+2)
+    params.push(format!("    constant uint& ndim [[buffer({})]]", shape_idx + 1));
+    // numel: buffer(2N+3)
+    params.push(format!("    constant uint& numel [[buffer({})]]", shape_idx + 2));
+    // Thread ID
     params.push("    uint id [[thread_position_in_grid]]".to_string());
 
     let kernel_source = format!(
         r#"#include <metal_stdlib>
 using namespace metal;
-
+{}
 kernel void {}(
 {}
 ) {{
-    if (id < count) {{
-        out[id] = {};
-    }}
+    if (id >= numel) return;
+    out[id] = {};
 }}"#,
+        ND_INDEX_HELPER_MSL,
         func_name,
         params.join(",\n"),
         final_expr
@@ -282,7 +317,12 @@ mod tests {
         let chains = find_fusible_chains(&g, &[3, 4]);
         let (source, name, inputs) = generate_fused_msl(&g, &chains[0]);
 
-        assert!(source.contains("max((in0[id] + in1[id]), 0.0f)"));
+        // N-D stride-based: uses nd_index_to_offset for input access
+        assert!(source.contains("nd_index_to_offset"), "fused MSL should include nd_index_to_offset helper");
+        assert!(source.contains("in0[nd_index_to_offset(id, out_shape, in0_strides, ndim)]"));
+        assert!(source.contains("in1[nd_index_to_offset(id, out_shape, in1_strides, ndim)]"));
+        assert!(source.contains("max("));
+        assert!(source.contains("0.0f"));
         assert!(source.contains(&name));
         assert_eq!(inputs, vec![1, 2]);
     }
@@ -364,7 +404,8 @@ mod tests {
         let (source, _name, inputs) = generate_fused_msl(&g, &chains[0]);
 
         assert!(source.contains("half"), "f16 fused kernel should use half type");
-        assert!(source.contains("max((in0[id] + in1[id]), (half)0)"));
+        assert!(source.contains("nd_index_to_offset"), "f16 fused kernel should use nd_index_to_offset");
+        assert!(source.contains("(half)0"));
         assert_eq!(inputs, vec![1, 2]);
     }
 

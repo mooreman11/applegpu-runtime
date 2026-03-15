@@ -792,6 +792,76 @@ impl ComputePipeline {
         if result == 0 { Ok(()) } else { Err(GpuError::ComputeFailed("Fused kernel dispatch failed".to_string())) }
     }
 
+    /// Dispatch a fused N-D element-wise kernel with stride arrays per input.
+    pub fn dispatch_fused_nd(
+        &self,
+        input_buffers: &[&Buffer],
+        buf_out: &Buffer,
+        input_strides: &[&[u32; MAX_DIMS]],
+        out_shape: &[u32; MAX_DIMS],
+        ndim: u32,
+        numel: u32,
+    ) -> Result<()> {
+        let ptrs: Vec<*const ffi::GPUBufferHandle> = input_buffers
+            .iter()
+            .map(|b| b.raw_handle() as *const _)
+            .collect();
+        let stride_ptrs: Vec<*const u32> = input_strides
+            .iter()
+            .map(|s| s.as_ptr())
+            .collect();
+
+        let result = unsafe {
+            ffi::gpu_bridge_compute_fused_nd(
+                self.handle,
+                ptrs.as_ptr(),
+                ptrs.len() as u32,
+                buf_out.raw_handle(),
+                stride_ptrs.as_ptr(),
+                out_shape.as_ptr(),
+                ndim,
+                numel,
+            )
+        };
+        if result == 0 { Ok(()) } else { Err(GpuError::ComputeFailed("Fused N-D kernel dispatch failed".to_string())) }
+    }
+
+    /// Non-blocking fused N-D dispatch. Returns command buffer handle.
+    pub fn dispatch_fused_nd_nb(
+        &self,
+        queue: *mut std::ffi::c_void,
+        input_buffers: &[&Buffer],
+        buf_out: &Buffer,
+        input_strides: &[&[u32; MAX_DIMS]],
+        out_shape: &[u32; MAX_DIMS],
+        ndim: u32,
+        numel: u32,
+    ) -> Result<*mut std::ffi::c_void> {
+        let ptrs: Vec<*const ffi::GPUBufferHandle> = input_buffers
+            .iter()
+            .map(|b| b.raw_handle() as *const _)
+            .collect();
+        let stride_ptrs: Vec<*const u32> = input_strides
+            .iter()
+            .map(|s| s.as_ptr())
+            .collect();
+
+        let cb = unsafe {
+            ffi::gpu_bridge_compute_fused_nd_nb(
+                self.handle,
+                queue,
+                ptrs.as_ptr(),
+                ptrs.len() as u32,
+                buf_out.raw_handle(),
+                stride_ptrs.as_ptr(),
+                out_shape.as_ptr(),
+                ndim,
+                numel,
+            )
+        };
+        if cb.is_null() { Err(GpuError::ComputeFailed("Non-blocking fused N-D dispatch failed".to_string())) } else { Ok(cb) }
+    }
+
     pub fn dispatch_softmax(
         &self, buf_input: &Buffer, buf_output: &Buffer, rows: usize, cols: usize,
     ) -> Result<()> {
@@ -1519,6 +1589,23 @@ impl KernelRegistry {
         pipeline.dispatch_fused(input_buffers, buf_out, element_count)
     }
 
+    /// Dispatch a fused N-D kernel with stride arrays per input.
+    pub fn dispatch_fused_nd(
+        &self,
+        device: &Device,
+        kernel_source: &str,
+        function_name: &str,
+        input_buffers: &[&Buffer],
+        buf_out: &Buffer,
+        input_strides: &[&[u32; MAX_DIMS]],
+        out_shape: &[u32; MAX_DIMS],
+        ndim: u32,
+        numel: u32,
+    ) -> Result<()> {
+        let pipeline = self.get_or_create(device, kernel_source, function_name)?;
+        pipeline.dispatch_fused_nd(input_buffers, buf_out, input_strides, out_shape, ndim, numel)
+    }
+
     pub fn dispatch_softmax(
         &self, device: &Device, buf_input: &Buffer, buf_output: &Buffer,
         rows: usize, cols: usize,
@@ -1842,6 +1929,17 @@ impl KernelRegistry {
     ) -> Result<*mut std::ffi::c_void> {
         let pipeline = self.get_or_create(device, kernel_source, function_name)?;
         pipeline.dispatch_fused_nb(queue, input_buffers, buf_out, element_count)
+    }
+
+    /// Non-blocking N-D fused kernel dispatch with stride arrays per input.
+    pub fn dispatch_fused_nd_nb(
+        &self, device: &Device, kernel_source: &str, function_name: &str,
+        queue: *mut std::ffi::c_void, input_buffers: &[&Buffer], buf_out: &Buffer,
+        input_strides: &[&[u32; MAX_DIMS]], out_shape: &[u32; MAX_DIMS],
+        ndim: u32, numel: u32,
+    ) -> Result<*mut std::ffi::c_void> {
+        let pipeline = self.get_or_create(device, kernel_source, function_name)?;
+        pipeline.dispatch_fused_nd_nb(queue, input_buffers, buf_out, input_strides, out_shape, ndim, numel)
     }
 
     // ── N-D typed dispatch methods ────────────────────────────────────────

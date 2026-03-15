@@ -167,7 +167,7 @@ impl LazyRuntime {
     fn execute_node(&mut self, device: &Device, node: &OpNode) -> Result<Tensor> {
         let out_size = node.out_shape.numel() * node.out_dtype.size_bytes();
 
-        // Handle fused kernels first
+        // Handle fused kernels first (N-D stride-based dispatch)
         if let crate::graph::OpKind::FusedElementwise { ref kernel_source, ref function_name } = node.op {
             let out_buf = self.pool.acquire(device, out_size)?;
             let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
@@ -177,13 +177,28 @@ impl LazyRuntime {
             let input_buffers: Vec<&crate::buffer::Buffer> = input_tensors.iter()
                 .map(|t| &t.buffer)
                 .collect();
-            let numel = input_tensors[0].numel();
-            REGISTRY.dispatch_fused(
+
+            // Compute per-input strides (contiguous for fused chains)
+            let stride_arrays: Vec<[u32; MAX_DIMS]> = input_tensors.iter()
+                .map(|t| {
+                    let strides = TensorLayout::broadcast_strides_for(&t.meta.layout.shape, &node.out_shape);
+                    Self::to_u32_array(&strides)
+                })
+                .collect();
+            let stride_refs: Vec<&[u32; MAX_DIMS]> = stride_arrays.iter().collect();
+            let out_shape_u32 = Self::shape_to_u32(&node.out_shape);
+            let ndim = node.out_shape.ndim() as u32;
+            let numel = node.out_shape.numel() as u32;
+
+            REGISTRY.dispatch_fused_nd(
                 device,
                 kernel_source,
                 function_name,
                 &input_buffers,
                 &out.buffer,
+                &stride_refs,
+                &out_shape_u32,
+                ndim,
                 numel,
             )?;
             return Ok(out);
@@ -414,7 +429,7 @@ impl LazyRuntime {
         node: &OpNode,
         out: &Tensor,
     ) -> Result<*mut std::ffi::c_void> {
-        // Handle fused kernels first
+        // Handle fused kernels first (N-D stride-based dispatch)
         if let crate::graph::OpKind::FusedElementwise { ref kernel_source, ref function_name } = node.op {
             let input_tensors: Vec<&Tensor> = node.inputs.iter()
                 .map(|&id| self.get_tensor(id))
@@ -422,14 +437,29 @@ impl LazyRuntime {
             let input_buffers: Vec<&crate::buffer::Buffer> = input_tensors.iter()
                 .map(|t| &t.buffer)
                 .collect();
-            let numel = input_tensors[0].numel();
-            return REGISTRY.dispatch_fused_nb(
+
+            // Compute per-input strides (contiguous for fused chains)
+            let stride_arrays: Vec<[u32; MAX_DIMS]> = input_tensors.iter()
+                .map(|t| {
+                    let strides = TensorLayout::broadcast_strides_for(&t.meta.layout.shape, &node.out_shape);
+                    Self::to_u32_array(&strides)
+                })
+                .collect();
+            let stride_refs: Vec<&[u32; MAX_DIMS]> = stride_arrays.iter().collect();
+            let out_shape_u32 = Self::shape_to_u32(&node.out_shape);
+            let ndim = node.out_shape.ndim() as u32;
+            let numel = node.out_shape.numel() as u32;
+
+            return REGISTRY.dispatch_fused_nd_nb(
                 device,
                 kernel_source,
                 function_name,
                 queue,
                 &input_buffers,
                 &out.buffer,
+                &stride_refs,
+                &out_shape_u32,
+                ndim,
                 numel,
             );
         }

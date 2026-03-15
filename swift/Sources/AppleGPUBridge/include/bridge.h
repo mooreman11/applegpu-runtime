@@ -338,6 +338,34 @@ void* gpu_bridge_compute_add_bias_nb(
     uint32_t cols
 );
 
+// ── N-D fused element-wise dispatch ──────────────────────────────────────
+
+// Execute a fused N-D kernel with variable input buffers and stride arrays.
+// input_strides is an array of (buffer_count) pointers, each pointing to a uint32_t[8] stride array.
+int32_t gpu_bridge_compute_fused_nd(
+    GPUComputeHandle* compute,
+    const GPUBufferHandle* const* input_buffers,
+    uint32_t buffer_count,
+    GPUBufferHandle* output,
+    const uint32_t* const* input_strides,
+    const uint32_t* out_shape,
+    uint32_t ndim,
+    uint32_t numel
+);
+
+// Non-blocking N-D fused kernel: returns command buffer handle.
+void* gpu_bridge_compute_fused_nd_nb(
+    GPUComputeHandle* compute,
+    void* queue,
+    const GPUBufferHandle* const* input_buffers,
+    uint32_t buffer_count,
+    GPUBufferHandle* output,
+    const uint32_t* const* input_strides,
+    const uint32_t* out_shape,
+    uint32_t ndim,
+    uint32_t numel
+);
+
 // ── N-D stride-based element-wise dispatch ───────────────────────────────
 
 int32_t gpu_bridge_compute_binary_nd(
