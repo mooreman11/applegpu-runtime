@@ -118,17 +118,51 @@ _Almost everything on the roadmap is blocked by 2D-only tensors. This is the arc
 - [ ] **Tag v0.3.0** — ship with N-D tensors and batch inference
 
 ### Other improvements (unblocked after N-D tensors)
-- [ ] **Top-k / top-p sampling** — temperature-based sampling for non-greedy generation
+- [x] **Top-k / top-p sampling** — done
+- [x] **PyTorch custom device backend** — done (ApplegpuTensor, __torch_dispatch__, 25+ aten ops)
 - [ ] **Conv1d** — needs 3D `[batch, channels, length]`
 - [ ] **Gather/scatter** — index-based tensor operations
 - [ ] **More models** — GPT-2 medium/large, other architectures
+
+## Up Next
+
+### v0.4.0: Expand PyTorch device backend coverage
+_The device backend dispatches 25+ ops but real models need more. Add the missing ops that cause CPU fallbacks._
+
+**New GPU ops needed (Metal kernels):**
+- [ ] **sum / mean** — reduction ops, critical for loss computation and layer_norm decomposition
+- [ ] **where / masked_fill** — conditional ops for attention masking, dropout
+- [ ] **conv1d / conv2d** — convolution kernels for CNNs (ResNet, etc.)
+- [ ] **batch_norm** — normalization for CNN models
+- [ ] **max_pool2d / avg_pool2d** — pooling layers for CNNs
+- [ ] **linear (fused matmul + bias)** — single kernel instead of matmul + add_bias
+- [ ] **pow** — element-wise power (used in GELU decomposition)
+- [ ] **abs / sign / clamp** — element-wise math ops
+- [ ] **gather / scatter / index_select** — advanced indexing
+- [ ] **triu / tril** — triangular ops for causal masks
+
+**PyTorch device backend improvements:**
+- [ ] **model.to("applegpu")** — full nn.Module parameter migration (requires proper storage backend)
+- [ ] **Reduce CPU fallback ops** — trace real models, implement the top fallback ops
+- [ ] **Direct data_ptr() transfer** — bypass NumPy for tensor conversion (performance)
+- [ ] **torch.compile() support** — register as a torch.compile backend for graph-level optimization
+
+**Training support:**
+- [ ] **PyTorch autograd integration** — backward ops for all forward ops
+- [ ] **Gradient accumulation** — in-place ops for parameter updates
+- [ ] **Optimizer kernels** — SGD, Adam on GPU
+
+### More models
+- [ ] **GPT-2 medium/large** — test with larger model variants
+- [ ] **BERT** — encoder-only transformer
+- [ ] **ResNet** — requires conv2d, batch_norm, max_pool (see ops above)
+- [ ] **Whisper / audio models** — requires conv1d
+- [ ] **Stable Diffusion** — requires conv2d, group_norm, attention
 
 ## Further Backlog
 
 ### Framework Improvements
 - [ ] **Zero-copy from_numpy** — Metal `makeBuffer(bytesNoCopy:)` Swift FFI, page alignment, GC pinning, three-layer work
-- [x] **PyTorch custom device backend** — ApplegpuTensor with __torch_dispatch__, 25+ aten ops dispatched to Metal, CPU fallback with warnings
-- [ ] **PyTorch autograd integration** — `torch.autograd.Function` wrappers (requires backward ops)
 - [ ] **Direct from_torch via data_ptr()** — bypass NumPy bridge when Metal bytesNoCopy is available
 
 ### Multi-dtype Support (partially done)
