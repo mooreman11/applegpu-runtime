@@ -523,6 +523,159 @@ impl EvalResponse {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Wire type conversions
+// ---------------------------------------------------------------------------
+
+use applegpu_wire::{WireOpKind, WireOpNode};
+
+impl From<&OpKind> for WireOpKind {
+    fn from(op: &OpKind) -> Self {
+        match op {
+            OpKind::Add => WireOpKind::Add,
+            OpKind::Sub => WireOpKind::Sub,
+            OpKind::Mul => WireOpKind::Mul,
+            OpKind::Div => WireOpKind::Div,
+            OpKind::Neg => WireOpKind::Neg,
+            OpKind::Relu => WireOpKind::Relu,
+            OpKind::Exp => WireOpKind::Exp,
+            OpKind::Log => WireOpKind::Log,
+            OpKind::Sqrt => WireOpKind::Sqrt,
+            OpKind::Matmul => WireOpKind::Matmul,
+            OpKind::FusedElementwise { kernel_source, function_name } => {
+                WireOpKind::FusedElementwise {
+                    kernel_source: kernel_source.clone(),
+                    function_name: function_name.clone(),
+                }
+            }
+            OpKind::Softmax => WireOpKind::Softmax,
+            OpKind::Transpose { dim0, dim1 } => WireOpKind::Transpose { dim0: *dim0, dim1: *dim1 },
+            OpKind::ScalarMul(scale) => WireOpKind::ScalarMul(*scale),
+            OpKind::Gelu => WireOpKind::Gelu,
+            OpKind::LayerNorm { eps } => WireOpKind::LayerNorm { eps: *eps },
+            OpKind::Embedding => WireOpKind::Embedding,
+            OpKind::Reshape { new_shape } => WireOpKind::Reshape { new_shape: new_shape.clone() },
+            OpKind::Slice { dim, start, end } => WireOpKind::Slice { dim: *dim, start: *start, end: *end },
+            OpKind::Concat { dim } => WireOpKind::Concat { dim: *dim },
+            OpKind::AddBias => WireOpKind::AddBias,
+            OpKind::SoftmaxCausal => WireOpKind::SoftmaxCausal,
+            OpKind::Argmax => WireOpKind::Argmax,
+            OpKind::Sum => WireOpKind::Sum,
+            OpKind::Mean => WireOpKind::Mean,
+            OpKind::Abs => WireOpKind::Abs,
+            OpKind::Sign => WireOpKind::Sign,
+            OpKind::Pow { exponent } => WireOpKind::Pow { exponent: *exponent },
+            OpKind::Clamp { min_val, max_val } => WireOpKind::Clamp { min_val: *min_val, max_val: *max_val },
+            OpKind::Where => WireOpKind::Where,
+            OpKind::MaskedFill { value } => WireOpKind::MaskedFill { value: *value },
+            OpKind::Triu { diagonal } => WireOpKind::Triu { diagonal: *diagonal },
+            OpKind::Tril { diagonal } => WireOpKind::Tril { diagonal: *diagonal },
+            OpKind::Gather { dim } => WireOpKind::Gather { dim: *dim },
+            OpKind::IndexSelect { dim } => WireOpKind::IndexSelect { dim: *dim },
+            OpKind::Conv1d { stride, padding } => WireOpKind::Conv1d { stride: *stride, padding: *padding },
+            OpKind::Conv2d { stride, padding } => WireOpKind::Conv2d { stride: *stride, padding: *padding },
+            OpKind::BatchNorm { eps } => WireOpKind::BatchNorm { eps: *eps },
+            OpKind::MaxPool2d { kernel_size, stride, padding } => {
+                WireOpKind::MaxPool2d { kernel_size: *kernel_size, stride: *stride, padding: *padding }
+            }
+            OpKind::AvgPool2d { kernel_size, stride, padding } => {
+                WireOpKind::AvgPool2d { kernel_size: *kernel_size, stride: *stride, padding: *padding }
+            }
+            OpKind::Tanh => WireOpKind::Tanh,
+            OpKind::SoftmaxBackward => WireOpKind::SoftmaxBackward,
+            OpKind::LayerNormBackward { eps } => WireOpKind::LayerNormBackward { eps: *eps },
+            OpKind::Conv2dBackwardInput { stride, padding } => WireOpKind::Conv2dBackwardInput { stride: *stride, padding: *padding },
+            OpKind::EmbeddingBackward => WireOpKind::EmbeddingBackward,
+            OpKind::BatchNormBackward { eps } => WireOpKind::BatchNormBackward { eps: *eps },
+        }
+    }
+}
+
+impl From<&OpNode> for WireOpNode {
+    fn from(node: &OpNode) -> Self {
+        WireOpNode {
+            id: node.id,
+            op: WireOpKind::from(&node.op),
+            inputs: node.inputs.clone(),
+            out_shape: node.out_shape.dims().to_vec(),
+            out_dtype: 0,
+        }
+    }
+}
+
+pub fn wire_op_to_core(wire: &WireOpKind) -> OpKind {
+    match wire {
+        WireOpKind::Add => OpKind::Add,
+        WireOpKind::Sub => OpKind::Sub,
+        WireOpKind::Mul => OpKind::Mul,
+        WireOpKind::Div => OpKind::Div,
+        WireOpKind::Neg => OpKind::Neg,
+        WireOpKind::Relu => OpKind::Relu,
+        WireOpKind::Exp => OpKind::Exp,
+        WireOpKind::Log => OpKind::Log,
+        WireOpKind::Sqrt => OpKind::Sqrt,
+        WireOpKind::Matmul => OpKind::Matmul,
+        WireOpKind::FusedElementwise { kernel_source, function_name } => {
+            OpKind::FusedElementwise {
+                kernel_source: kernel_source.clone(),
+                function_name: function_name.clone(),
+            }
+        }
+        WireOpKind::Softmax => OpKind::Softmax,
+        WireOpKind::Transpose { dim0, dim1 } => OpKind::Transpose { dim0: *dim0, dim1: *dim1 },
+        WireOpKind::ScalarMul(scale) => OpKind::ScalarMul(*scale),
+        WireOpKind::Gelu => OpKind::Gelu,
+        WireOpKind::LayerNorm { eps } => OpKind::LayerNorm { eps: *eps },
+        WireOpKind::Embedding => OpKind::Embedding,
+        WireOpKind::Reshape { new_shape } => OpKind::Reshape { new_shape: new_shape.clone() },
+        WireOpKind::Slice { dim, start, end } => OpKind::Slice { dim: *dim, start: *start, end: *end },
+        WireOpKind::Concat { dim } => OpKind::Concat { dim: *dim },
+        WireOpKind::AddBias => OpKind::AddBias,
+        WireOpKind::SoftmaxCausal => OpKind::SoftmaxCausal,
+        WireOpKind::Argmax => OpKind::Argmax,
+        WireOpKind::Sum => OpKind::Sum,
+        WireOpKind::Mean => OpKind::Mean,
+        WireOpKind::Abs => OpKind::Abs,
+        WireOpKind::Sign => OpKind::Sign,
+        WireOpKind::Pow { exponent } => OpKind::Pow { exponent: *exponent },
+        WireOpKind::Clamp { min_val, max_val } => OpKind::Clamp { min_val: *min_val, max_val: *max_val },
+        WireOpKind::Where => OpKind::Where,
+        WireOpKind::MaskedFill { value } => OpKind::MaskedFill { value: *value },
+        WireOpKind::Triu { diagonal } => OpKind::Triu { diagonal: *diagonal },
+        WireOpKind::Tril { diagonal } => OpKind::Tril { diagonal: *diagonal },
+        WireOpKind::Gather { dim } => OpKind::Gather { dim: *dim },
+        WireOpKind::IndexSelect { dim } => OpKind::IndexSelect { dim: *dim },
+        WireOpKind::Conv1d { stride, padding } => OpKind::Conv1d { stride: *stride, padding: *padding },
+        WireOpKind::Conv2d { stride, padding } => OpKind::Conv2d { stride: *stride, padding: *padding },
+        WireOpKind::BatchNorm { eps } => OpKind::BatchNorm { eps: *eps },
+        WireOpKind::MaxPool2d { kernel_size, stride, padding } => {
+            OpKind::MaxPool2d { kernel_size: *kernel_size, stride: *stride, padding: *padding }
+        }
+        WireOpKind::AvgPool2d { kernel_size, stride, padding } => {
+            OpKind::AvgPool2d { kernel_size: *kernel_size, stride: *stride, padding: *padding }
+        }
+        WireOpKind::Tanh => OpKind::Tanh,
+        WireOpKind::SoftmaxBackward => OpKind::SoftmaxBackward,
+        WireOpKind::LayerNormBackward { eps } => OpKind::LayerNormBackward { eps: *eps },
+        WireOpKind::Conv2dBackwardInput { stride, padding } => OpKind::Conv2dBackwardInput { stride: *stride, padding: *padding },
+        WireOpKind::EmbeddingBackward => OpKind::EmbeddingBackward,
+        WireOpKind::BatchNormBackward { eps } => OpKind::BatchNormBackward { eps: *eps },
+    }
+}
+
+pub fn wire_node_to_core(wire: &WireOpNode) -> std::result::Result<OpNode, std::io::Error> {
+    let out_shape = Shape::new(wire.out_shape.clone())
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+    Ok(OpNode {
+        id: wire.id,
+        op: wire_op_to_core(&wire.op),
+        inputs: wire.inputs.clone(),
+        out_shape,
+        out_dtype: DType::Float32,
+        container_id: ContainerId::DEFAULT,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

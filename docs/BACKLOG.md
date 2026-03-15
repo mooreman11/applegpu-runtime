@@ -206,7 +206,11 @@ _Graph-level fusion, eliminate Python dispatch overhead._
 - [ ] **Bool compute kernels** — logical ops (and, or, not) on bool tensors
 
 ### Infrastructure
-- [ ] **Phase 7b: AVF VM integration** — VZVirtualMachine lifecycle, virtio-vsock transport (Metal GPU can't pass through to guest VMs)
+- [x] **Phase 7b: Container GPU bridge** — multi-client GPU service (thread-per-connection, shared LazyRuntime), wire protocol crate, client crate with Unix socket + vsock transport, handshake protocol, per-container isolation and cleanup
+- [ ] **AVF VM integration** — VZVirtualMachine lifecycle, virtio-vsock transport (Metal GPU can't pass through to guest VMs)
+- [ ] **Apple Containerization Framework integration** — attach vsock listener to framework-managed VMs, Swift `VZVirtioSocketListener` FFI
+- [ ] **Docker bind-mount documentation** — instructions for mounting the GPU service socket into Docker containers
+- [ ] **Client Python bindings** — PyO3 wrapper around `crates/client` for use inside containers
 - [ ] **Phase C: Dynamic container lifecycle** — work stealing, auto-scaling based on queue pressure
 - [ ] **Multi-node / distributed graph** — network transport layer, graph partitioning across machines
 
@@ -214,6 +218,10 @@ _Graph-level fusion, eliminate Python dispatch overhead._
 - [ ] **Multiple Metal command queues** — dispatch independent graph branches in parallel on the same GPU. Apple Silicon supports concurrent queues natively. Biggest throughput win for workloads with independent subgraphs.
 - [ ] **Async eval** — `gpu.eval_async(tensor)` returns a future/handle, doesn't block Python. Submit multiple evals and wait on results. Integrates with the scheduler's job queue.
 - [ ] **Fine-grained locking** — split single `Mutex<LazyRuntime>` into per-component locks (graph, tensor store, scheduler, pool). Allows concurrent reads while one eval runs. Requires careful lock ordering to avoid deadlocks.
+- [ ] **Read timeout / keepalive** — `SO_RCVTIMEO` on GPU service connections to reclaim threads from hung clients
+- [ ] **Connection limits** — max concurrent GPU service connections to prevent thread exhaustion (e.g., 64 max)
+- [ ] **Health check endpoint** — GPU service status query for monitoring
+- [ ] **Metrics/observability** — per-container GPU utilization, queue depth, latency histograms
 - [ ] **Multi-GPU support** _(very low priority)_ — device pool, per-device buffer pools, cross-device transfers. Only relevant for Mac Pro with multiple chips or eGPUs. Apple Silicon has one GPU per chip.
 
 ### Memory Pool Improvements

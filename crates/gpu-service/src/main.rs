@@ -1,21 +1,117 @@
-use std::io::{Read, Write};
-use std::os::unix::net::UnixListener;
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::sync::{Arc, Mutex};
+use std::thread;
 
 use applegpu_core::buffer::Buffer;
 use applegpu_core::device::Device;
 use applegpu_core::lazy::LazyRuntime;
-use applegpu_core::serial::{EvalRequest, EvalResponse};
-use applegpu_core::tensor::Tensor;
+use applegpu_core::scheduler::{ContainerId, ContainerConfig, Priority};
+use applegpu_core::serial::wire_node_to_core;
+use applegpu_core::tensor::{DType, Tensor};
 
-fn handle_request(device: &Device, request: &EvalRequest) -> EvalResponse {
-    let mut rt = LazyRuntime::new();
+use applegpu_wire::{
+    self as wire,
+    EvalRequest, EvalResponse, HandshakeRequest, HandshakeResponse,
+    HANDSHAKE_OK, HANDSHAKE_REJECTED_QUOTA, PROTOCOL_VERSION, MAX_MESSAGE_SIZE,
+};
 
-    // Load input tensors from serialized data
+struct SharedState {
+    runtime: Mutex<LazyRuntime>,
+    device: Device,
+}
+
+fn handle_handshake(
+    shared: &SharedState,
+    stream: &mut UnixStream,
+) -> Option<ContainerId> {
+    let msg = match wire::read_message(stream, 1024) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("Handshake read failed: {}", e);
+            return None;
+        }
+    };
+    let req = match HandshakeRequest::deserialize(&msg) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Handshake parse failed: {}", e);
+            return None;
+        }
+    };
+
+    if req.protocol_version != PROTOCOL_VERSION {
+        eprintln!("Unsupported protocol version: {}", req.protocol_version);
+        let resp = HandshakeResponse {
+            status: 2, // HANDSHAKE_REJECTED_CAPACITY
+            container_id: 0,
+            granted_memory: 0,
+        };
+        let _ = wire::write_message(stream, &resp.serialize());
+        return None;
+    }
+
+    let mut rt = shared.runtime.lock().unwrap();
+    let default_memory = rt.scheduler.global_limits.max_total_memory_bytes;
+    let default_tensors = rt.scheduler.global_limits.max_tensor_count;
+    let requested = if req.requested_memory == 0 {
+        default_memory / 4
+    } else {
+        req.requested_memory as usize
+    };
+
+    let config = ContainerConfig {
+        priority: Priority::Normal,
+        max_memory_bytes: requested,
+        max_tensor_count: default_tensors / 4,
+        max_tensor_size_bytes: 0,
+        max_pending_jobs: 64,
+    };
+
+    match rt.scheduler.register_container(config) {
+        Ok(cid) => {
+            let resp = HandshakeResponse {
+                status: HANDSHAKE_OK,
+                container_id: cid.0,
+                granted_memory: requested as u64,
+            };
+            drop(rt);
+            if wire::write_message(stream, &resp.serialize()).is_err() {
+                return None;
+            }
+            println!("Container {} registered (memory: {} bytes)", cid, requested);
+            Some(cid)
+        }
+        Err(e) => {
+            let resp = HandshakeResponse {
+                status: HANDSHAKE_REJECTED_QUOTA,
+                container_id: 0,
+                granted_memory: 0,
+            };
+            drop(rt);
+            let _ = wire::write_message(stream, &resp.serialize());
+            eprintln!("Container registration failed: {}", e);
+            None
+        }
+    }
+}
+
+fn handle_eval(
+    shared: &SharedState,
+    container_id: ContainerId,
+    request: &EvalRequest,
+) -> EvalResponse {
+    let mut rt = shared.runtime.lock().unwrap();
+
     for td in &request.tensors {
-        match Buffer::from_bytes(device, &td.data) {
+        match Buffer::from_bytes(&shared.device, &td.data) {
             Ok(buffer) => {
-                let tensor = Tensor::from_raw(td.id, td.shape.clone(), td.dtype, buffer);
-                if let Err(e) = rt.insert_tensor(tensor) {
+                let tensor = Tensor::from_raw(
+                    td.id,
+                    td.shape.clone(),
+                    DType::Float32,
+                    buffer,
+                );
+                if let Err(e) = rt.insert_tensor_for(tensor, container_id) {
                     return EvalResponse::Err(format!("Insert tensor failed: {}", e));
                 }
             }
@@ -23,17 +119,20 @@ fn handle_request(device: &Device, request: &EvalRequest) -> EvalResponse {
         }
     }
 
-    // Load graph nodes
-    for node in &request.nodes {
-        let _ = rt.record_op(node.clone());
+    for wire_node in &request.nodes {
+        match wire_node_to_core(wire_node) {
+            Ok(mut node) => {
+                node.container_id = container_id;
+                rt.record_op(node);
+            }
+            Err(e) => return EvalResponse::Err(format!("Node conversion failed: {}", e)),
+        }
     }
 
-    // Evaluate (fusion runs automatically inside eval)
-    if let Err(e) = rt.eval(device, request.target_id) {
+    if let Err(e) = rt.eval(&shared.device, request.target_id) {
         return EvalResponse::Err(format!("Eval failed: {}", e));
     }
 
-    // Read result
     match rt.read_f32(request.target_id) {
         Ok(data) => {
             let shape = rt.shape(request.target_id).unwrap_or_default();
@@ -48,11 +147,39 @@ fn handle_request(device: &Device, request: &EvalRequest) -> EvalResponse {
     }
 }
 
+fn handle_connection(shared: Arc<SharedState>, mut stream: UnixStream) {
+    let container_id = match handle_handshake(&shared, &mut stream) {
+        Some(cid) => cid,
+        None => return,
+    };
+
+    loop {
+        let msg = match wire::read_message(&mut stream, MAX_MESSAGE_SIZE) {
+            Ok(m) => m,
+            Err(_) => break,
+        };
+
+        let response = match EvalRequest::deserialize(&msg) {
+            Ok(request) => handle_eval(&shared, container_id, &request),
+            Err(e) => EvalResponse::Err(format!("Deserialization failed: {}", e)),
+        };
+
+        if wire::write_message(&mut stream, &response.serialize()).is_err() {
+            break;
+        }
+    }
+
+    println!("Container {} disconnected, cleaning up", container_id);
+    let mut rt = shared.runtime.lock().unwrap();
+    if let Err(e) = rt.cleanup_container(container_id) {
+        eprintln!("Cleanup failed for {}: {}", container_id, e);
+    }
+}
+
 fn main() {
     let socket_path = std::env::var("APPLEGPU_SOCKET")
         .unwrap_or_else(|_| applegpu_core::ipc::default_socket_path());
 
-    // Ensure socket directory exists and remove stale socket
     if let Some(parent) = std::path::Path::new(&socket_path).parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -61,45 +188,19 @@ fn main() {
     let device = Device::new().expect("No Metal GPU available");
     println!("GPU service started on {} (device: {})", socket_path, device.name());
 
+    let shared = Arc::new(SharedState {
+        runtime: Mutex::new(LazyRuntime::new()),
+        device,
+    });
+
     let listener = UnixListener::bind(&socket_path)
         .expect("Failed to bind Unix socket");
 
     for stream in listener.incoming() {
         match stream {
-            Ok(mut stream) => {
-                // Read request: [4 bytes length] + [payload]
-                let mut len_buf = [0u8; 4];
-                if stream.read_exact(&mut len_buf).is_err() {
-                    continue;
-                }
-                let req_len = u32::from_le_bytes(len_buf) as usize;
-
-                // Safety: limit request size to 256MB
-                if req_len > 256 * 1024 * 1024 {
-                    let resp = EvalResponse::Err("Request too large".to_string());
-                    let resp_payload = resp.serialize();
-                    let len_bytes = (resp_payload.len() as u32).to_le_bytes();
-                    let _ = stream.write_all(&len_bytes);
-                    let _ = stream.write_all(&resp_payload);
-                    continue;
-                }
-
-                let mut req_buf = vec![0u8; req_len];
-                if stream.read_exact(&mut req_buf).is_err() {
-                    continue;
-                }
-
-                let response = match EvalRequest::deserialize(&req_buf) {
-                    Ok(request) => handle_request(&device, &request),
-                    Err(e) => EvalResponse::Err(format!("Deserialization failed: {}", e)),
-                };
-
-                // Send response: [4 bytes length] + [payload]
-                let resp_payload = response.serialize();
-                let len_bytes = (resp_payload.len() as u32).to_le_bytes();
-                let _ = stream.write_all(&len_bytes);
-                let _ = stream.write_all(&resp_payload);
-                let _ = stream.flush();
+            Ok(stream) => {
+                let shared = shared.clone();
+                thread::spawn(move || handle_connection(shared, stream));
             }
             Err(e) => eprintln!("Connection error: {}", e),
         }

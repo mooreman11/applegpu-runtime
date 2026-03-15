@@ -3,9 +3,18 @@
 version = 4
 
 [[package]]
+name = "applegpu-client"
+version = "0.1.0"
+dependencies = [
+ "applegpu-wire",
+ "libc",
+]
+
+[[package]]
 name = "applegpu-core"
 version = "0.1.0"
 dependencies = [
+ "applegpu-wire",
  "const_format",
  "half",
  "once_cell",
@@ -27,7 +36,12 @@ name = "applegpu-service"
 version = "0.1.0"
 dependencies = [
  "applegpu-core",
+ "applegpu-wire",
 ]
+
+[[package]]
+name = "applegpu-wire"
+version = "0.1.0"
 
 [[package]]
 name = "autocfg"
