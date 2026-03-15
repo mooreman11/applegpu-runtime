@@ -1,7 +1,7 @@
 # Phase 7b: Container GPU Bridge
 
 **Date:** 2026-03-15
-**Status:** Draft
+**Status:** Approved
 **Scope:** Multi-client GPU service with dual transport (virtio-vsock + Unix socket), connection-based container identity, and a Linux-compilable client crate. No container/VM lifecycle management — that is the container framework's responsibility.
 
 ## Overview
@@ -105,6 +105,8 @@ Server sends:  [4 bytes] magic: b"AGHO"
 ```
 
 Memory fields are `u64` to support Apple Silicon machines with 32GB-192GB unified memory.
+
+**ContainerConfig defaults:** The handshake only sends `requested_memory`. The service constructs a `ContainerConfig` with: `priority = Normal`, `max_memory_bytes = requested_memory` (or global default if 0), `max_tensor_count` / `max_tensor_size_bytes` / `max_pending_jobs` from global defaults. Future protocol versions can add fields to the handshake to override these.
 
 After handshake, the existing `EvalRequest`/`EvalResponse` protocol from Phase 7a is used unchanged.
 
@@ -211,7 +213,7 @@ This avoids code duplication and ensures the wire format is always in sync betwe
 `crates/core`'s `OpKind` (43 variants), `OpNode`, `Shape`, `DType`, and `ContainerId` are tightly coupled to the execution engine. Rather than moving them into `crates/wire` (which would constrain their evolution), the wire crate defines its own serialization-focused types:
 
 **Wire types (defined in `crates/wire`):**
-- `WireOpKind` — `u32` discriminant enum (0-42) with per-variant payload fields (e.g., scale for ScalarMul, kernel source for Fused)
+- `WireOpKind` — `u32` discriminant enum (one per `OpKind` variant, currently 0-45) with per-variant payload fields (e.g., scale for ScalarMul, kernel source for Fused)
 - `WireOpNode` — `{ id: u64, op: WireOpKind, inputs: Vec<u64>, out_shape: Vec<usize>, out_dtype: u32 }`
 - `WireTensorData` — `{ id: u64, shape: Vec<usize>, dtype: u32, data: Vec<u8> }`
 - `EvalRequest` — `{ target_id: u64, tensors: Vec<WireTensorData>, nodes: Vec<WireOpNode> }`
@@ -282,8 +284,8 @@ The Swift implementation wraps `VZVirtioSocketListener` with a delegate that que
 
 ### 5. `crates/core` changes (minimal)
 
-- `serial.rs` → re-export from `crates/wire` (backward compatible)
-- `ipc.rs` → update to use `crates/wire` framing helpers
+- `serial.rs` → re-export from `crates/wire` (backward compatible), add `From`/`TryFrom` conversions between wire and core types
+- `ipc.rs` → kept for backward compatibility (local non-container `APPLEGPU_BACKEND=vm` usage), updated to use `crates/wire` framing helpers. Not deprecated — it serves the local dev/testing use case where no container is involved
 - `lazy.rs` → add `cleanup_container(container_id)` method that removes all tensors and graph nodes belonging to a container
 - `graph.rs` → `remove_nodes_for_container()` already exists
 
