@@ -1,36 +1,32 @@
+mod backend;
+#[cfg(target_os = "macos")]
+mod metal_backend;
+
 use pyo3::prelude::*;
 use pyo3::exceptions::PyValueError;
 use std::cell::Cell;
 use std::collections::HashMap;
-use std::sync::Mutex;
 
-use applegpu_core::lazy::LazyRuntime;
-use applegpu_core::tensor::{DType, Tensor};
-use applegpu_core::scheduler::{ContainerId, ContainerConfig, Priority, JobId, JobStatus};
+use applegpu_core::tensor::DType;
 
-/// Global lazy runtime.
-static RUNTIME_LAZY: once_cell::sync::Lazy<Mutex<LazyRuntime>> =
-    once_cell::sync::Lazy::new(|| Mutex::new(LazyRuntime::new()));
+use backend::Backend;
 
-/// Helper: get the backend device, ensuring init_backend() was called.
-fn get_device_runtime() -> PyResult<&'static applegpu_core::backend::Runtime> {
-    applegpu_core::backend::get_runtime()
-        .map_err(|e| PyValueError::new_err(e.to_string()))
+#[cfg(target_os = "macos")]
+type ActiveBackend = metal_backend::MetalBackend;
+
+static BACKEND: once_cell::sync::Lazy<ActiveBackend> = once_cell::sync::Lazy::new(|| {
+    ActiveBackend::new()
+});
+
+/// Helper: map BackendResult to PyResult.
+fn py_err<T>(r: Result<T, String>) -> PyResult<T> {
+    r.map_err(|e| PyValueError::new_err(e))
 }
 
-/// Helper: auto-evaluate a tensor if it is pending (lazy).
-fn auto_eval(rt: &mut LazyRuntime, id: u64) -> PyResult<()> {
-    if rt.is_pending(id) {
-        let runtime = get_device_runtime()?;
-        if let Some(ref socket_path) = runtime.socket_path {
-            rt.eval_remote(&runtime.device, id, socket_path)
-                .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        } else {
-            rt.eval(&runtime.device, id)
-                .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        }
-    }
-    Ok(())
+/// Helper: wrap a backend tensor ID result into a GpuTensor.
+fn wrap_tensor(r: Result<u64, String>) -> PyResult<GpuTensor> {
+    let id = py_err(r)?;
+    Ok(GpuTensor { id, destroyed: Cell::new(false) })
 }
 
 /// Convert Python data (list of floats, ints, or bools) to raw bytes for the given dtype.
@@ -114,9 +110,7 @@ impl GpuTensor {
     /// Works on both materialized and lazy tensors.
     #[getter]
     fn shape(&self) -> PyResult<Vec<usize>> {
-        let rt = RUNTIME_LAZY.lock().unwrap();
-        rt.shape(self.id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        py_err(BACKEND.shape(self.id))
     }
 
     /// Get the tensor ID (internal handle).
@@ -128,9 +122,7 @@ impl GpuTensor {
     /// Get the dtype as a string (all 10 types supported).
     #[getter]
     fn dtype(&self) -> PyResult<String> {
-        let rt = RUNTIME_LAZY.lock().unwrap();
-        let dtype = rt.dtype(self.id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let dtype = py_err(BACKEND.dtype(self.id))?;
         Ok(dtype.name().to_string())
     }
 
@@ -138,16 +130,9 @@ impl GpuTensor {
     /// Auto-evaluates if the tensor is lazy.
     /// Supports all 10 dtypes.
     fn to_numpy<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let mut rt = RUNTIME_LAZY.lock().unwrap();
-        auto_eval(&mut rt, self.id)?;
-
-        let dtype = rt.dtype(self.id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let bytes = rt.read_bytes(self.id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let shape = rt.shape(self.id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        drop(rt);
+        let dtype = py_err(BACKEND.dtype(self.id))?;
+        let bytes = py_err(BACKEND.read_bytes(self.id))?;
+        let shape = py_err(BACKEND.shape(self.id))?;
 
         let np = py.import_bound("numpy")?;
         let np_dtype_name = dtype.name();
@@ -165,14 +150,8 @@ impl GpuTensor {
     /// Auto-evaluates if the tensor is lazy.
     /// Returns floats for float types, ints for int types, bools for bool type.
     fn to_list(&self, py: Python<'_>) -> PyResult<PyObject> {
-        let mut rt = RUNTIME_LAZY.lock().unwrap();
-        auto_eval(&mut rt, self.id)?;
-
-        let dtype = rt.dtype(self.id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let bytes = rt.read_bytes(self.id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        drop(rt);
+        let dtype = py_err(BACKEND.dtype(self.id))?;
+        let bytes = py_err(BACKEND.read_bytes(self.id))?;
 
         match dtype {
             DType::Float32 => {
@@ -236,239 +215,87 @@ impl GpuTensor {
 
     /// Explicitly evaluate this tensor, materializing its result on the GPU.
     fn eval(&self) -> PyResult<()> {
-        let mut rt = RUNTIME_LAZY.lock().unwrap();
-        auto_eval(&mut rt, self.id)
+        py_err(BACKEND.eval(self.id))
     }
 
     // Unary ops
 
-    fn neg(&self) -> PyResult<GpuTensor> {
-        let mut rt = RUNTIME_LAZY.lock().unwrap();
-        let id = applegpu_core::ops::neg(&mut rt, self.id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok(GpuTensor { id, destroyed: Cell::new(false) })
-    }
-
-    fn relu(&self) -> PyResult<GpuTensor> {
-        let mut rt = RUNTIME_LAZY.lock().unwrap();
-        let id = applegpu_core::ops::relu(&mut rt, self.id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok(GpuTensor { id, destroyed: Cell::new(false) })
-    }
-
-    fn exp(&self) -> PyResult<GpuTensor> {
-        let mut rt = RUNTIME_LAZY.lock().unwrap();
-        let id = applegpu_core::ops::exp(&mut rt, self.id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok(GpuTensor { id, destroyed: Cell::new(false) })
-    }
-
-    fn log(&self) -> PyResult<GpuTensor> {
-        let mut rt = RUNTIME_LAZY.lock().unwrap();
-        let id = applegpu_core::ops::log(&mut rt, self.id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok(GpuTensor { id, destroyed: Cell::new(false) })
-    }
-
-    fn softmax(&self) -> PyResult<GpuTensor> {
-        let mut rt = RUNTIME_LAZY.lock().unwrap();
-        let id = applegpu_core::ops::softmax(&mut rt, self.id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok(GpuTensor { id, destroyed: Cell::new(false) })
-    }
-
-    fn tanh(&self) -> PyResult<GpuTensor> {
-        let mut rt = RUNTIME_LAZY.lock().unwrap();
-        let id = applegpu_core::ops::tanh(&mut rt, self.id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok(GpuTensor { id, destroyed: Cell::new(false) })
-    }
-
-    fn gelu(&self) -> PyResult<GpuTensor> {
-        let mut rt = RUNTIME_LAZY.lock().unwrap();
-        let id = applegpu_core::ops::gelu(&mut rt, self.id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok(GpuTensor { id, destroyed: Cell::new(false) })
-    }
+    fn neg(&self) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.neg(self.id)) }
+    fn relu(&self) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.relu(self.id)) }
+    fn exp(&self) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.exp(self.id)) }
+    fn log(&self) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.log(self.id)) }
+    fn softmax(&self) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.softmax(self.id)) }
+    fn tanh(&self) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.tanh(self.id)) }
+    fn gelu(&self) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.gelu(self.id)) }
+    fn sqrt(&self) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.sqrt(self.id)) }
+    fn abs(&self) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.abs(self.id)) }
+    fn sign(&self) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.sign(self.id)) }
+    fn transpose(&self) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.transpose(self.id)) }
+    fn argmax(&self) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.argmax(self.id)) }
+    fn sum(&self) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.sum(self.id)) }
+    fn mean(&self) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.mean(self.id)) }
+    fn softmax_causal(&self) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.softmax_causal(self.id)) }
 
     #[pyo3(signature = (gamma, beta, eps=1e-5))]
     fn layer_norm(&self, gamma: &GpuTensor, beta: &GpuTensor, eps: f32) -> PyResult<GpuTensor> {
-        let mut rt = RUNTIME_LAZY.lock().unwrap();
-        let id = applegpu_core::ops::layer_norm(&mut rt, self.id, gamma.id, beta.id, eps)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok(GpuTensor { id, destroyed: Cell::new(false) })
-    }
-
-    fn transpose(&self) -> PyResult<GpuTensor> {
-        let mut rt = RUNTIME_LAZY.lock().unwrap();
-        let id = applegpu_core::ops::transpose(&mut rt, self.id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok(GpuTensor { id, destroyed: Cell::new(false) })
+        wrap_tensor(BACKEND.layer_norm(self.id, gamma.id, beta.id, eps))
     }
 
     #[pyo3(signature = (dim0, dim1))]
     fn transpose_dims(&self, dim0: usize, dim1: usize) -> PyResult<GpuTensor> {
-        let mut rt = RUNTIME_LAZY.lock().unwrap();
-        let id = applegpu_core::ops::transpose_dims(&mut rt, self.id, dim0, dim1)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok(GpuTensor { id, destroyed: Cell::new(false) })
-    }
-
-    fn sqrt(&self) -> PyResult<GpuTensor> {
-        let mut rt = RUNTIME_LAZY.lock().unwrap();
-        let id = applegpu_core::ops::sqrt(&mut rt, self.id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok(GpuTensor { id, destroyed: Cell::new(false) })
-    }
-
-    fn abs(&self) -> PyResult<GpuTensor> {
-        let mut rt = RUNTIME_LAZY.lock().unwrap();
-        let id = applegpu_core::ops::abs(&mut rt, self.id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok(GpuTensor { id, destroyed: Cell::new(false) })
-    }
-
-    fn sign(&self) -> PyResult<GpuTensor> {
-        let mut rt = RUNTIME_LAZY.lock().unwrap();
-        let id = applegpu_core::ops::sign(&mut rt, self.id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok(GpuTensor { id, destroyed: Cell::new(false) })
+        wrap_tensor(BACKEND.transpose_dims(self.id, dim0, dim1))
     }
 
     #[pyo3(signature = (exponent))]
     fn pow(&self, exponent: f32) -> PyResult<GpuTensor> {
-        let mut rt = RUNTIME_LAZY.lock().unwrap();
-        let id = applegpu_core::ops::pow(&mut rt, self.id, exponent)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok(GpuTensor { id, destroyed: Cell::new(false) })
+        wrap_tensor(BACKEND.pow(self.id, exponent))
     }
 
     #[pyo3(signature = (min_val, max_val))]
     fn clamp(&self, min_val: f32, max_val: f32) -> PyResult<GpuTensor> {
-        let mut rt = RUNTIME_LAZY.lock().unwrap();
-        let id = applegpu_core::ops::clamp(&mut rt, self.id, min_val, max_val)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok(GpuTensor { id, destroyed: Cell::new(false) })
+        wrap_tensor(BACKEND.clamp(self.id, min_val, max_val))
     }
 
     #[pyo3(signature = (mask, value))]
     fn masked_fill(&self, mask: &GpuTensor, value: f32) -> PyResult<GpuTensor> {
-        let mut rt = RUNTIME_LAZY.lock().unwrap();
-        let id = applegpu_core::ops::masked_fill(&mut rt, self.id, mask.id, value)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok(GpuTensor { id, destroyed: Cell::new(false) })
+        wrap_tensor(BACKEND.masked_fill(self.id, mask.id, value))
     }
 
     #[pyo3(signature = (diagonal=0))]
     fn triu(&self, diagonal: i32) -> PyResult<GpuTensor> {
-        let mut rt = RUNTIME_LAZY.lock().unwrap();
-        let id = applegpu_core::ops::triu(&mut rt, self.id, diagonal)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok(GpuTensor { id, destroyed: Cell::new(false) })
+        wrap_tensor(BACKEND.triu(self.id, diagonal))
     }
 
     #[pyo3(signature = (diagonal=0))]
     fn tril(&self, diagonal: i32) -> PyResult<GpuTensor> {
-        let mut rt = RUNTIME_LAZY.lock().unwrap();
-        let id = applegpu_core::ops::tril(&mut rt, self.id, diagonal)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok(GpuTensor { id, destroyed: Cell::new(false) })
+        wrap_tensor(BACKEND.tril(self.id, diagonal))
     }
 
     fn gather(&self, dim: usize, index: &GpuTensor) -> PyResult<GpuTensor> {
-        let mut rt = RUNTIME_LAZY.lock().unwrap();
-        let id = applegpu_core::ops::gather(&mut rt, self.id, dim, index.id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok(GpuTensor { id, destroyed: Cell::new(false) })
+        wrap_tensor(BACKEND.gather(self.id, dim, index.id))
     }
 
     fn index_select(&self, dim: usize, index: &GpuTensor) -> PyResult<GpuTensor> {
-        let mut rt = RUNTIME_LAZY.lock().unwrap();
-        let id = applegpu_core::ops::index_select(&mut rt, self.id, dim, index.id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok(GpuTensor { id, destroyed: Cell::new(false) })
+        wrap_tensor(BACKEND.index_select(self.id, dim, index.id))
     }
 
     #[pyo3(signature = (scale))]
     fn scalar_mul(&self, scale: f32) -> PyResult<GpuTensor> {
-        let mut rt = RUNTIME_LAZY.lock().unwrap();
-        let id = applegpu_core::ops::scalar_mul(&mut rt, self.id, scale)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok(GpuTensor { id, destroyed: Cell::new(false) })
+        wrap_tensor(BACKEND.scalar_mul(self.id, scale))
     }
 
     #[pyo3(signature = (new_shape))]
     fn reshape(&self, new_shape: Vec<usize>) -> PyResult<GpuTensor> {
-        let mut rt = RUNTIME_LAZY.lock().unwrap();
-        let id = applegpu_core::ops::reshape(&mut rt, self.id, new_shape)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok(GpuTensor { id, destroyed: Cell::new(false) })
-    }
-
-    fn argmax(&self) -> PyResult<GpuTensor> {
-        let mut rt = RUNTIME_LAZY.lock().unwrap();
-        let id = applegpu_core::ops::argmax(&mut rt, self.id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok(GpuTensor { id, destroyed: Cell::new(false) })
-    }
-
-    fn sum(&self) -> PyResult<GpuTensor> {
-        let mut rt = RUNTIME_LAZY.lock().unwrap();
-        let id = applegpu_core::ops::sum(&mut rt, self.id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok(GpuTensor { id, destroyed: Cell::new(false) })
-    }
-
-    fn mean(&self) -> PyResult<GpuTensor> {
-        let mut rt = RUNTIME_LAZY.lock().unwrap();
-        let id = applegpu_core::ops::mean(&mut rt, self.id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok(GpuTensor { id, destroyed: Cell::new(false) })
-    }
-
-    fn softmax_causal(&self) -> PyResult<GpuTensor> {
-        let mut rt = RUNTIME_LAZY.lock().unwrap();
-        let id = applegpu_core::ops::softmax_causal(&mut rt, self.id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok(GpuTensor { id, destroyed: Cell::new(false) })
+        wrap_tensor(BACKEND.reshape(self.id, new_shape))
     }
 
     // Binary ops
 
-    fn add(&self, other: &GpuTensor) -> PyResult<GpuTensor> {
-        let mut rt = RUNTIME_LAZY.lock().unwrap();
-        let id = applegpu_core::ops::add(&mut rt, self.id, other.id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok(GpuTensor { id, destroyed: Cell::new(false) })
-    }
-
-    fn sub(&self, other: &GpuTensor) -> PyResult<GpuTensor> {
-        let mut rt = RUNTIME_LAZY.lock().unwrap();
-        let id = applegpu_core::ops::sub(&mut rt, self.id, other.id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok(GpuTensor { id, destroyed: Cell::new(false) })
-    }
-
-    fn mul(&self, other: &GpuTensor) -> PyResult<GpuTensor> {
-        let mut rt = RUNTIME_LAZY.lock().unwrap();
-        let id = applegpu_core::ops::mul(&mut rt, self.id, other.id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok(GpuTensor { id, destroyed: Cell::new(false) })
-    }
-
-    fn div(&self, other: &GpuTensor) -> PyResult<GpuTensor> {
-        let mut rt = RUNTIME_LAZY.lock().unwrap();
-        let id = applegpu_core::ops::div(&mut rt, self.id, other.id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok(GpuTensor { id, destroyed: Cell::new(false) })
-    }
-
-    fn matmul(&self, other: &GpuTensor) -> PyResult<GpuTensor> {
-        let mut rt = RUNTIME_LAZY.lock().unwrap();
-        let id = applegpu_core::ops::matmul(&mut rt, self.id, other.id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok(GpuTensor { id, destroyed: Cell::new(false) })
-    }
+    fn add(&self, other: &GpuTensor) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.add(self.id, other.id)) }
+    fn sub(&self, other: &GpuTensor) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.sub(self.id, other.id)) }
+    fn mul(&self, other: &GpuTensor) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.mul(self.id, other.id)) }
+    fn div(&self, other: &GpuTensor) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.div(self.id, other.id)) }
+    fn matmul(&self, other: &GpuTensor) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.matmul(self.id, other.id)) }
 
     // Python operator overloads — all delegate to named methods
 
@@ -500,15 +327,14 @@ impl GpuTensor {
         if self.destroyed.get() {
             return Ok(format!("GpuTensor(id={}, destroyed)", self.id));
         }
-        let rt = RUNTIME_LAZY.lock().unwrap();
-        let status = if rt.is_materialized(self.id) {
+        let status = if BACKEND.is_materialized(self.id) {
             "materialized"
-        } else if rt.is_pending(self.id) {
+        } else if BACKEND.is_pending(self.id) {
             "lazy"
         } else {
             "destroyed"
         };
-        match rt.shape(self.id) {
+        match BACKEND.shape(self.id) {
             Ok(shape) => Ok(format!("GpuTensor(id={}, shape={:?}, {})", self.id, shape, status)),
             Err(_) => Ok(format!("GpuTensor(id={}, {})", self.id, status)),
         }
@@ -523,9 +349,7 @@ impl Drop for GpuTensor {
         if self.destroyed.get() {
             return;
         }
-        if let Ok(mut rt) = RUNTIME_LAZY.try_lock() {
-            let _ = rt.destroy(self.id);
-        }
+        BACKEND.try_destroy(self.id);
     }
 }
 
@@ -540,18 +364,12 @@ fn version() -> &'static str {
 
 #[pyfunction]
 fn init_backend() -> PyResult<HashMap<String, String>> {
-    let runtime = applegpu_core::backend::init_backend()
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    let mut info = HashMap::new();
-    info.insert("backend".to_string(), format!("{:?}", runtime.backend).to_lowercase());
-    info.insert("device".to_string(), runtime.device.name());
-    Ok(info)
+    py_err(BACKEND.init())
 }
 
 #[pyfunction]
 fn device_name() -> PyResult<String> {
-    let runtime = get_device_runtime()?;
-    Ok(runtime.device.name())
+    py_err(BACKEND.device_name())
 }
 
 #[pyfunction]
@@ -597,28 +415,16 @@ fn from_numpy(_py: Python<'_>, arr: &Bound<'_, pyo3::types::PyAny>) -> PyResult<
         .and_then(|v| v.extract())
         .unwrap_or(false);
 
-    let runtime = get_device_runtime()?;
-
     if is_c_contiguous && nbytes > 0 {
         let data_ptr: usize = arr.getattr("ctypes")?.getattr("data")?.extract()?;
         // Safety: array is C-contiguous, data_ptr points to nbytes of valid memory,
         // and the `arr` Python reference keeps the data alive during this call.
         let data = unsafe { std::slice::from_raw_parts(data_ptr as *const u8, nbytes) };
-        let t = Tensor::from_data(&runtime.device, shape, dtype, data)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let id = t.meta.id;
-        RUNTIME_LAZY.lock().unwrap().insert_tensor(t)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok(GpuTensor { id, destroyed: Cell::new(false) })
+        wrap_tensor(BACKEND.tensor_from_data(data, shape, dtype))
     } else {
         // Fallback: use tobytes() for non-contiguous or empty arrays
         let bytes: Vec<u8> = arr.call_method0("tobytes")?.extract()?;
-        let t = Tensor::from_data(&runtime.device, shape, dtype, &bytes)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let id = t.meta.id;
-        RUNTIME_LAZY.lock().unwrap().insert_tensor(t)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok(GpuTensor { id, destroyed: Cell::new(false) })
+        wrap_tensor(BACKEND.tensor_from_data(&bytes, shape, dtype))
     }
 }
 
@@ -658,8 +464,6 @@ fn from_torch(py: Python<'_>, tensor: &Bound<'_, pyo3::types::PyAny>) -> PyResul
     let element_size: usize = prepared.call_method0("element_size")?.extract()?;
     let nbytes = numel * element_size;
 
-    let runtime = get_device_runtime()?;
-
     if nbytes > 0 {
         // Fast path: read raw bytes directly from torch tensor's data_ptr().
         // Safety: tensor is CPU + contiguous (guaranteed by .cpu().contiguous()),
@@ -667,20 +471,10 @@ fn from_torch(py: Python<'_>, tensor: &Bound<'_, pyo3::types::PyAny>) -> PyResul
         // and the `prepared` Python reference keeps the data alive.
         let data_ptr: usize = prepared.call_method0("data_ptr")?.extract()?;
         let data = unsafe { std::slice::from_raw_parts(data_ptr as *const u8, nbytes) };
-        let t = Tensor::from_data(&runtime.device, shape, dtype, data)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let id = t.meta.id;
-        RUNTIME_LAZY.lock().unwrap().insert_tensor(t)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok(GpuTensor { id, destroyed: Cell::new(false) })
+        wrap_tensor(BACKEND.tensor_from_data(data, shape, dtype))
     } else {
         // Empty tensor
-        let t = Tensor::from_data(&runtime.device, shape, dtype, &[])
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let id = t.meta.id;
-        RUNTIME_LAZY.lock().unwrap().insert_tensor(t)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok(GpuTensor { id, destroyed: Cell::new(false) })
+        wrap_tensor(BACKEND.tensor_from_data(&[], shape, dtype))
     }
 }
 
@@ -690,13 +484,7 @@ fn from_torch(py: Python<'_>, tensor: &Bound<'_, pyo3::types::PyAny>) -> PyResul
 fn from_bytes(_py: Python<'_>, data: &[u8], shape: Vec<usize>, dtype: &str) -> PyResult<GpuTensor> {
     let dtype = DType::from_name(dtype)
         .ok_or_else(|| PyValueError::new_err(format!("Unknown dtype: {}", dtype)))?;
-    let runtime = get_device_runtime()?;
-    let t = Tensor::from_data(&runtime.device, shape, dtype, data)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    let id = t.meta.id;
-    RUNTIME_LAZY.lock().unwrap().insert_tensor(t)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    Ok(GpuTensor { id, destroyed: Cell::new(false) })
+    wrap_tensor(BACKEND.tensor_from_data(data, shape, dtype))
 }
 
 /// Create a tensor from data. Returns a GpuTensor object.
@@ -709,40 +497,27 @@ fn tensor(py: Python<'_>, data: &Bound<'_, PyAny>, shape: Vec<usize>, dtype: Opt
     let dtype = DType::from_name(dtype_str)
         .ok_or_else(|| PyValueError::new_err(format!("Unsupported dtype: {}", dtype_str)))?;
 
-    let runtime = get_device_runtime()?;
     let bytes = python_data_to_bytes(py, data, &shape, dtype)?;
-    let t = Tensor::from_data(&runtime.device, shape, dtype, &bytes)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    let id = t.meta.id;
-    RUNTIME_LAZY.lock().unwrap().insert_tensor(t)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    Ok(GpuTensor { id, destroyed: Cell::new(false) })
+    wrap_tensor(BACKEND.tensor_from_data(&bytes, shape, dtype))
 }
 
 /// Set resource limits. Pass 0 for any field to make it unlimited.
 #[pyfunction]
 fn set_limits(max_tensor_size_mb: usize, max_memory_mb: usize, max_tensors: usize) -> PyResult<()> {
-    let mut rt = RUNTIME_LAZY.lock().unwrap();
-    rt.set_limits(applegpu_core::limits::ResourceLimits {
-        max_tensor_size_bytes: if max_tensor_size_mb > 0 { max_tensor_size_mb * 1024 * 1024 } else { 0 },
-        max_total_memory_bytes: if max_memory_mb > 0 { max_memory_mb * 1024 * 1024 } else { 0 },
-        max_tensor_count: max_tensors,
-    });
+    BACKEND.set_limits(max_tensor_size_mb, max_memory_mb, max_tensors);
     Ok(())
 }
 
 /// Get current GPU memory usage in bytes.
 #[pyfunction]
 fn memory_usage() -> PyResult<usize> {
-    let rt = RUNTIME_LAZY.lock().unwrap();
-    Ok(rt.memory_usage())
+    Ok(BACKEND.memory_usage())
 }
 
 /// Get current number of live tensors.
 #[pyfunction]
 fn tensor_count() -> PyResult<usize> {
-    let rt = RUNTIME_LAZY.lock().unwrap();
-    Ok(rt.live_tensor_count())
+    Ok(BACKEND.tensor_count())
 }
 
 // Backward-compatible module-level functions that accept GpuTensor
@@ -762,9 +537,7 @@ fn destroy(t: &GpuTensor) -> PyResult<()> {
     if t.destroyed.get() {
         return Ok(());
     }
-    let mut rt = RUNTIME_LAZY.lock().unwrap();
-    rt.destroy(t.id)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    py_err(BACKEND.destroy(t.id))?;
     t.destroyed.set(true);
     Ok(())
 }
@@ -801,10 +574,7 @@ fn pow(t: &GpuTensor, exponent: f32) -> PyResult<GpuTensor> { t.pow(exponent) }
 fn clamp(t: &GpuTensor, min_val: f32, max_val: f32) -> PyResult<GpuTensor> { t.clamp(min_val, max_val) }
 #[pyfunction]
 fn where_cond(cond: &GpuTensor, x: &GpuTensor, y: &GpuTensor) -> PyResult<GpuTensor> {
-    let mut rt = RUNTIME_LAZY.lock().unwrap();
-    let id = applegpu_core::ops::where_cond(&mut rt, cond.id, x.id, y.id)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    Ok(GpuTensor { id, destroyed: Cell::new(false) })
+    wrap_tensor(BACKEND.where_cond(cond.id, x.id, y.id))
 }
 #[pyfunction]
 fn masked_fill(t: &GpuTensor, mask: &GpuTensor, value: f32) -> PyResult<GpuTensor> { t.masked_fill(mask, value) }
@@ -839,125 +609,80 @@ fn layer_norm(input: &GpuTensor, gamma: &GpuTensor, beta: &GpuTensor, eps: f32) 
 
 #[pyfunction]
 fn embedding(weights: &GpuTensor, indices: &GpuTensor) -> PyResult<GpuTensor> {
-    let mut rt = RUNTIME_LAZY.lock().unwrap();
-    let id = applegpu_core::ops::embedding(&mut rt, weights.id, indices.id)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    Ok(GpuTensor { id, destroyed: Cell::new(false) })
+    wrap_tensor(BACKEND.embedding(weights.id, indices.id))
 }
 
 #[pyfunction]
 fn gather(input: &GpuTensor, dim: usize, index: &GpuTensor) -> PyResult<GpuTensor> {
-    let mut rt = RUNTIME_LAZY.lock().unwrap();
-    let id = applegpu_core::ops::gather(&mut rt, input.id, dim, index.id)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    Ok(GpuTensor { id, destroyed: Cell::new(false) })
+    wrap_tensor(BACKEND.gather(input.id, dim, index.id))
 }
 
 #[pyfunction]
 fn index_select(input: &GpuTensor, dim: usize, index: &GpuTensor) -> PyResult<GpuTensor> {
-    let mut rt = RUNTIME_LAZY.lock().unwrap();
-    let id = applegpu_core::ops::index_select(&mut rt, input.id, dim, index.id)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    Ok(GpuTensor { id, destroyed: Cell::new(false) })
+    wrap_tensor(BACKEND.index_select(input.id, dim, index.id))
 }
 
 #[pyfunction]
 fn attention(q: &GpuTensor, k: &GpuTensor, v: &GpuTensor) -> PyResult<GpuTensor> {
-    let mut rt = RUNTIME_LAZY.lock().unwrap();
-    let id = applegpu_core::ops::attention(&mut rt, q.id, k.id, v.id)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    Ok(GpuTensor { id, destroyed: Cell::new(false) })
+    wrap_tensor(BACKEND.attention(q.id, k.id, v.id))
 }
 
 #[pyfunction]
 fn slice(t: &GpuTensor, dim: usize, start: usize, end: usize) -> PyResult<GpuTensor> {
-    let mut rt = RUNTIME_LAZY.lock().unwrap();
-    let id = applegpu_core::ops::slice(&mut rt, t.id, dim, start, end)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    Ok(GpuTensor { id, destroyed: Cell::new(false) })
+    wrap_tensor(BACKEND.slice(t.id, dim, start, end))
 }
 
 #[pyfunction]
 fn concat(a: &GpuTensor, b: &GpuTensor, dim: usize) -> PyResult<GpuTensor> {
-    let mut rt = RUNTIME_LAZY.lock().unwrap();
-    let id = applegpu_core::ops::concat(&mut rt, a.id, b.id, dim)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    Ok(GpuTensor { id, destroyed: Cell::new(false) })
+    wrap_tensor(BACKEND.concat(a.id, b.id, dim))
 }
 
 #[pyfunction]
 fn add_bias(input: &GpuTensor, bias: &GpuTensor) -> PyResult<GpuTensor> {
-    let mut rt = RUNTIME_LAZY.lock().unwrap();
-    let id = applegpu_core::ops::add_bias(&mut rt, input.id, bias.id)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    Ok(GpuTensor { id, destroyed: Cell::new(false) })
+    wrap_tensor(BACKEND.add_bias(input.id, bias.id))
 }
 
 #[pyfunction]
 fn softmax_causal(t: &GpuTensor) -> PyResult<GpuTensor> {
-    let mut rt = RUNTIME_LAZY.lock().unwrap();
-    let id = applegpu_core::ops::softmax_causal(&mut rt, t.id)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    Ok(GpuTensor { id, destroyed: Cell::new(false) })
+    wrap_tensor(BACKEND.softmax_causal(t.id))
 }
 
 #[pyfunction]
 fn argmax(t: &GpuTensor) -> PyResult<GpuTensor> {
-    let mut rt = RUNTIME_LAZY.lock().unwrap();
-    let id = applegpu_core::ops::argmax(&mut rt, t.id)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    Ok(GpuTensor { id, destroyed: Cell::new(false) })
+    wrap_tensor(BACKEND.argmax(t.id))
 }
 
 #[pyfunction]
 fn sum(t: &GpuTensor) -> PyResult<GpuTensor> {
-    let mut rt = RUNTIME_LAZY.lock().unwrap();
-    let id = applegpu_core::ops::sum(&mut rt, t.id)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    Ok(GpuTensor { id, destroyed: Cell::new(false) })
+    wrap_tensor(BACKEND.sum(t.id))
 }
 
 #[pyfunction]
 fn mean(t: &GpuTensor) -> PyResult<GpuTensor> {
-    let mut rt = RUNTIME_LAZY.lock().unwrap();
-    let id = applegpu_core::ops::mean(&mut rt, t.id)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    Ok(GpuTensor { id, destroyed: Cell::new(false) })
+    wrap_tensor(BACKEND.mean(t.id))
 }
 
 #[pyfunction]
 fn attention_causal(q: &GpuTensor, k: &GpuTensor, v: &GpuTensor) -> PyResult<GpuTensor> {
-    let mut rt = RUNTIME_LAZY.lock().unwrap();
-    let id = applegpu_core::ops::attention_causal(&mut rt, q.id, k.id, v.id)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    Ok(GpuTensor { id, destroyed: Cell::new(false) })
+    wrap_tensor(BACKEND.attention_causal(q.id, k.id, v.id))
 }
 
 #[pyfunction]
 #[pyo3(signature = (input, weight, stride=1, padding=0))]
 fn conv1d(input: &GpuTensor, weight: &GpuTensor, stride: usize, padding: usize) -> PyResult<GpuTensor> {
-    let mut rt = RUNTIME_LAZY.lock().unwrap();
-    let id = applegpu_core::ops::conv1d(&mut rt, input.id, weight.id, stride, padding)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    Ok(GpuTensor { id, destroyed: Cell::new(false) })
+    wrap_tensor(BACKEND.conv1d(input.id, weight.id, stride, padding))
 }
 
 #[pyfunction]
 #[pyo3(signature = (input, weight, stride_h=1, stride_w=1, pad_h=0, pad_w=0))]
 fn conv2d(input: &GpuTensor, weight: &GpuTensor, stride_h: usize, stride_w: usize, pad_h: usize, pad_w: usize) -> PyResult<GpuTensor> {
-    let mut rt = RUNTIME_LAZY.lock().unwrap();
-    let id = applegpu_core::ops::conv2d(&mut rt, input.id, weight.id, (stride_h, stride_w), (pad_h, pad_w))
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    Ok(GpuTensor { id, destroyed: Cell::new(false) })
+    wrap_tensor(BACKEND.conv2d(input.id, weight.id, (stride_h, stride_w), (pad_h, pad_w)))
 }
 
 #[pyfunction]
 #[pyo3(signature = (input, running_mean, running_var, weight, bias, eps=1e-5))]
 fn batch_norm(input: &GpuTensor, running_mean: &GpuTensor, running_var: &GpuTensor, weight: &GpuTensor, bias: &GpuTensor, eps: f32) -> PyResult<GpuTensor> {
-    let mut rt = RUNTIME_LAZY.lock().unwrap();
-    let id = applegpu_core::ops::batch_norm(&mut rt, input.id, running_mean.id, running_var.id, weight.id, bias.id, eps)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    Ok(GpuTensor { id, destroyed: Cell::new(false) })
+    wrap_tensor(BACKEND.batch_norm(input.id, running_mean.id, running_var.id, weight.id, bias.id, eps))
 }
 
 #[pyfunction]
@@ -965,10 +690,7 @@ fn batch_norm(input: &GpuTensor, running_mean: &GpuTensor, running_var: &GpuTens
 fn max_pool2d(input: &GpuTensor, kh: usize, kw: usize, stride_h: usize, stride_w: usize, pad_h: usize, pad_w: usize) -> PyResult<GpuTensor> {
     let sh = if stride_h == 0 { kh } else { stride_h };
     let sw = if stride_w == 0 { kw } else { stride_w };
-    let mut rt = RUNTIME_LAZY.lock().unwrap();
-    let id = applegpu_core::ops::max_pool2d(&mut rt, input.id, (kh, kw), (sh, sw), (pad_h, pad_w))
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    Ok(GpuTensor { id, destroyed: Cell::new(false) })
+    wrap_tensor(BACKEND.max_pool2d(input.id, (kh, kw), (sh, sw), (pad_h, pad_w)))
 }
 
 #[pyfunction]
@@ -976,10 +698,7 @@ fn max_pool2d(input: &GpuTensor, kh: usize, kw: usize, stride_h: usize, stride_w
 fn avg_pool2d(input: &GpuTensor, kh: usize, kw: usize, stride_h: usize, stride_w: usize, pad_h: usize, pad_w: usize) -> PyResult<GpuTensor> {
     let sh = if stride_h == 0 { kh } else { stride_h };
     let sw = if stride_w == 0 { kw } else { stride_w };
-    let mut rt = RUNTIME_LAZY.lock().unwrap();
-    let id = applegpu_core::ops::avg_pool2d(&mut rt, input.id, (kh, kw), (sh, sw), (pad_h, pad_w))
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    Ok(GpuTensor { id, destroyed: Cell::new(false) })
+    wrap_tensor(BACKEND.avg_pool2d(input.id, (kh, kw), (sh, sw), (pad_h, pad_w)))
 }
 
 // ============================================================
@@ -993,164 +712,96 @@ fn register_container(
     max_tensors: usize,
     max_pending: usize,
 ) -> PyResult<u64> {
-    let priority = match priority {
-        "high" => Priority::High,
-        "normal" => Priority::Normal,
-        "low" => Priority::Low,
-        _ => return Err(PyValueError::new_err(format!("Invalid priority: {}. Use 'high', 'normal', or 'low'", priority))),
-    };
-    let config = ContainerConfig {
-        priority,
-        max_memory_bytes: max_memory_mb * 1024 * 1024,
-        max_tensor_count: max_tensors,
-        max_tensor_size_bytes: 0,
-        max_pending_jobs: max_pending,
-    };
-    let mut rt = RUNTIME_LAZY.lock().unwrap();
-    let id = rt.scheduler.register_container(config)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    Ok(id.0)
+    py_err(BACKEND.register_container(priority, max_memory_mb, max_tensors, max_pending))
 }
 
 #[pyfunction]
 fn deregister_container(container_id: u64) -> PyResult<Vec<u64>> {
-    let mut rt = RUNTIME_LAZY.lock().unwrap();
-    let tensors = rt.scheduler.deregister_container(ContainerId(container_id))
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    for &tid in &tensors {
-        rt.remove_tensor_raw(tid);
-    }
-    Ok(tensors)
+    py_err(BACKEND.deregister_container(container_id))
 }
 
 #[pyfunction]
 fn pause_container(container_id: u64) -> PyResult<()> {
-    let mut rt = RUNTIME_LAZY.lock().unwrap();
-    rt.scheduler.pause_container(ContainerId(container_id))
-        .map_err(|e| PyValueError::new_err(e.to_string()))
+    py_err(BACKEND.pause_container(container_id))
 }
 
 #[pyfunction]
 fn resume_container(container_id: u64) -> PyResult<()> {
-    let mut rt = RUNTIME_LAZY.lock().unwrap();
-    rt.scheduler.resume_container(ContainerId(container_id))
-        .map_err(|e| PyValueError::new_err(e.to_string()))
+    py_err(BACKEND.resume_container(container_id))
 }
 
 #[pyfunction]
 fn submit_job(container_id: u64, t: &GpuTensor) -> PyResult<u64> {
-    let mut rt = RUNTIME_LAZY.lock().unwrap();
-    let job_id = rt.scheduler.submit(ContainerId(container_id), t.id)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    Ok(job_id.0)
+    py_err(BACKEND.submit_job(container_id, t.id))
 }
 
 #[pyfunction]
 fn run_next() -> PyResult<Option<u64>> {
-    let runtime = get_device_runtime()?;
-    let mut rt = RUNTIME_LAZY.lock().unwrap();
-    let result = rt.run_next(&runtime.device)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    Ok(result.map(|j| j.0))
+    py_err(BACKEND.run_next())
 }
 
 #[pyfunction]
 fn job_status(job_id: u64) -> PyResult<String> {
-    let rt = RUNTIME_LAZY.lock().unwrap();
-    match rt.scheduler.job_status(JobId(job_id)) {
-        Some((_, JobStatus::Queued)) => Ok("queued".to_string()),
-        Some((_, JobStatus::Running { .. })) => Ok("running".to_string()),
-        Some((_, JobStatus::Completed { .. })) => Ok("completed".to_string()),
-        Some((_, JobStatus::Failed { .. })) => Ok("failed".to_string()),
-        None => Err(PyValueError::new_err(format!("Job {} not found", job_id))),
-    }
+    py_err(BACKEND.job_status(job_id))
 }
 
 #[pyfunction]
 fn container_usage(container_id: u64) -> PyResult<(usize, usize)> {
-    let rt = RUNTIME_LAZY.lock().unwrap();
-    rt.scheduler.container_usage(ContainerId(container_id))
-        .ok_or_else(|| PyValueError::new_err(format!("Container {} not found", container_id)))
+    py_err(BACKEND.container_usage(container_id))
 }
 
 #[pyfunction]
 fn global_usage() -> PyResult<(usize, usize)> {
-    let rt = RUNTIME_LAZY.lock().unwrap();
-    Ok(rt.scheduler.global_usage())
+    Ok(BACKEND.global_usage())
 }
 
 #[pyfunction]
 fn queue_depth() -> PyResult<usize> {
-    let rt = RUNTIME_LAZY.lock().unwrap();
-    Ok(rt.scheduler.queue_depth())
+    Ok(BACKEND.queue_depth())
 }
 
 #[pyfunction]
 fn pool_stats() -> PyResult<HashMap<String, usize>> {
-    let rt = RUNTIME_LAZY.lock().unwrap();
-    let stats = rt.pool.stats();
-    let mut map = HashMap::new();
-    map.insert("hits".to_string(), stats.hits as usize);
-    map.insert("misses".to_string(), stats.misses as usize);
-    map.insert("pooled_bytes".to_string(), stats.pooled_bytes);
-    map.insert("bucket_count".to_string(), stats.bucket_count);
-    Ok(map)
+    Ok(BACKEND.pool_stats())
 }
 
 #[pyfunction]
 fn pool_drain() -> PyResult<()> {
-    let mut rt = RUNTIME_LAZY.lock().unwrap();
-    rt.pool.drain();
+    BACKEND.pool_drain();
     Ok(())
 }
 
 #[pyfunction]
 fn set_pool_watermark(mb: usize) -> PyResult<()> {
-    let mut rt = RUNTIME_LAZY.lock().unwrap();
-    rt.pool.set_max_pooled_bytes(mb * 1024 * 1024);
+    BACKEND.set_pool_watermark(mb);
     Ok(())
 }
 
 #[pyfunction]
 fn softmax_backward(grad_output: &GpuTensor, output: &GpuTensor) -> PyResult<GpuTensor> {
-    let mut rt = RUNTIME_LAZY.lock().unwrap();
-    let id = applegpu_core::ops::softmax_backward(&mut rt, grad_output.id, output.id)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    Ok(GpuTensor { id, destroyed: Cell::new(false) })
+    wrap_tensor(BACKEND.softmax_backward(grad_output.id, output.id))
 }
 
 #[pyfunction]
 #[pyo3(signature = (grad_output, input, gamma, eps=1e-5))]
 fn layer_norm_backward(grad_output: &GpuTensor, input: &GpuTensor, gamma: &GpuTensor, eps: f32) -> PyResult<GpuTensor> {
-    let mut rt = RUNTIME_LAZY.lock().unwrap();
-    let id = applegpu_core::ops::layer_norm_backward(&mut rt, grad_output.id, input.id, gamma.id, eps)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    Ok(GpuTensor { id, destroyed: Cell::new(false) })
+    wrap_tensor(BACKEND.layer_norm_backward(grad_output.id, input.id, gamma.id, eps))
 }
 
 #[pyfunction]
 fn conv2d_backward_input(grad_output: &GpuTensor, weight: &GpuTensor, in_h: usize, in_w: usize, stride_h: usize, stride_w: usize, pad_h: usize, pad_w: usize) -> PyResult<GpuTensor> {
-    let mut rt = RUNTIME_LAZY.lock().unwrap();
-    let id = applegpu_core::ops::conv2d_backward_input(&mut rt, grad_output.id, weight.id, in_h, in_w, (stride_h, stride_w), (pad_h, pad_w))
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    Ok(GpuTensor { id, destroyed: Cell::new(false) })
+    wrap_tensor(BACKEND.conv2d_backward_input(grad_output.id, weight.id, in_h, in_w, (stride_h, stride_w), (pad_h, pad_w)))
 }
 
 #[pyfunction]
 fn embedding_backward(grad_output: &GpuTensor, indices: &GpuTensor, num_weights: usize) -> PyResult<GpuTensor> {
-    let mut rt = RUNTIME_LAZY.lock().unwrap();
-    let id = applegpu_core::ops::embedding_backward(&mut rt, grad_output.id, indices.id, num_weights)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    Ok(GpuTensor { id, destroyed: Cell::new(false) })
+    wrap_tensor(BACKEND.embedding_backward(grad_output.id, indices.id, num_weights))
 }
 
 #[pyfunction]
 #[pyo3(signature = (grad_output, weight, running_var, eps=1e-5))]
 fn batch_norm_backward(grad_output: &GpuTensor, weight: &GpuTensor, running_var: &GpuTensor, eps: f32) -> PyResult<GpuTensor> {
-    let mut rt = RUNTIME_LAZY.lock().unwrap();
-    let id = applegpu_core::ops::batch_norm_backward(&mut rt, grad_output.id, weight.id, running_var.id, eps)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    Ok(GpuTensor { id, destroyed: Cell::new(false) })
+    wrap_tensor(BACKEND.batch_norm_backward(grad_output.id, weight.id, running_var.id, eps))
 }
 
 #[pymodule]
