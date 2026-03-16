@@ -140,18 +140,26 @@ _Containerization, multi-dtype completion, wire protocol v3, CI/packaging._
 - [ ] Binary signing/notarization — Apple Developer ID signing for gpu-container/gpu-service
 
 ### PRIORITY 2: Replace TCP Bridge with Unix Socket Relay / vsock
-_macOS 26 SDK available — ready to implement. Three-tier fallback architecture._
-- [ ] Tier 1: Full programmatic — Containerization framework for image pull + container lifecycle + `UnixSocketConfiguration` socket relay
-- [ ] Tier 2: Hybrid — `container pull` CLI for images + Containerization API for lifecycle + socket relay
-- [ ] Tier 3 (existing): CLI + TCP bridge — backward compat for pre-macOS 26
-- [ ] Extract shared `UnixSocketHelper` — deduplicate relay + connect code across TCPBridge, VsockRelay, ServiceManager
-- [ ] Fix `waitUntilExit()` blocking async context — wrap in continuation
-- [ ] Make TCPBridge IP configurable — currently hardcoded to 192.168.64.1
+_Three-tier fallback architecture. Partially implemented — blocked by framework socket staging bug._
+
+**Done:**
+- [x] Package.swift — Containerization dependency, Swift 6.1, macOS 26.0
+- [x] Extract shared `UnixSocketHelper` — deduplicate relay + connect code
+- [x] ContainerRunner — Tier 1/2 implementation with ContainerManager API
+- [x] Run.swift fixes — APPLEGPU_FORCE_TCP flag, async fix, configurable bridge IP
+- [x] VsockRelay.swift deprecated
+- [x] Image reference normalization (alpine → docker.io/library/alpine:latest)
+- [x] Virtualization entitlements (com.apple.security.virtualization)
+
+**Blocked:**
+- [ ] `UnixSocketConfiguration` socket staging — framework bug: bind-mount fails with `errno 20 (ENOTDIR)` because destination file doesn't exist in rootfs ext4 before mount. Happens during rootfs prep, before VM boot. Filed as known issue.
+  - Workaround options: (a) use low-level `LinuxContainer(rootfs:vmm:)` API which may handle staging differently, (b) use `dialVsock(port:)` for manual relay after VM boots, (c) wait for framework fix
+- [ ] Low-level API path — use `LinuxContainer` directly with pre-prepared rootfs + `VZVirtualMachineManager` instead of `ContainerManager.create(reference:)`. More code but avoids the rootfs mount ordering issue. The framework's own integration tests use this path successfully.
 
 **Post-vsock cleanup (after validation):**
-- [ ] Remove TCP bridge — once Containerization framework path is proven stable across multiple releases
-- [ ] Delete VsockRelay.swift — currently kept with deprecation notice; remove once AVF VM backend is confirmed unnecessary
-- [ ] Socket helper unit tests — test UnixSocketHelper connect/relay with temporary Unix sockets (no GPU needed for socket tests)
+- [ ] Remove TCP bridge — once Containerization framework path is proven stable
+- [ ] Delete VsockRelay.swift — kept with deprecation notice
+- [ ] Socket helper unit tests — test connect/relay with temporary Unix sockets
 
 ### PRIORITY 3: Model Expansion + Polish
 - [ ] Whisper — audio model with conv1d
