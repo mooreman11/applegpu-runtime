@@ -161,13 +161,22 @@ _Three-tier fallback architecture. Partially implemented — blocked by framewor
 - [ ] Delete VsockRelay.swift — kept with deprecation notice
 - [ ] Socket helper unit tests — test connect/relay with temporary Unix sockets
 
-### PRIORITY 3: Model Expansion + Polish
-- [ ] Whisper — audio model with conv1d
+### PRIORITY 3: N-D Generalization + Missing Ops
+_Several ops are hardcoded to 2D when the underlying kernel works on flattened rows×cols. These block Conv1d bias, higher-dimensional models, and Whisper. Also add missing unary/reduction ops._
+- [ ] Generalize `add_bias` to N-D — accept any N-D where `bias.len() == input.shape[1]`
+- [ ] Audit and fix all 2D-hardcoded ops in ops.rs (softmax, sum, mean, argmax, layer_norm, etc.)
+- [ ] `sin`/`cos` — float unary ops for sinusoidal positional encoding
+- [ ] `log_softmax` — fused with numerical stability
+- [ ] Fix Conv1d/Conv2d bias CPU fallback in torch_backend
+- [ ] Verify cross-attention shapes (`q_len != kv_len`)
+
+### PRIORITY 4: Model Expansion
+- [ ] Whisper — speech-to-text (requires Priority 3 ops)
 - [ ] Stable Diffusion — requires group_norm (new kernel)
 - [ ] Fine-tuned model export — save trained weights
 - [ ] Native `model.to("applegpu")` — proper PrivateUse1 storage backend
 
-### PRIORITY 4: Performance Optimization
+### PRIORITY 5: Performance Optimization
 - [ ] `torch.compile()` support — register as compile backend for graph-level fusion
 - [ ] Async eval — `gpu.eval_async(tensor)` returns a GpuFuture, non-blocking Python
 - [ ] Fine-grained locking — split `Mutex<LazyRuntime>` into per-component locks
@@ -175,12 +184,6 @@ _Three-tier fallback architecture. Partially implemented — blocked by framewor
 ---
 
 ## Further Backlog
-
-### Missing Ops (prerequisite for Whisper + general utility)
-- [ ] `sin`/`cos` — float unary ops, needed for sinusoidal positional encoding (Whisper, transformers)
-- [ ] `log_softmax` — fused log(softmax(x)) with numerical stability, needed for token probability (Whisper, all LM decoding)
-- [ ] Fix Conv1d bias CPU fallback — torch_backend falls back to CPU for bias add on 3D tensors, blocks Whisper encoder performance
-- [ ] Verify cross-attention shapes — test `gpu.attention(q, k, v)` when `q_len != kv_len` (Whisper decoder)
 
 ### Multi-Dtype Remaining
 - [ ] Reduction output dtype overrides — sum(Int32)→Int32, mean(Int32)→Float32, sum(Bool)→Int32 count
