@@ -8,1075 +8,6 @@ use crate::error::{GpuError, Result};
 use crate::ffi;
 use crate::tensor::{DType, MAX_DIMS};
 
-/// MSL helper for N-D stride-based indexing, prepended to all element-wise kernels.
-const ND_INDEX_HELPER: &str = r#"
-uint nd_index_to_offset(uint flat_id, constant uint* shape, constant uint* strides, constant uint& ndim) {
-    uint offset = 0;
-    for (uint d = ndim; d > 0; d--) {
-        uint i = d - 1;
-        offset += (flat_id % shape[i]) * strides[i];
-        flat_id /= shape[i];
-    }
-    return offset;
-}
-"#;
-
-/// MSL source for binary element-wise ops (add, sub, mul, div) with N-D stride-based indexing.
-const BINARY_KERNEL_SOURCE: &str = const_format::concatcp!(
-    r#"
-#include <metal_stdlib>
-using namespace metal;
-"#,
-    ND_INDEX_HELPER,
-    r#"
-kernel void elementwise_add(device const float* a [[buffer(0)]], device const float* b [[buffer(1)]], device float* out [[buffer(2)]], constant uint* a_strides [[buffer(3)]], constant uint* b_strides [[buffer(4)]], constant uint* out_shape [[buffer(5)]], constant uint& ndim [[buffer(6)]], constant uint& numel [[buffer(7)]], uint id [[thread_position_in_grid]]) {
-    if (id >= numel) return;
-    uint a_off = nd_index_to_offset(id, out_shape, a_strides, ndim);
-    uint b_off = nd_index_to_offset(id, out_shape, b_strides, ndim);
-    out[id] = a[a_off] + b[b_off];
-}
-kernel void elementwise_sub(device const float* a [[buffer(0)]], device const float* b [[buffer(1)]], device float* out [[buffer(2)]], constant uint* a_strides [[buffer(3)]], constant uint* b_strides [[buffer(4)]], constant uint* out_shape [[buffer(5)]], constant uint& ndim [[buffer(6)]], constant uint& numel [[buffer(7)]], uint id [[thread_position_in_grid]]) {
-    if (id >= numel) return;
-    uint a_off = nd_index_to_offset(id, out_shape, a_strides, ndim);
-    uint b_off = nd_index_to_offset(id, out_shape, b_strides, ndim);
-    out[id] = a[a_off] - b[b_off];
-}
-kernel void elementwise_mul(device const float* a [[buffer(0)]], device const float* b [[buffer(1)]], device float* out [[buffer(2)]], constant uint* a_strides [[buffer(3)]], constant uint* b_strides [[buffer(4)]], constant uint* out_shape [[buffer(5)]], constant uint& ndim [[buffer(6)]], constant uint& numel [[buffer(7)]], uint id [[thread_position_in_grid]]) {
-    if (id >= numel) return;
-    uint a_off = nd_index_to_offset(id, out_shape, a_strides, ndim);
-    uint b_off = nd_index_to_offset(id, out_shape, b_strides, ndim);
-    out[id] = a[a_off] * b[b_off];
-}
-kernel void elementwise_div(device const float* a [[buffer(0)]], device const float* b [[buffer(1)]], device float* out [[buffer(2)]], constant uint* a_strides [[buffer(3)]], constant uint* b_strides [[buffer(4)]], constant uint* out_shape [[buffer(5)]], constant uint& ndim [[buffer(6)]], constant uint& numel [[buffer(7)]], uint id [[thread_position_in_grid]]) {
-    if (id >= numel) return;
-    uint a_off = nd_index_to_offset(id, out_shape, a_strides, ndim);
-    uint b_off = nd_index_to_offset(id, out_shape, b_strides, ndim);
-    out[id] = a[a_off] / b[b_off];
-}
-"#
-);
-
-/// MSL source for unary element-wise ops (neg, relu, exp, log, sqrt) with N-D stride-based indexing.
-const UNARY_KERNEL_SOURCE: &str = const_format::concatcp!(
-    r#"
-#include <metal_stdlib>
-using namespace metal;
-"#,
-    ND_INDEX_HELPER,
-    r#"
-kernel void elementwise_neg(device const float* input [[buffer(0)]], device float* out [[buffer(1)]], constant uint* in_strides [[buffer(2)]], constant uint* out_shape [[buffer(3)]], constant uint& ndim [[buffer(4)]], constant uint& numel [[buffer(5)]], uint id [[thread_position_in_grid]]) {
-    if (id >= numel) return;
-    uint in_off = nd_index_to_offset(id, out_shape, in_strides, ndim);
-    out[id] = -input[in_off];
-}
-kernel void elementwise_relu(device const float* input [[buffer(0)]], device float* out [[buffer(1)]], constant uint* in_strides [[buffer(2)]], constant uint* out_shape [[buffer(3)]], constant uint& ndim [[buffer(4)]], constant uint& numel [[buffer(5)]], uint id [[thread_position_in_grid]]) {
-    if (id >= numel) return;
-    uint in_off = nd_index_to_offset(id, out_shape, in_strides, ndim);
-    out[id] = max(input[in_off], 0.0f);
-}
-kernel void elementwise_exp(device const float* input [[buffer(0)]], device float* out [[buffer(1)]], constant uint* in_strides [[buffer(2)]], constant uint* out_shape [[buffer(3)]], constant uint& ndim [[buffer(4)]], constant uint& numel [[buffer(5)]], uint id [[thread_position_in_grid]]) {
-    if (id >= numel) return;
-    uint in_off = nd_index_to_offset(id, out_shape, in_strides, ndim);
-    out[id] = exp(input[in_off]);
-}
-kernel void elementwise_log(device const float* input [[buffer(0)]], device float* out [[buffer(1)]], constant uint* in_strides [[buffer(2)]], constant uint* out_shape [[buffer(3)]], constant uint& ndim [[buffer(4)]], constant uint& numel [[buffer(5)]], uint id [[thread_position_in_grid]]) {
-    if (id >= numel) return;
-    uint in_off = nd_index_to_offset(id, out_shape, in_strides, ndim);
-    out[id] = log(input[in_off]);
-}
-kernel void elementwise_sqrt(device const float* input [[buffer(0)]], device float* out [[buffer(1)]], constant uint* in_strides [[buffer(2)]], constant uint* out_shape [[buffer(3)]], constant uint& ndim [[buffer(4)]], constant uint& numel [[buffer(5)]], uint id [[thread_position_in_grid]]) {
-    if (id >= numel) return;
-    uint in_off = nd_index_to_offset(id, out_shape, in_strides, ndim);
-    out[id] = sqrt(input[in_off]);
-}
-kernel void elementwise_abs(device const float* input [[buffer(0)]], device float* out [[buffer(1)]], constant uint* in_strides [[buffer(2)]], constant uint* out_shape [[buffer(3)]], constant uint& ndim [[buffer(4)]], constant uint& numel [[buffer(5)]], uint id [[thread_position_in_grid]]) {
-    if (id >= numel) return;
-    uint in_off = nd_index_to_offset(id, out_shape, in_strides, ndim);
-    out[id] = abs(input[in_off]);
-}
-kernel void elementwise_sign(device const float* input [[buffer(0)]], device float* out [[buffer(1)]], constant uint* in_strides [[buffer(2)]], constant uint* out_shape [[buffer(3)]], constant uint& ndim [[buffer(4)]], constant uint& numel [[buffer(5)]], uint id [[thread_position_in_grid]]) {
-    if (id >= numel) return;
-    uint in_off = nd_index_to_offset(id, out_shape, in_strides, ndim);
-    out[id] = sign(input[in_off]);
-}
-kernel void elementwise_tanh(device const float* input [[buffer(0)]], device float* out [[buffer(1)]], constant uint* in_strides [[buffer(2)]], constant uint* out_shape [[buffer(3)]], constant uint& ndim [[buffer(4)]], constant uint& numel [[buffer(5)]], uint id [[thread_position_in_grid]]) {
-    if (id >= numel) return;
-    uint in_off = nd_index_to_offset(id, out_shape, in_strides, ndim);
-    out[id] = tanh(input[in_off]);
-}
-"#
-);
-
-/// MSL source for batched matrix multiplication.
-/// 3D dispatch: (col, row, batch). Supports batch broadcasting via strides.
-const MATMUL_KERNEL_SOURCE: &str = r#"
-#include <metal_stdlib>
-using namespace metal;
-
-kernel void matmul_f32(
-    device const float* A [[buffer(0)]],
-    device const float* B [[buffer(1)]],
-    device float* C [[buffer(2)]],
-    constant uint& M [[buffer(3)]],
-    constant uint& N [[buffer(4)]],
-    constant uint& K [[buffer(5)]],
-    constant uint& batch_size [[buffer(6)]],
-    constant uint& a_batch_stride [[buffer(7)]],
-    constant uint& b_batch_stride [[buffer(8)]],
-    uint3 gid [[thread_position_in_grid]]
-) {
-    uint col = gid.x;
-    uint row = gid.y;
-    uint batch = gid.z;
-    if (row >= M || col >= N || batch >= batch_size) return;
-
-    uint a_offset = batch * a_batch_stride;
-    uint b_offset = batch * b_batch_stride;
-
-    float sum = 0.0f;
-    for (uint i = 0; i < K; i++) {
-        sum += A[a_offset + row * K + i] * B[b_offset + i * N + col];
-    }
-    C[batch * M * N + row * N + col] = sum;
-}
-"#;
-
-const SOFTMAX_KERNEL_SOURCE: &str = r#"
-#include <metal_stdlib>
-using namespace metal;
-
-kernel void softmax_f32(
-    device const float* input [[buffer(0)]],
-    device float* output [[buffer(1)]],
-    constant uint& rows [[buffer(2)]],
-    constant uint& cols [[buffer(3)]],
-    uint row [[thread_position_in_grid]]
-) {
-    if (row >= rows) return;
-    uint offset = row * cols;
-    float max_val = input[offset];
-    for (uint j = 1; j < cols; j++) { max_val = max(max_val, input[offset + j]); }
-    float sum = 0.0f;
-    for (uint j = 0; j < cols; j++) { float e = exp(input[offset + j] - max_val); output[offset + j] = e; sum += e; }
-    for (uint j = 0; j < cols; j++) { output[offset + j] /= sum; }
-}
-"#;
-
-const TRANSPOSE_KERNEL_SOURCE: &str = r#"
-#include <metal_stdlib>
-using namespace metal;
-
-kernel void transpose_f32(
-    device const float* input [[buffer(0)]],
-    device float* output [[buffer(1)]],
-    constant uint& rows [[buffer(2)]],
-    constant uint& cols [[buffer(3)]],
-    uint2 gid [[thread_position_in_grid]]
-) {
-    uint row = gid.y;
-    uint col = gid.x;
-    if (row >= rows || col >= cols) return;
-    output[col * rows + row] = input[row * cols + col];
-}
-"#;
-
-const TRANSPOSE_BATCHED_KERNEL_SOURCE: &str = r#"
-#include <metal_stdlib>
-using namespace metal;
-
-kernel void transpose_batched_f32(
-    device const float* input [[buffer(0)]],
-    device float* output [[buffer(1)]],
-    constant uint& batch_size [[buffer(2)]],
-    constant uint& rows [[buffer(3)]],
-    constant uint& cols [[buffer(4)]],
-    uint3 gid [[thread_position_in_grid]]
-) {
-    uint col = gid.x;
-    uint row = gid.y;
-    uint batch = gid.z;
-    if (row >= rows || col >= cols || batch >= batch_size) return;
-    output[batch * cols * rows + col * rows + row] = input[batch * rows * cols + row * cols + col];
-}
-"#;
-
-const SCALAR_MUL_KERNEL_SOURCE: &str = r#"
-#include <metal_stdlib>
-using namespace metal;
-
-kernel void scalar_mul_f32(
-    device const float* input [[buffer(0)]],
-    device float* output [[buffer(1)]],
-    constant float& scale [[buffer(2)]],
-    constant uint& count [[buffer(3)]],
-    uint id [[thread_position_in_grid]]
-) {
-    if (id < count) { output[id] = input[id] * scale; }
-}
-"#;
-
-const POW_KERNEL_SOURCE: &str = const_format::concatcp!(
-    r#"
-#include <metal_stdlib>
-using namespace metal;
-"#,
-    ND_INDEX_HELPER,
-    r#"
-kernel void pow_f32(device const float* input [[buffer(0)]], device float* out [[buffer(1)]], constant uint* in_strides [[buffer(2)]], constant uint* out_shape [[buffer(3)]], constant uint& ndim [[buffer(4)]], constant uint& numel [[buffer(5)]], constant float& exponent [[buffer(6)]], uint id [[thread_position_in_grid]]) {
-    if (id >= numel) return;
-    uint in_off = nd_index_to_offset(id, out_shape, in_strides, ndim);
-    out[id] = pow(input[in_off], exponent);
-}
-"#
-);
-
-const CLAMP_KERNEL_SOURCE: &str = const_format::concatcp!(
-    r#"
-#include <metal_stdlib>
-using namespace metal;
-"#,
-    ND_INDEX_HELPER,
-    r#"
-kernel void clamp_f32(device const float* input [[buffer(0)]], device float* out [[buffer(1)]], constant uint* in_strides [[buffer(2)]], constant uint* out_shape [[buffer(3)]], constant uint& ndim [[buffer(4)]], constant uint& numel [[buffer(5)]], constant float& min_val [[buffer(6)]], constant float& max_val [[buffer(7)]], uint id [[thread_position_in_grid]]) {
-    if (id >= numel) return;
-    uint in_off = nd_index_to_offset(id, out_shape, in_strides, ndim);
-    out[id] = clamp(input[in_off], min_val, max_val);
-}
-"#
-);
-
-/// MSL source for ternary where op (3 inputs + 3 stride arrays + shape + ndim + numel).
-const WHERE_KERNEL_SOURCE: &str = const_format::concatcp!(
-    r#"
-#include <metal_stdlib>
-using namespace metal;
-"#,
-    ND_INDEX_HELPER,
-    r#"
-kernel void where_f32(device const float* condition [[buffer(0)]], device const float* x [[buffer(1)]], device const float* y [[buffer(2)]], device float* out [[buffer(3)]], constant uint* cond_strides [[buffer(4)]], constant uint* x_strides [[buffer(5)]], constant uint* y_strides [[buffer(6)]], constant uint* out_shape [[buffer(7)]], constant uint& ndim [[buffer(8)]], constant uint& numel [[buffer(9)]], uint id [[thread_position_in_grid]]) {
-    if (id >= numel) return;
-    uint c_off = nd_index_to_offset(id, out_shape, cond_strides, ndim);
-    uint x_off = nd_index_to_offset(id, out_shape, x_strides, ndim);
-    uint y_off = nd_index_to_offset(id, out_shape, y_strides, ndim);
-    out[id] = (condition[c_off] != 0.0f) ? x[x_off] : y[y_off];
-}
-"#
-);
-
-/// MSL source for masked_fill op (2 inputs + 2 stride arrays + shape + ndim + numel + fill_value).
-const MASKED_FILL_KERNEL_SOURCE: &str = const_format::concatcp!(
-    r#"
-#include <metal_stdlib>
-using namespace metal;
-"#,
-    ND_INDEX_HELPER,
-    r#"
-kernel void masked_fill_f32(device const float* input [[buffer(0)]], device const float* mask [[buffer(1)]], device float* out [[buffer(2)]], constant uint* in_strides [[buffer(3)]], constant uint* mask_strides [[buffer(4)]], constant uint* out_shape [[buffer(5)]], constant uint& ndim [[buffer(6)]], constant uint& numel [[buffer(7)]], constant float& fill_value [[buffer(8)]], uint id [[thread_position_in_grid]]) {
-    if (id >= numel) return;
-    uint in_off = nd_index_to_offset(id, out_shape, in_strides, ndim);
-    uint m_off = nd_index_to_offset(id, out_shape, mask_strides, ndim);
-    out[id] = (mask[m_off] != 0.0f) ? fill_value : input[in_off];
-}
-"#
-);
-
-/// MSL source for triu (upper triangular) op.
-const TRIU_KERNEL_SOURCE: &str = r#"
-#include <metal_stdlib>
-using namespace metal;
-
-kernel void triu_f32(
-    device const float* input [[buffer(0)]],
-    device float* out [[buffer(1)]],
-    constant uint& batch_size [[buffer(2)]],
-    constant uint& rows [[buffer(3)]],
-    constant uint& cols [[buffer(4)]],
-    constant int& diagonal [[buffer(5)]],
-    uint3 gid [[thread_position_in_grid]]
-) {
-    uint col = gid.x;
-    uint row = gid.y;
-    uint batch = gid.z;
-    if (row >= rows || col >= cols || batch >= batch_size) return;
-    uint idx = batch * rows * cols + row * cols + col;
-    out[idx] = (int(col) >= int(row) + diagonal) ? input[idx] : 0.0f;
-}
-"#;
-
-/// MSL source for tril (lower triangular) op.
-const TRIL_KERNEL_SOURCE: &str = r#"
-#include <metal_stdlib>
-using namespace metal;
-
-kernel void tril_f32(
-    device const float* input [[buffer(0)]],
-    device float* out [[buffer(1)]],
-    constant uint& batch_size [[buffer(2)]],
-    constant uint& rows [[buffer(3)]],
-    constant uint& cols [[buffer(4)]],
-    constant int& diagonal [[buffer(5)]],
-    uint3 gid [[thread_position_in_grid]]
-) {
-    uint col = gid.x;
-    uint row = gid.y;
-    uint batch = gid.z;
-    if (row >= rows || col >= cols || batch >= batch_size) return;
-    uint idx = batch * rows * cols + row * cols + col;
-    out[idx] = (int(col) <= int(row) + diagonal) ? input[idx] : 0.0f;
-}
-"#;
-
-// ── Gather kernel sources ───────────────────────────────────────────────────
-
-const GATHER_DIM0_KERNEL_SOURCE: &str = r#"
-#include <metal_stdlib>
-using namespace metal;
-
-kernel void gather_dim0_f32(
-    device const float* input [[buffer(0)]],
-    device const int* indices [[buffer(1)]],
-    device float* output [[buffer(2)]],
-    constant uint& rows [[buffer(3)]],
-    constant uint& in_cols [[buffer(4)]],
-    constant uint& out_cols [[buffer(5)]],
-    uint2 gid [[thread_position_in_grid]]
-) {
-    uint row = gid.y;
-    uint col = gid.x;
-    if (row >= rows || col >= out_cols) return;
-    int idx = indices[row * out_cols + col];
-    output[row * out_cols + col] = input[idx * in_cols + col];
-}
-"#;
-
-const GATHER_DIM1_KERNEL_SOURCE: &str = r#"
-#include <metal_stdlib>
-using namespace metal;
-
-kernel void gather_dim1_f32(
-    device const float* input [[buffer(0)]],
-    device const int* indices [[buffer(1)]],
-    device float* output [[buffer(2)]],
-    constant uint& rows [[buffer(3)]],
-    constant uint& in_cols [[buffer(4)]],
-    constant uint& out_cols [[buffer(5)]],
-    uint2 gid [[thread_position_in_grid]]
-) {
-    uint row = gid.y;
-    uint col = gid.x;
-    if (row >= rows || col >= out_cols) return;
-    int idx = indices[row * out_cols + col];
-    output[row * out_cols + col] = input[row * in_cols + idx];
-}
-"#;
-
-// ── IndexSelect kernel sources ──────────────────────────────────────────────
-
-const INDEX_SELECT_DIM0_KERNEL_SOURCE: &str = r#"
-#include <metal_stdlib>
-using namespace metal;
-
-kernel void index_select_dim0_f32(
-    device const float* input [[buffer(0)]],
-    device const int* indices [[buffer(1)]],
-    device float* output [[buffer(2)]],
-    constant uint& num_indices [[buffer(3)]],
-    constant uint& cols [[buffer(4)]],
-    uint2 gid [[thread_position_in_grid]]
-) {
-    uint i = gid.y;
-    uint j = gid.x;
-    if (i >= num_indices || j >= cols) return;
-    int idx = indices[i];
-    output[i * cols + j] = input[idx * cols + j];
-}
-"#;
-
-const INDEX_SELECT_DIM1_KERNEL_SOURCE: &str = r#"
-#include <metal_stdlib>
-using namespace metal;
-
-kernel void index_select_dim1_f32(
-    device const float* input [[buffer(0)]],
-    device const int* indices [[buffer(1)]],
-    device float* output [[buffer(2)]],
-    constant uint& rows [[buffer(3)]],
-    constant uint& in_cols [[buffer(4)]],
-    constant uint& num_indices [[buffer(5)]],
-    uint2 gid [[thread_position_in_grid]]
-) {
-    uint row = gid.y;
-    uint i = gid.x;
-    if (row >= rows || i >= num_indices) return;
-    int idx = indices[i];
-    output[row * num_indices + i] = input[row * in_cols + idx];
-}
-"#;
-
-const GELU_KERNEL_SOURCE: &str = const_format::concatcp!(
-    r#"
-#include <metal_stdlib>
-using namespace metal;
-"#,
-    ND_INDEX_HELPER,
-    r#"
-kernel void gelu_f32(
-    device const float* input [[buffer(0)]],
-    device float* output [[buffer(1)]],
-    constant uint* in_strides [[buffer(2)]],
-    constant uint* out_shape [[buffer(3)]],
-    constant uint& ndim [[buffer(4)]],
-    constant uint& numel [[buffer(5)]],
-    uint id [[thread_position_in_grid]]
-) {
-    if (id >= numel) return;
-    uint in_off = nd_index_to_offset(id, out_shape, in_strides, ndim);
-    float x = input[in_off];
-    float inner = 0.7978845608f * (x + 0.044715f * x * x * x);
-    inner = clamp(inner, -10.0f, 10.0f);
-    output[id] = x * 0.5f * (1.0f + tanh(inner));
-}
-"#
-);
-
-const LAYER_NORM_KERNEL_SOURCE: &str = r#"
-#include <metal_stdlib>
-using namespace metal;
-
-kernel void layer_norm_f32(
-    device const float* input [[buffer(0)]],
-    device const float* gamma [[buffer(1)]],
-    device const float* beta [[buffer(2)]],
-    device float* output [[buffer(3)]],
-    constant uint& rows [[buffer(4)]],
-    constant uint& cols [[buffer(5)]],
-    constant float& eps [[buffer(6)]],
-    uint row [[thread_position_in_grid]]
-) {
-    if (row >= rows) return;
-    uint offset = row * cols;
-    float mean = 0.0f;
-    for (uint j = 0; j < cols; j++) mean += input[offset + j];
-    mean /= float(cols);
-    float var = 0.0f;
-    for (uint j = 0; j < cols; j++) {
-        float diff = input[offset + j] - mean;
-        var += diff * diff;
-    }
-    var /= float(cols);
-    float inv_std = 1.0f / sqrt(var + eps);
-    for (uint j = 0; j < cols; j++) {
-        output[offset + j] = gamma[j] * (input[offset + j] - mean) * inv_std + beta[j];
-    }
-}
-"#;
-
-const SOFTMAX_BACKWARD_KERNEL_SOURCE: &str = r#"
-#include <metal_stdlib>
-using namespace metal;
-
-kernel void softmax_backward_f32(
-    device const float* grad_output [[buffer(0)]],
-    device const float* output [[buffer(1)]],
-    device float* grad_input [[buffer(2)]],
-    constant uint& total_rows [[buffer(3)]],
-    constant uint& cols [[buffer(4)]],
-    uint row [[thread_position_in_grid]]
-) {
-    if (row >= total_rows) return;
-    uint offset = row * cols;
-
-    // Compute dot product: sum(grad_output * output) for this row
-    float dot = 0.0f;
-    for (uint j = 0; j < cols; j++) {
-        dot += grad_output[offset + j] * output[offset + j];
-    }
-
-    // grad_input = output * (grad_output - dot)
-    for (uint j = 0; j < cols; j++) {
-        grad_input[offset + j] = output[offset + j] * (grad_output[offset + j] - dot);
-    }
-}
-"#;
-
-const LAYER_NORM_BACKWARD_KERNEL_SOURCE: &str = r#"
-#include <metal_stdlib>
-using namespace metal;
-
-kernel void layer_norm_backward_f32(
-    device const float* grad_output [[buffer(0)]],
-    device const float* input [[buffer(1)]],
-    device const float* gamma [[buffer(2)]],
-    device float* grad_input [[buffer(3)]],
-    constant uint& total_rows [[buffer(4)]],
-    constant uint& cols [[buffer(5)]],
-    constant float& eps [[buffer(6)]],
-    uint row [[thread_position_in_grid]]
-) {
-    if (row >= total_rows) return;
-    uint offset = row * cols;
-
-    // Recompute mean and variance for this row
-    float mean = 0.0f;
-    for (uint j = 0; j < cols; j++) mean += input[offset + j];
-    mean /= float(cols);
-
-    float var = 0.0f;
-    for (uint j = 0; j < cols; j++) {
-        float diff = input[offset + j] - mean;
-        var += diff * diff;
-    }
-    var /= float(cols);
-    float inv_std = 1.0f / sqrt(var + eps);
-
-    // Compute intermediate sums
-    float sum_dy_gamma = 0.0f;
-    float sum_dy_gamma_xhat = 0.0f;
-    for (uint j = 0; j < cols; j++) {
-        float xhat = (input[offset + j] - mean) * inv_std;
-        float dy_gamma = grad_output[offset + j] * gamma[j];
-        sum_dy_gamma += dy_gamma;
-        sum_dy_gamma_xhat += dy_gamma * xhat;
-    }
-
-    // Compute grad_input for this row
-    float n = float(cols);
-    for (uint j = 0; j < cols; j++) {
-        float xhat = (input[offset + j] - mean) * inv_std;
-        float dy_gamma = grad_output[offset + j] * gamma[j];
-        grad_input[offset + j] = inv_std * (dy_gamma - sum_dy_gamma / n - xhat * sum_dy_gamma_xhat / n);
-    }
-}
-"#;
-
-const EMBEDDING_KERNEL_SOURCE: &str = r#"
-#include <metal_stdlib>
-using namespace metal;
-
-kernel void embedding_f32(
-    device const float* weights [[buffer(0)]],
-    device const int* indices [[buffer(1)]],
-    device float* output [[buffer(2)]],
-    constant uint& seq_len [[buffer(3)]],
-    constant uint& embed_dim [[buffer(4)]],
-    uint2 gid [[thread_position_in_grid]]
-) {
-    uint i = gid.y;
-    uint j = gid.x;
-    if (i >= seq_len || j >= embed_dim) return;
-    int idx = indices[i];
-    output[i * embed_dim + j] = weights[idx * embed_dim + j];
-}
-"#;
-
-
-/// MSL source for strided copy (general transpose via arbitrary stride permutation).
-const COPY_STRIDED_KERNEL_SOURCE: &str = const_format::concatcp!(
-    r#"
-#include <metal_stdlib>
-using namespace metal;
-"#,
-    ND_INDEX_HELPER,
-    r#"
-kernel void copy_strided_f32(
-    device const float* input [[buffer(0)]],
-    device float* output [[buffer(1)]],
-    constant uint* in_strides [[buffer(2)]],
-    constant uint* out_shape [[buffer(3)]],
-    constant uint& ndim [[buffer(4)]],
-    constant uint& numel [[buffer(5)]],
-    uint id [[thread_position_in_grid]]
-) {
-    if (id >= numel) return;
-    uint in_off = nd_index_to_offset(id, out_shape, in_strides, ndim);
-    output[id] = input[in_off];
-}
-"#
-);
-
-// ── Slice kernel sources ────────────────────────────────────────────────────
-
-const SLICE_DIM0_KERNEL_SOURCE: &str = r#"
-#include <metal_stdlib>
-using namespace metal;
-
-kernel void slice_dim0_f32(device const float* input [[buffer(0)]], device float* output [[buffer(1)]], constant uint& cols [[buffer(2)]], constant uint& start_row [[buffer(3)]], uint2 gid [[thread_position_in_grid]]) {
-    uint row = gid.y; uint col = gid.x;
-    if (col >= cols) return;
-    output[row * cols + col] = input[(start_row + row) * cols + col];
-}
-"#;
-
-const SLICE_DIM1_KERNEL_SOURCE: &str = r#"
-#include <metal_stdlib>
-using namespace metal;
-
-kernel void slice_dim1_f32(device const float* input [[buffer(0)]], device float* output [[buffer(1)]], constant uint& in_cols [[buffer(2)]], constant uint& out_cols [[buffer(3)]], constant uint& start_col [[buffer(4)]], constant uint& rows [[buffer(5)]], uint2 gid [[thread_position_in_grid]]) {
-    uint row = gid.y; uint col = gid.x;
-    if (row >= rows || col >= out_cols) return;
-    output[row * out_cols + col] = input[row * in_cols + (start_col + col)];
-}
-"#;
-
-// ── Concat kernel sources ───────────────────────────────────────────────────
-
-const CONCAT_DIM0_KERNEL_SOURCE: &str = r#"
-#include <metal_stdlib>
-using namespace metal;
-
-kernel void concat_dim0_f32(device const float* a [[buffer(0)]], device const float* b [[buffer(1)]], device float* output [[buffer(2)]], constant uint& rows_a [[buffer(3)]], constant uint& cols [[buffer(4)]], uint2 gid [[thread_position_in_grid]]) {
-    uint row = gid.y; uint col = gid.x;
-    if (col >= cols) return;
-    if (row < rows_a) output[row * cols + col] = a[row * cols + col];
-    else output[row * cols + col] = b[(row - rows_a) * cols + col];
-}
-"#;
-
-const CONCAT_DIM1_KERNEL_SOURCE: &str = r#"
-#include <metal_stdlib>
-using namespace metal;
-
-kernel void concat_dim1_f32(device const float* a [[buffer(0)]], device const float* b [[buffer(1)]], device float* output [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols_a [[buffer(4)]], constant uint& cols_b [[buffer(5)]], uint2 gid [[thread_position_in_grid]]) {
-    uint row = gid.y; uint col = gid.x;
-    uint total_cols = cols_a + cols_b;
-    if (row >= rows || col >= total_cols) return;
-    if (col < cols_a) output[row * total_cols + col] = a[row * cols_a + col];
-    else output[row * total_cols + col] = b[row * cols_b + (col - cols_a)];
-}
-"#;
-
-// ── AddBias kernel sources ──────────────────────────────────────────────────
-
-const ADD_BIAS_KERNEL_SOURCE: &str = r#"
-#include <metal_stdlib>
-using namespace metal;
-
-kernel void add_bias_f32(device const float* input [[buffer(0)]], device const float* bias [[buffer(1)]], device float* output [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint2 gid [[thread_position_in_grid]]) {
-    uint row = gid.y; uint col = gid.x;
-    if (row >= rows || col >= cols) return;
-    output[row * cols + col] = input[row * cols + col] + bias[col];
-}
-"#;
-
-// ── SoftmaxCausal kernel sources ────────────────────────────────────────────
-
-const SOFTMAX_CAUSAL_KERNEL_SOURCE: &str = r#"
-#include <metal_stdlib>
-using namespace metal;
-
-kernel void softmax_causal_f32(device const float* input [[buffer(0)]], device float* output [[buffer(1)]], constant uint& batch_size [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint2 gid [[thread_position_in_grid]]) {
-    uint row = gid.x;
-    uint batch = gid.y;
-    if (row >= rows || batch >= batch_size) return;
-    uint offset = batch * rows * cols + row * cols;
-    float max_val = -1e9f;
-    for (uint j = 0; j <= row && j < cols; j++) max_val = max(max_val, input[offset + j]);
-    float sum = 0.0f;
-    for (uint j = 0; j < cols; j++) {
-        if (j <= row) { float e = exp(input[offset + j] - max_val); output[offset + j] = e; sum += e; }
-        else { output[offset + j] = 0.0f; }
-    }
-    for (uint j = 0; j <= row && j < cols; j++) output[offset + j] /= sum;
-}
-"#;
-
-// ── Argmax kernel sources ───────────────────────────────────────────────────
-
-const SUM_KERNEL_SOURCE: &str = r#"
-#include <metal_stdlib>
-using namespace metal;
-
-kernel void sum_f32(
-    device const float* input [[buffer(0)]],
-    device float* output [[buffer(1)]],
-    constant uint& total_rows [[buffer(2)]],
-    constant uint& cols [[buffer(3)]],
-    uint row [[thread_position_in_grid]]
-) {
-    if (row >= total_rows) return;
-    uint offset = row * cols;
-    float sum = 0.0f;
-    for (uint j = 0; j < cols; j++) {
-        sum += input[offset + j];
-    }
-    output[row] = sum;
-}
-"#;
-
-const MEAN_KERNEL_SOURCE: &str = r#"
-#include <metal_stdlib>
-using namespace metal;
-
-kernel void mean_f32(
-    device const float* input [[buffer(0)]],
-    device float* output [[buffer(1)]],
-    constant uint& total_rows [[buffer(2)]],
-    constant uint& cols [[buffer(3)]],
-    uint row [[thread_position_in_grid]]
-) {
-    if (row >= total_rows) return;
-    uint offset = row * cols;
-    float sum = 0.0f;
-    for (uint j = 0; j < cols; j++) {
-        sum += input[offset + j];
-    }
-    output[row] = sum / float(cols);
-}
-"#;
-
-const ARGMAX_KERNEL_SOURCE: &str = r#"
-#include <metal_stdlib>
-using namespace metal;
-
-kernel void argmax_f32(device const float* input [[buffer(0)]], device int* output [[buffer(1)]], constant uint& rows [[buffer(2)]], constant uint& cols [[buffer(3)]], uint row [[thread_position_in_grid]]) {
-    if (row >= rows) return;
-    uint offset = row * cols;
-    float max_val = input[offset]; int max_idx = 0;
-    for (uint j = 1; j < cols; j++) { if (input[offset + j] > max_val) { max_val = input[offset + j]; max_idx = int(j); } }
-    output[row] = max_idx;
-}
-"#;
-
-// ── CNN kernel sources ─────────────────────────────────────────────────────
-
-/// Conv1d MSL kernel. Buffer layout: input(0), weight(1), output(2),
-/// then uint params: batch(3), in_channels(4), out_channels(5), in_length(6),
-/// out_length(7), kernel_size(8), stride(9), padding(10).
-pub(crate) const CONV1D_KERNEL_SOURCE: &str = r#"
-#include <metal_stdlib>
-using namespace metal;
-
-kernel void conv1d_f32(
-    device const float* input [[buffer(0)]],
-    device const float* weight [[buffer(1)]],
-    device float* output [[buffer(2)]],
-    constant uint& batch [[buffer(3)]],
-    constant uint& in_channels [[buffer(4)]],
-    constant uint& out_channels [[buffer(5)]],
-    constant uint& in_length [[buffer(6)]],
-    constant uint& out_length [[buffer(7)]],
-    constant uint& kernel_size [[buffer(8)]],
-    constant uint& stride [[buffer(9)]],
-    constant uint& padding [[buffer(10)]],
-    uint3 gid [[thread_position_in_grid]]
-) {
-    uint o = gid.x;
-    uint oc = gid.y;
-    uint b = gid.z;
-    if (o >= out_length || oc >= out_channels || b >= batch) return;
-
-    float sum = 0.0f;
-    for (uint ic = 0; ic < in_channels; ic++) {
-        for (uint k = 0; k < kernel_size; k++) {
-            int in_pos = int(o * stride + k) - int(padding);
-            if (in_pos >= 0 && uint(in_pos) < in_length) {
-                sum += input[b * in_channels * in_length + ic * in_length + in_pos]
-                     * weight[oc * in_channels * kernel_size + ic * kernel_size + k];
-            }
-        }
-    }
-    output[b * out_channels * out_length + oc * out_length + o] = sum;
-}
-"#;
-
-/// Conv2d MSL kernel. Buffer layout: input(0), weight(1), output(2),
-/// then uint params: batch(3), in_channels(4), out_channels(5), in_h(6), in_w(7),
-/// out_h(8), out_w(9), kh(10), kw(11), stride_h(12), stride_w(13), pad_h(14), pad_w(15).
-pub(crate) const CONV2D_KERNEL_SOURCE: &str = r#"
-#include <metal_stdlib>
-using namespace metal;
-
-kernel void conv2d_f32(
-    device const float* input [[buffer(0)]],
-    device const float* weight [[buffer(1)]],
-    device float* output [[buffer(2)]],
-    constant uint& batch [[buffer(3)]],
-    constant uint& in_channels [[buffer(4)]],
-    constant uint& out_channels [[buffer(5)]],
-    constant uint& in_h [[buffer(6)]],
-    constant uint& in_w [[buffer(7)]],
-    constant uint& out_h [[buffer(8)]],
-    constant uint& out_w [[buffer(9)]],
-    constant uint& kh [[buffer(10)]],
-    constant uint& kw [[buffer(11)]],
-    constant uint& stride_h [[buffer(12)]],
-    constant uint& stride_w [[buffer(13)]],
-    constant uint& pad_h [[buffer(14)]],
-    constant uint& pad_w [[buffer(15)]],
-    uint3 gid [[thread_position_in_grid]]
-) {
-    uint ow = gid.x;
-    uint combined = gid.y;
-    uint b = gid.z;
-    uint oc = combined % out_channels;
-    uint oh = combined / out_channels;
-    if (ow >= out_w || oh >= out_h || b >= batch) return;
-
-    float sum = 0.0f;
-    for (uint ic = 0; ic < in_channels; ic++) {
-        for (uint i = 0; i < kh; i++) {
-            for (uint j = 0; j < kw; j++) {
-                int ih = int(oh * stride_h + i) - int(pad_h);
-                int iw = int(ow * stride_w + j) - int(pad_w);
-                if (ih >= 0 && uint(ih) < in_h && iw >= 0 && uint(iw) < in_w) {
-                    sum += input[b * in_channels * in_h * in_w + ic * in_h * in_w + ih * in_w + iw]
-                         * weight[oc * in_channels * kh * kw + ic * kh * kw + i * kw + j];
-                }
-            }
-        }
-    }
-    output[b * out_channels * out_h * out_w + oc * out_h * out_w + oh * out_w + ow] = sum;
-}
-"#;
-
-/// BatchNorm MSL kernel. Buffer layout: input(0), mean(1), var(2), weight(3), bias(4), output(5),
-/// then uint params: batch(6), channels(7), spatial(8), then float param: eps(9).
-pub(crate) const BATCH_NORM_KERNEL_SOURCE: &str = r#"
-#include <metal_stdlib>
-using namespace metal;
-
-kernel void batch_norm_f32(
-    device const float* input [[buffer(0)]],
-    device const float* mean [[buffer(1)]],
-    device const float* var_ [[buffer(2)]],
-    device const float* weight [[buffer(3)]],
-    device const float* bias [[buffer(4)]],
-    device float* output [[buffer(5)]],
-    constant uint& batch [[buffer(6)]],
-    constant uint& channels [[buffer(7)]],
-    constant uint& spatial [[buffer(8)]],
-    constant float& eps [[buffer(9)]],
-    uint3 gid [[thread_position_in_grid]]
-) {
-    uint s = gid.x;
-    uint c = gid.y;
-    uint b = gid.z;
-    if (s >= spatial || c >= channels || b >= batch) return;
-
-    uint idx = b * channels * spatial + c * spatial + s;
-    float inv_std = 1.0f / sqrt(var_[c] + eps);
-    output[idx] = (input[idx] - mean[c]) * inv_std * weight[c] + bias[c];
-}
-"#;
-
-/// Conv2d backward input MSL kernel (transposed convolution).
-/// Buffer layout: grad_output(0), weight(1), grad_input(2),
-/// then uint params: batch(3), in_channels(4), out_channels(5), in_h(6), in_w(7),
-/// out_h(8), out_w(9), kh(10), kw(11), stride_h(12), stride_w(13), pad_h(14), pad_w(15).
-pub(crate) const CONV2D_BACKWARD_INPUT_KERNEL_SOURCE: &str = r#"
-#include <metal_stdlib>
-using namespace metal;
-
-kernel void conv2d_backward_input_f32(
-    device const float* grad_output [[buffer(0)]],
-    device const float* weight [[buffer(1)]],
-    device float* grad_input [[buffer(2)]],
-    constant uint& batch [[buffer(3)]],
-    constant uint& in_channels [[buffer(4)]],
-    constant uint& out_channels [[buffer(5)]],
-    constant uint& in_h [[buffer(6)]],
-    constant uint& in_w [[buffer(7)]],
-    constant uint& out_h [[buffer(8)]],
-    constant uint& out_w [[buffer(9)]],
-    constant uint& kh [[buffer(10)]],
-    constant uint& kw [[buffer(11)]],
-    constant uint& stride_h [[buffer(12)]],
-    constant uint& stride_w [[buffer(13)]],
-    constant uint& pad_h [[buffer(14)]],
-    constant uint& pad_w [[buffer(15)]],
-    uint3 gid [[thread_position_in_grid]]
-) {
-    uint iw = gid.x;
-    uint combined = gid.y;
-    uint b = gid.z;
-    uint ic = combined % in_channels;
-    uint ih = combined / in_channels;
-    if (iw >= in_w || ih >= in_h || b >= batch) return;
-
-    float sum = 0.0f;
-    for (uint oc = 0; oc < out_channels; oc++) {
-        for (uint i = 0; i < kh; i++) {
-            for (uint j = 0; j < kw; j++) {
-                int oh_candidate = int(ih + pad_h) - int(i);
-                int ow_candidate = int(iw + pad_w) - int(j);
-                if (oh_candidate >= 0 && oh_candidate % int(stride_h) == 0 &&
-                    ow_candidate >= 0 && ow_candidate % int(stride_w) == 0) {
-                    uint oh = uint(oh_candidate) / stride_h;
-                    uint ow = uint(ow_candidate) / stride_w;
-                    if (oh < out_h && ow < out_w) {
-                        sum += grad_output[b * out_channels * out_h * out_w + oc * out_h * out_w + oh * out_w + ow]
-                             * weight[oc * in_channels * kh * kw + ic * kh * kw + i * kw + j];
-                    }
-                }
-            }
-        }
-    }
-    grad_input[b * in_channels * in_h * in_w + ic * in_h * in_w + ih * in_w + iw] = sum;
-}
-"#;
-
-/// Embedding backward MSL kernel (atomic accumulation).
-/// Buffer layout: grad_output(0), indices(1), grad_weight(2),
-/// then uint params: seq_len(3), embed_dim(4).
-/// NOTE: grad_weight buffer must be pre-zeroed before dispatch.
-pub(crate) const EMBEDDING_BACKWARD_KERNEL_SOURCE: &str = r#"
-#include <metal_stdlib>
-using namespace metal;
-
-// Fallback for devices without native atomic float: use compare-and-swap loop.
-// This works on all Metal GPUs.
-inline void atomic_add_float(device float* addr, float val) {
-    float expected = *addr;
-    while (true) {
-        float desired = expected + val;
-        // atomic_compare_exchange_weak on uint, reinterpreted
-        device atomic_uint* addr_uint = (device atomic_uint*)addr;
-        uint expected_uint = as_type<uint>(expected);
-        uint desired_uint = as_type<uint>(desired);
-        if (atomic_compare_exchange_weak_explicit(addr_uint, &expected_uint, desired_uint,
-                memory_order_relaxed, memory_order_relaxed)) {
-            break;
-        }
-        expected = as_type<float>(expected_uint);
-    }
-}
-
-kernel void embedding_backward_f32(
-    device const float* grad_output [[buffer(0)]],
-    device const int* indices [[buffer(1)]],
-    device float* grad_weight [[buffer(2)]],
-    constant uint& seq_len [[buffer(3)]],
-    constant uint& embed_dim [[buffer(4)]],
-    uint2 gid [[thread_position_in_grid]]
-) {
-    uint j = gid.x;  // embedding dimension
-    uint i = gid.y;  // sequence position
-    if (i >= seq_len || j >= embed_dim) return;
-
-    int idx = indices[i];
-    atomic_add_float(&grad_weight[idx * embed_dim + j], grad_output[i * embed_dim + j]);
-}
-"#;
-
-/// Batch norm backward (inference mode) MSL kernel.
-/// grad_input = grad_output * weight / sqrt(running_var + eps)
-/// Buffer layout: grad_output(0), weight(1), running_var(2), grad_input(3),
-/// then uint params: batch(4), channels(5), spatial(6), then float param: eps(7).
-pub(crate) const BATCH_NORM_BACKWARD_KERNEL_SOURCE: &str = r#"
-#include <metal_stdlib>
-using namespace metal;
-
-kernel void batch_norm_backward_f32(
-    device const float* grad_output [[buffer(0)]],
-    device const float* weight [[buffer(1)]],
-    device const float* running_var [[buffer(2)]],
-    device float* grad_input [[buffer(3)]],
-    constant uint& batch [[buffer(4)]],
-    constant uint& channels [[buffer(5)]],
-    constant uint& spatial [[buffer(6)]],
-    constant float& eps [[buffer(7)]],
-    uint3 gid [[thread_position_in_grid]]
-) {
-    uint s = gid.x;
-    uint c = gid.y;
-    uint b = gid.z;
-    if (s >= spatial || c >= channels || b >= batch) return;
-    uint idx = b * channels * spatial + c * spatial + s;
-    float inv_std = 1.0f / sqrt(running_var[c] + eps);
-    grad_input[idx] = grad_output[idx] * weight[c] * inv_std;
-}
-"#;
-
-/// MaxPool2d MSL kernel. Buffer layout: input(0), output(1),
-/// then uint params: batch(2), channels(3), in_h(4), in_w(5), out_h(6), out_w(7),
-/// kh(8), kw(9), stride_h(10), stride_w(11), pad_h(12), pad_w(13).
-pub(crate) const MAX_POOL2D_KERNEL_SOURCE: &str = r#"
-#include <metal_stdlib>
-using namespace metal;
-
-kernel void max_pool2d_f32(
-    device const float* input [[buffer(0)]],
-    device float* output [[buffer(1)]],
-    constant uint& batch [[buffer(2)]],
-    constant uint& channels [[buffer(3)]],
-    constant uint& in_h [[buffer(4)]],
-    constant uint& in_w [[buffer(5)]],
-    constant uint& out_h [[buffer(6)]],
-    constant uint& out_w [[buffer(7)]],
-    constant uint& kh [[buffer(8)]],
-    constant uint& kw [[buffer(9)]],
-    constant uint& stride_h [[buffer(10)]],
-    constant uint& stride_w [[buffer(11)]],
-    constant uint& pad_h [[buffer(12)]],
-    constant uint& pad_w [[buffer(13)]],
-    uint3 gid [[thread_position_in_grid]]
-) {
-    uint ow = gid.x;
-    uint combined = gid.y;
-    uint b = gid.z;
-    uint c = combined % channels;
-    uint oh = combined / channels;
-    if (ow >= out_w || oh >= out_h || b >= batch) return;
-
-    float max_val = -1e30f;
-    for (uint i = 0; i < kh; i++) {
-        for (uint j = 0; j < kw; j++) {
-            int ih = int(oh * stride_h + i) - int(pad_h);
-            int iw = int(ow * stride_w + j) - int(pad_w);
-            if (ih >= 0 && uint(ih) < in_h && iw >= 0 && uint(iw) < in_w) {
-                float val = input[b * channels * in_h * in_w + c * in_h * in_w + ih * in_w + iw];
-                max_val = max(max_val, val);
-            }
-        }
-    }
-    output[b * channels * out_h * out_w + c * out_h * out_w + oh * out_w + ow] = max_val;
-}
-"#;
-
-/// AvgPool2d MSL kernel. Same buffer layout as max_pool2d.
-pub(crate) const AVG_POOL2D_KERNEL_SOURCE: &str = r#"
-#include <metal_stdlib>
-using namespace metal;
-
-kernel void avg_pool2d_f32(
-    device const float* input [[buffer(0)]],
-    device float* output [[buffer(1)]],
-    constant uint& batch [[buffer(2)]],
-    constant uint& channels [[buffer(3)]],
-    constant uint& in_h [[buffer(4)]],
-    constant uint& in_w [[buffer(5)]],
-    constant uint& out_h [[buffer(6)]],
-    constant uint& out_w [[buffer(7)]],
-    constant uint& kh [[buffer(8)]],
-    constant uint& kw [[buffer(9)]],
-    constant uint& stride_h [[buffer(10)]],
-    constant uint& stride_w [[buffer(11)]],
-    constant uint& pad_h [[buffer(12)]],
-    constant uint& pad_w [[buffer(13)]],
-    uint3 gid [[thread_position_in_grid]]
-) {
-    uint ow = gid.x;
-    uint combined = gid.y;
-    uint b = gid.z;
-    uint c = combined % channels;
-    uint oh = combined / channels;
-    if (ow >= out_w || oh >= out_h || b >= batch) return;
-
-    float sum = 0.0f;
-    uint count = 0;
-    for (uint i = 0; i < kh; i++) {
-        for (uint j = 0; j < kw; j++) {
-            int ih = int(oh * stride_h + i) - int(pad_h);
-            int iw = int(ow * stride_w + j) - int(pad_w);
-            if (ih >= 0 && uint(ih) < in_h && iw >= 0 && uint(iw) < in_w) {
-                sum += input[b * channels * in_h * in_w + c * in_h * in_w + ih * in_w + iw];
-                count++;
-            }
-        }
-    }
-    output[b * channels * out_h * out_w + c * out_h * out_w + oh * out_w + ow] = count > 0 ? sum / float(count) : 0.0f;
-}
-"#;
 
 /// A Metal compute pipeline. Wraps command queue + pipeline state.
 pub struct ComputePipeline {
@@ -2505,66 +1436,14 @@ impl KernelRegistry {
     }
 
     /// Resolve the kernel source and function name for a given base name and dtype.
-    fn resolve_kernel(base_name: &str, dtype: DType) -> (String, String) {
+    /// Resolve kernel source and function name for a given base_name + dtype.
+    /// Base names are unsuffixed (e.g. "matmul", "softmax", "elementwise_add").
+    /// Returns (MSL source, suffixed function name like "matmul_f32").
+    pub fn resolve_kernel(base_name: &str, dtype: DType) -> (String, String) {
         use crate::kernel_templates as kt;
 
-        // F32 keeps original function names (no suffix) for backward compat
-        if dtype == DType::Float32 {
-            let source = match base_name {
-                n if n.starts_with("elementwise_add") || n.starts_with("elementwise_sub")
-                    || n.starts_with("elementwise_mul") || n.starts_with("elementwise_div") =>
-                    BINARY_KERNEL_SOURCE,
-                n if n.starts_with("elementwise_") => UNARY_KERNEL_SOURCE,
-                "matmul_f32" => MATMUL_KERNEL_SOURCE,
-                "softmax_f32" => SOFTMAX_KERNEL_SOURCE,
-                "transpose_f32" => TRANSPOSE_KERNEL_SOURCE,
-                "transpose_batched_f32" => TRANSPOSE_BATCHED_KERNEL_SOURCE,
-                "scalar_mul_f32" => SCALAR_MUL_KERNEL_SOURCE,
-                "gelu_f32" => GELU_KERNEL_SOURCE,
-                "layer_norm_f32" => LAYER_NORM_KERNEL_SOURCE,
-                "softmax_backward_f32" => SOFTMAX_BACKWARD_KERNEL_SOURCE,
-                "layer_norm_backward_f32" => LAYER_NORM_BACKWARD_KERNEL_SOURCE,
-                "embedding_f32" => EMBEDDING_KERNEL_SOURCE,
-                "slice_dim0_f32" => SLICE_DIM0_KERNEL_SOURCE,
-                "slice_dim1_f32" => SLICE_DIM1_KERNEL_SOURCE,
-                "concat_dim0_f32" => CONCAT_DIM0_KERNEL_SOURCE,
-                "concat_dim1_f32" => CONCAT_DIM1_KERNEL_SOURCE,
-                "add_bias_f32" => ADD_BIAS_KERNEL_SOURCE,
-                "softmax_causal_f32" => SOFTMAX_CAUSAL_KERNEL_SOURCE,
-                "argmax_f32" => ARGMAX_KERNEL_SOURCE,
-                "sum_f32" => SUM_KERNEL_SOURCE,
-                "mean_f32" => MEAN_KERNEL_SOURCE,
-                "copy_strided_f32" => COPY_STRIDED_KERNEL_SOURCE,
-                "pow_f32" => POW_KERNEL_SOURCE,
-                "clamp_f32" => CLAMP_KERNEL_SOURCE,
-                "where_f32" => WHERE_KERNEL_SOURCE,
-                "masked_fill_f32" => MASKED_FILL_KERNEL_SOURCE,
-                "triu_f32" => TRIU_KERNEL_SOURCE,
-                "tril_f32" => TRIL_KERNEL_SOURCE,
-                "gather_dim0_f32" => GATHER_DIM0_KERNEL_SOURCE,
-                "gather_dim1_f32" => GATHER_DIM1_KERNEL_SOURCE,
-                "index_select_dim0_f32" => INDEX_SELECT_DIM0_KERNEL_SOURCE,
-                "index_select_dim1_f32" => INDEX_SELECT_DIM1_KERNEL_SOURCE,
-                "conv1d_f32" => CONV1D_KERNEL_SOURCE,
-                "conv2d_f32" => CONV2D_KERNEL_SOURCE,
-                "batch_norm_f32" => BATCH_NORM_KERNEL_SOURCE,
-                "conv2d_backward_input_f32" => CONV2D_BACKWARD_INPUT_KERNEL_SOURCE,
-                "embedding_backward_f32" => EMBEDDING_BACKWARD_KERNEL_SOURCE,
-                "batch_norm_backward_f32" => BATCH_NORM_BACKWARD_KERNEL_SOURCE,
-                "max_pool2d_f32" => MAX_POOL2D_KERNEL_SOURCE,
-                "avg_pool2d_f32" => AVG_POOL2D_KERNEL_SOURCE,
-                _ => BINARY_KERNEL_SOURCE,
-            };
-            return (source.to_string(), base_name.to_string());
-        }
-
-        // All non-F32 dtypes: use templates for everything
         let suffix = kt::dtype_suffix(dtype);
-        let func_name = if base_name.ends_with("_f32") {
-            format!("{}{}", &base_name[..base_name.len() - 4], suffix)
-        } else {
-            format!("{}{}", base_name, suffix)
-        };
+        let func_name = format!("{}{}", base_name, suffix);
 
         let source = match base_name {
             // Binary element-wise
@@ -2583,63 +1462,45 @@ impl KernelRegistry {
                     kt::unary_kernel_source(dtype)
                 }
             }
-            // Scalar mul
-            "scalar_mul_f32" => kt::scalar_mul_kernel_source(dtype),
-            // Pow, clamp
-            "pow_f32" => kt::pow_kernel_source(dtype),
-            "clamp_f32" => kt::clamp_kernel_source(dtype),
-            // GELU
-            "gelu_f32" => kt::gelu_kernel_source(dtype),
-            // Reduction ops
-            "softmax_f32" => kt::softmax_kernel_source(dtype),
-            "softmax_causal_f32" => kt::softmax_causal_kernel_source(dtype),
-            "argmax_f32" => kt::argmax_kernel_source(dtype),
-            "sum_f32" => kt::sum_kernel_source(dtype),
-            "mean_f32" => kt::mean_kernel_source(dtype),
-            "add_bias_f32" => kt::add_bias_kernel_source(dtype),
-            // Conditional/index ops
-            "where_f32" => kt::where_kernel_source(dtype),
-            "masked_fill_f32" => kt::masked_fill_kernel_source(dtype),
-            "triu_f32" => kt::triu_kernel_source(dtype),
-            "tril_f32" => kt::tril_kernel_source(dtype),
-            "gather_dim0_f32" => kt::gather_kernel_source(dtype, 0),
-            "gather_dim1_f32" => kt::gather_kernel_source(dtype, 1),
-            "index_select_dim0_f32" => kt::index_select_kernel_source(dtype, 0),
-            "index_select_dim1_f32" => kt::index_select_kernel_source(dtype, 1),
-            // Complex ops (matmul, layer_norm, embedding, CNN, backward)
-            "matmul_f32" => kt::matmul_kernel_source(dtype),
-            "layer_norm_f32" => kt::layer_norm_kernel_source(dtype),
-            "embedding_f32" => kt::embedding_kernel_source(dtype),
-            "conv1d_f32" => kt::conv1d_kernel_source(dtype),
-            "conv2d_f32" => kt::conv2d_kernel_source(dtype),
-            "batch_norm_f32" => kt::batch_norm_kernel_source(dtype),
-            "max_pool2d_f32" => kt::max_pool2d_kernel_source(dtype),
-            "avg_pool2d_f32" => kt::avg_pool2d_kernel_source(dtype),
-            "softmax_backward_f32" => kt::softmax_backward_kernel_source(dtype),
-            "layer_norm_backward_f32" => kt::layer_norm_backward_kernel_source(dtype),
-            "conv2d_backward_input_f32" => kt::conv2d_backward_input_kernel_source(dtype),
-            "embedding_backward_f32" => kt::embedding_backward_kernel_source(dtype),
-            "batch_norm_backward_f32" => kt::batch_norm_backward_kernel_source(dtype),
-            // Transpose / copy_strided
-            "transpose_f32" => kt::transpose_kernel_source(dtype),
-            "transpose_batched_f32" => kt::transpose_batched_kernel_source(dtype),
-            "copy_strided_f32" => kt::copy_strided_kernel_source(dtype),
-            // Shape ops (slice, concat) — use byte-copy by element size
-            "slice_dim0_f32" => kt::byte_copy_slice_dim0_source(dtype.size_bytes()),
-            "slice_dim1_f32" => kt::byte_copy_slice_dim1_source(dtype.size_bytes()),
-            "concat_dim0_f32" => kt::byte_copy_concat_dim0_source(dtype.size_bytes()),
-            "concat_dim1_f32" => kt::byte_copy_concat_dim1_source(dtype.size_bytes()),
-            // Fallback
+            "scalar_mul" => kt::scalar_mul_kernel_source(dtype),
+            "pow" => kt::pow_kernel_source(dtype),
+            "clamp" => kt::clamp_kernel_source(dtype),
+            "gelu" => kt::gelu_kernel_source(dtype),
+            "softmax" => kt::softmax_kernel_source(dtype),
+            "softmax_causal" => kt::softmax_causal_kernel_source(dtype),
+            "argmax" => kt::argmax_kernel_source(dtype),
+            "sum" => kt::sum_kernel_source(dtype),
+            "mean" => kt::mean_kernel_source(dtype),
+            "add_bias" => kt::add_bias_kernel_source(dtype),
+            "where" => kt::where_kernel_source(dtype),
+            "masked_fill" => kt::masked_fill_kernel_source(dtype),
+            "triu" => kt::triu_kernel_source(dtype),
+            "tril" => kt::tril_kernel_source(dtype),
+            "gather_dim0" => kt::gather_kernel_source(dtype, 0),
+            "gather_dim1" => kt::gather_kernel_source(dtype, 1),
+            "index_select_dim0" => kt::index_select_kernel_source(dtype, 0),
+            "index_select_dim1" => kt::index_select_kernel_source(dtype, 1),
+            "matmul" => kt::matmul_kernel_source(dtype),
+            "layer_norm" => kt::layer_norm_kernel_source(dtype),
+            "embedding" => kt::embedding_kernel_source(dtype),
+            "conv1d" => kt::conv1d_kernel_source(dtype),
+            "conv2d" => kt::conv2d_kernel_source(dtype),
+            "batch_norm" => kt::batch_norm_kernel_source(dtype),
+            "max_pool2d" => kt::max_pool2d_kernel_source(dtype),
+            "avg_pool2d" => kt::avg_pool2d_kernel_source(dtype),
+            "softmax_backward" => kt::softmax_backward_kernel_source(dtype),
+            "layer_norm_backward" => kt::layer_norm_backward_kernel_source(dtype),
+            "conv2d_backward_input" => kt::conv2d_backward_input_kernel_source(dtype),
+            "embedding_backward" => kt::embedding_backward_kernel_source(dtype),
+            "batch_norm_backward" => kt::batch_norm_backward_kernel_source(dtype),
+            "transpose" => kt::transpose_kernel_source(dtype),
+            "transpose_batched" => kt::transpose_batched_kernel_source(dtype),
+            "copy_strided" => kt::copy_strided_kernel_source(dtype),
+            "slice_dim0" => return (kt::byte_copy_slice_dim0_source(dtype.size_bytes()), format!("slice_dim0_bytes{}", dtype.size_bytes())),
+            "slice_dim1" => return (kt::byte_copy_slice_dim1_source(dtype.size_bytes()), format!("slice_dim1_bytes{}", dtype.size_bytes())),
+            "concat_dim0" => return (kt::byte_copy_concat_dim0_source(dtype.size_bytes()), format!("concat_dim0_bytes{}", dtype.size_bytes())),
+            "concat_dim1" => return (kt::byte_copy_concat_dim1_source(dtype.size_bytes()), format!("concat_dim1_bytes{}", dtype.size_bytes())),
             _ => kt::binary_kernel_source(dtype),
-        };
-
-        // For byte-copy shape ops, the function name uses the byte size, not the dtype suffix
-        let func_name = match base_name {
-            "slice_dim0_f32" => format!("slice_dim0_bytes{}", dtype.size_bytes()),
-            "slice_dim1_f32" => format!("slice_dim1_bytes{}", dtype.size_bytes()),
-            "concat_dim0_f32" => format!("concat_dim0_bytes{}", dtype.size_bytes()),
-            "concat_dim1_f32" => format!("concat_dim1_bytes{}", dtype.size_bytes()),
-            _ => func_name,
         };
 
         (source, func_name)
@@ -2655,8 +1516,7 @@ impl KernelRegistry {
         buf_out: &Buffer,
         element_count: usize,
     ) -> Result<()> {
-        let pipeline = self.get_or_create(device, BINARY_KERNEL_SOURCE, function_name)?;
-        pipeline.dispatch_elementwise(buf_a, buf_b, buf_out, element_count)
+        self.dispatch_binary_typed(device, function_name, DType::Float32, buf_a, buf_b, buf_out, element_count)
     }
 
     /// Dispatch a binary op with dtype-aware kernel selection.
@@ -2684,8 +1544,7 @@ impl KernelRegistry {
         buf_out: &Buffer,
         element_count: usize,
     ) -> Result<()> {
-        let pipeline = self.get_or_create(device, UNARY_KERNEL_SOURCE, function_name)?;
-        pipeline.dispatch_unary(buf_input, buf_out, element_count)
+        self.dispatch_unary_typed(device, function_name, DType::Float32, buf_input, buf_out, element_count)
     }
 
     /// Dispatch a unary op with dtype-aware kernel selection.
@@ -2714,8 +1573,7 @@ impl KernelRegistry {
         n: usize,
         k: usize,
     ) -> Result<()> {
-        let pipeline = self.get_or_create(device, MATMUL_KERNEL_SOURCE, "matmul_f32")?;
-        pipeline.dispatch_matmul(buf_a, buf_b, buf_c, m, n, k)
+        self.dispatch_matmul_typed(device, DType::Float32, buf_a, buf_b, buf_c, m, n, k)
     }
 
     /// Dispatch matmul with dtype-aware kernel selection.
@@ -2730,7 +1588,7 @@ impl KernelRegistry {
         n: usize,
         k: usize,
     ) -> Result<()> {
-        let (source, func) = Self::resolve_kernel("matmul_f32", dtype);
+        let (source, func) = Self::resolve_kernel("matmul", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_matmul(buf_a, buf_b, buf_c, m, n, k)
     }
@@ -2750,7 +1608,7 @@ impl KernelRegistry {
         a_batch_stride: usize,
         b_batch_stride: usize,
     ) -> Result<()> {
-        let (source, func) = Self::resolve_kernel("matmul_f32", dtype);
+        let (source, func) = Self::resolve_kernel("matmul", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_matmul_batched(buf_a, buf_b, buf_c, m, n, k, batch_size, a_batch_stride, b_batch_stride)
     }
@@ -2790,15 +1648,14 @@ impl KernelRegistry {
         &self, device: &Device, buf_input: &Buffer, buf_output: &Buffer,
         rows: usize, cols: usize,
     ) -> Result<()> {
-        let pipeline = self.get_or_create(device, SOFTMAX_KERNEL_SOURCE, "softmax_f32")?;
-        pipeline.dispatch_softmax(buf_input, buf_output, rows, cols)
+        self.dispatch_softmax_typed(device, DType::Float32, buf_input, buf_output, rows, cols)
     }
 
     pub fn dispatch_softmax_typed(
         &self, device: &Device, dtype: DType, buf_input: &Buffer, buf_output: &Buffer,
         rows: usize, cols: usize,
     ) -> Result<()> {
-        let (source, func) = Self::resolve_kernel("softmax_f32", dtype);
+        let (source, func) = Self::resolve_kernel("softmax", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_softmax(buf_input, buf_output, rows, cols)
     }
@@ -2807,15 +1664,14 @@ impl KernelRegistry {
         &self, device: &Device, buf_input: &Buffer, buf_output: &Buffer,
         rows: usize, cols: usize,
     ) -> Result<()> {
-        let pipeline = self.get_or_create(device, TRANSPOSE_KERNEL_SOURCE, "transpose_f32")?;
-        pipeline.dispatch_transpose(buf_input, buf_output, rows, cols)
+        self.dispatch_transpose_typed(device, DType::Float32, buf_input, buf_output, rows, cols)
     }
 
     pub fn dispatch_transpose_typed(
         &self, device: &Device, dtype: DType, buf_input: &Buffer, buf_output: &Buffer,
         rows: usize, cols: usize,
     ) -> Result<()> {
-        let (source, func) = Self::resolve_kernel("transpose_f32", dtype);
+        let (source, func) = Self::resolve_kernel("transpose", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_transpose(buf_input, buf_output, rows, cols)
     }
@@ -2824,7 +1680,7 @@ impl KernelRegistry {
         &self, device: &Device, dtype: DType, buf_input: &Buffer, buf_output: &Buffer,
         batch_size: usize, rows: usize, cols: usize,
     ) -> Result<()> {
-        let (source, func) = Self::resolve_kernel("transpose_batched_f32", dtype);
+        let (source, func) = Self::resolve_kernel("transpose_batched", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_transpose_batched(buf_input, buf_output, batch_size, rows, cols)
     }
@@ -2833,15 +1689,14 @@ impl KernelRegistry {
         &self, device: &Device, buf_input: &Buffer, buf_output: &Buffer,
         scale: f32, element_count: usize,
     ) -> Result<()> {
-        let pipeline = self.get_or_create(device, SCALAR_MUL_KERNEL_SOURCE, "scalar_mul_f32")?;
-        pipeline.dispatch_scalar_mul(buf_input, buf_output, scale, element_count)
+        self.dispatch_scalar_mul_typed(device, DType::Float32, buf_input, buf_output, scale, element_count)
     }
 
     pub fn dispatch_scalar_mul_typed(
         &self, device: &Device, dtype: DType, buf_input: &Buffer, buf_output: &Buffer,
         scale: f32, element_count: usize,
     ) -> Result<()> {
-        let (source, func) = Self::resolve_kernel("scalar_mul_f32", dtype);
+        let (source, func) = Self::resolve_kernel("scalar_mul", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_scalar_mul(buf_input, buf_output, scale, element_count)
     }
@@ -2852,7 +1707,7 @@ impl KernelRegistry {
         buf_out: &Buffer, out_shape: &[u32; MAX_DIMS],
         ndim: u32, numel: u32, exponent: f32,
     ) -> Result<()> {
-        let (source, func) = Self::resolve_kernel("pow_f32", dtype);
+        let (source, func) = Self::resolve_kernel("pow", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_pow_nd(buf_input, in_strides, buf_out, out_shape, ndim, numel, exponent)
     }
@@ -2863,7 +1718,7 @@ impl KernelRegistry {
         buf_out: &Buffer, out_shape: &[u32; MAX_DIMS],
         ndim: u32, numel: u32, exponent: f32,
     ) -> Result<*mut std::ffi::c_void> {
-        let (source, func) = Self::resolve_kernel("pow_f32", dtype);
+        let (source, func) = Self::resolve_kernel("pow", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_pow_nd_nb(queue, buf_input, in_strides, buf_out, out_shape, ndim, numel, exponent)
     }
@@ -2874,7 +1729,7 @@ impl KernelRegistry {
         buf_out: &Buffer, out_shape: &[u32; MAX_DIMS],
         ndim: u32, numel: u32, min_val: f32, max_val: f32,
     ) -> Result<()> {
-        let (source, func) = Self::resolve_kernel("clamp_f32", dtype);
+        let (source, func) = Self::resolve_kernel("clamp", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_clamp_nd(buf_input, in_strides, buf_out, out_shape, ndim, numel, min_val, max_val)
     }
@@ -2885,7 +1740,7 @@ impl KernelRegistry {
         buf_out: &Buffer, out_shape: &[u32; MAX_DIMS],
         ndim: u32, numel: u32, min_val: f32, max_val: f32,
     ) -> Result<*mut std::ffi::c_void> {
-        let (source, func) = Self::resolve_kernel("clamp_f32", dtype);
+        let (source, func) = Self::resolve_kernel("clamp", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_clamp_nd_nb(queue, buf_input, in_strides, buf_out, out_shape, ndim, numel, min_val, max_val)
     }
@@ -2900,7 +1755,7 @@ impl KernelRegistry {
         buf_out: &Buffer, out_shape: &[u32; MAX_DIMS],
         ndim: u32, numel: u32,
     ) -> Result<()> {
-        let (source, func) = Self::resolve_kernel("where_f32", dtype);
+        let (source, func) = Self::resolve_kernel("where", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_where_nd(buf_cond, cond_strides, buf_x, x_strides, buf_y, y_strides, buf_out, out_shape, ndim, numel)
     }
@@ -2913,7 +1768,7 @@ impl KernelRegistry {
         buf_out: &Buffer, out_shape: &[u32; MAX_DIMS],
         ndim: u32, numel: u32,
     ) -> Result<*mut std::ffi::c_void> {
-        let (source, func) = Self::resolve_kernel("where_f32", dtype);
+        let (source, func) = Self::resolve_kernel("where", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_where_nd_nb(queue, buf_cond, cond_strides, buf_x, x_strides, buf_y, y_strides, buf_out, out_shape, ndim, numel)
     }
@@ -2927,7 +1782,7 @@ impl KernelRegistry {
         buf_out: &Buffer, out_shape: &[u32; MAX_DIMS],
         ndim: u32, numel: u32, fill_value: f32,
     ) -> Result<()> {
-        let (source, func) = Self::resolve_kernel("masked_fill_f32", dtype);
+        let (source, func) = Self::resolve_kernel("masked_fill", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_masked_fill_nd(buf_input, in_strides, buf_mask, mask_strides, buf_out, out_shape, ndim, numel, fill_value)
     }
@@ -2939,7 +1794,7 @@ impl KernelRegistry {
         buf_out: &Buffer, out_shape: &[u32; MAX_DIMS],
         ndim: u32, numel: u32, fill_value: f32,
     ) -> Result<*mut std::ffi::c_void> {
-        let (source, func) = Self::resolve_kernel("masked_fill_f32", dtype);
+        let (source, func) = Self::resolve_kernel("masked_fill", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_masked_fill_nd_nb(queue, buf_input, in_strides, buf_mask, mask_strides, buf_out, out_shape, ndim, numel, fill_value)
     }
@@ -2951,7 +1806,7 @@ impl KernelRegistry {
         buf_input: &Buffer, buf_out: &Buffer,
         batch_size: usize, rows: usize, cols: usize, diagonal: i32,
     ) -> Result<()> {
-        let (source, func) = Self::resolve_kernel("triu_f32", dtype);
+        let (source, func) = Self::resolve_kernel("triu", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_triangular(buf_input, buf_out, batch_size, rows, cols, diagonal)
     }
@@ -2961,7 +1816,7 @@ impl KernelRegistry {
         buf_input: &Buffer, buf_out: &Buffer,
         batch_size: usize, rows: usize, cols: usize, diagonal: i32,
     ) -> Result<*mut std::ffi::c_void> {
-        let (source, func) = Self::resolve_kernel("triu_f32", dtype);
+        let (source, func) = Self::resolve_kernel("triu", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_triangular_nb(queue, buf_input, buf_out, batch_size, rows, cols, diagonal)
     }
@@ -2971,7 +1826,7 @@ impl KernelRegistry {
         buf_input: &Buffer, buf_out: &Buffer,
         batch_size: usize, rows: usize, cols: usize, diagonal: i32,
     ) -> Result<()> {
-        let (source, func) = Self::resolve_kernel("tril_f32", dtype);
+        let (source, func) = Self::resolve_kernel("tril", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_triangular(buf_input, buf_out, batch_size, rows, cols, diagonal)
     }
@@ -2981,7 +1836,7 @@ impl KernelRegistry {
         buf_input: &Buffer, buf_out: &Buffer,
         batch_size: usize, rows: usize, cols: usize, diagonal: i32,
     ) -> Result<*mut std::ffi::c_void> {
-        let (source, func) = Self::resolve_kernel("tril_f32", dtype);
+        let (source, func) = Self::resolve_kernel("tril", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_triangular_nb(queue, buf_input, buf_out, batch_size, rows, cols, diagonal)
     }
@@ -2995,7 +1850,7 @@ impl KernelRegistry {
         buf_out: &Buffer,
         element_count: usize,
     ) -> Result<()> {
-        let (source, func) = Self::resolve_kernel("gelu_f32", dtype);
+        let (source, func) = Self::resolve_kernel("gelu", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_unary(buf_input, buf_out, element_count)
     }
@@ -3013,7 +1868,7 @@ impl KernelRegistry {
         cols: usize,
         eps: f32,
     ) -> Result<()> {
-        let (source, func) = Self::resolve_kernel("layer_norm_f32", dtype);
+        let (source, func) = Self::resolve_kernel("layer_norm", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_layer_norm(buf_input, buf_gamma, buf_beta, buf_out, rows, cols, eps)
     }
@@ -3023,7 +1878,7 @@ impl KernelRegistry {
         buf_grad_output: &Buffer, buf_output: &Buffer, buf_grad_input: &Buffer,
         rows: usize, cols: usize,
     ) -> Result<()> {
-        let (source, func) = Self::resolve_kernel("softmax_backward_f32", dtype);
+        let (source, func) = Self::resolve_kernel("softmax_backward", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_softmax_backward(buf_grad_output, buf_output, buf_grad_input, rows, cols)
     }
@@ -3033,7 +1888,7 @@ impl KernelRegistry {
         buf_grad_output: &Buffer, buf_input: &Buffer, buf_gamma: &Buffer, buf_grad_input: &Buffer,
         rows: usize, cols: usize, eps: f32,
     ) -> Result<()> {
-        let (source, func) = Self::resolve_kernel("layer_norm_backward_f32", dtype);
+        let (source, func) = Self::resolve_kernel("layer_norm_backward", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_layer_norm_backward(buf_grad_output, buf_input, buf_gamma, buf_grad_input, rows, cols, eps)
     }
@@ -3049,7 +1904,7 @@ impl KernelRegistry {
         seq_len: usize,
         embed_dim: usize,
     ) -> Result<()> {
-        let (source, func) = Self::resolve_kernel("embedding_f32", dtype);
+        let (source, func) = Self::resolve_kernel("embedding", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_embedding(buf_weights, buf_indices, buf_out, seq_len, embed_dim)
     }
@@ -3060,7 +1915,7 @@ impl KernelRegistry {
         &self, device: &Device, dtype: DType, buf_input: &Buffer, buf_output: &Buffer,
         cols: usize, start_row: usize, out_rows: usize,
     ) -> Result<()> {
-        let (source, func) = Self::resolve_kernel("slice_dim0_f32", dtype);
+        let (source, func) = Self::resolve_kernel("slice_dim0", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_slice_dim0(buf_input, buf_output, cols, start_row, out_rows)
     }
@@ -3069,7 +1924,7 @@ impl KernelRegistry {
         &self, device: &Device, dtype: DType, buf_input: &Buffer, buf_output: &Buffer,
         in_cols: usize, out_cols: usize, start_col: usize, rows: usize,
     ) -> Result<()> {
-        let (source, func) = Self::resolve_kernel("slice_dim1_f32", dtype);
+        let (source, func) = Self::resolve_kernel("slice_dim1", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_slice_dim1(buf_input, buf_output, in_cols, out_cols, start_col, rows)
     }
@@ -3078,7 +1933,7 @@ impl KernelRegistry {
         &self, device: &Device, dtype: DType, buf_a: &Buffer, buf_b: &Buffer, buf_output: &Buffer,
         rows_a: usize, cols: usize, total_rows: usize,
     ) -> Result<()> {
-        let (source, func) = Self::resolve_kernel("concat_dim0_f32", dtype);
+        let (source, func) = Self::resolve_kernel("concat_dim0", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_concat_dim0(buf_a, buf_b, buf_output, rows_a, cols, total_rows)
     }
@@ -3087,7 +1942,7 @@ impl KernelRegistry {
         &self, device: &Device, dtype: DType, buf_a: &Buffer, buf_b: &Buffer, buf_output: &Buffer,
         rows: usize, cols_a: usize, cols_b: usize,
     ) -> Result<()> {
-        let (source, func) = Self::resolve_kernel("concat_dim1_f32", dtype);
+        let (source, func) = Self::resolve_kernel("concat_dim1", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_concat_dim1(buf_a, buf_b, buf_output, rows, cols_a, cols_b)
     }
@@ -3096,7 +1951,7 @@ impl KernelRegistry {
         &self, device: &Device, dtype: DType, buf_input: &Buffer, buf_bias: &Buffer, buf_output: &Buffer,
         rows: usize, cols: usize,
     ) -> Result<()> {
-        let (source, func) = Self::resolve_kernel("add_bias_f32", dtype);
+        let (source, func) = Self::resolve_kernel("add_bias", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_add_bias(buf_input, buf_bias, buf_output, rows, cols)
     }
@@ -3105,7 +1960,7 @@ impl KernelRegistry {
         &self, device: &Device, dtype: DType, buf_input: &Buffer, buf_output: &Buffer,
         batch_size: usize, rows: usize, cols: usize,
     ) -> Result<()> {
-        let (source, func) = Self::resolve_kernel("softmax_causal_f32", dtype);
+        let (source, func) = Self::resolve_kernel("softmax_causal", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_softmax_causal(buf_input, buf_output, batch_size, rows, cols)
     }
@@ -3114,7 +1969,7 @@ impl KernelRegistry {
         &self, device: &Device, dtype: DType, buf_input: &Buffer, buf_output: &Buffer,
         rows: usize, cols: usize,
     ) -> Result<()> {
-        let (source, func) = Self::resolve_kernel("sum_f32", dtype);
+        let (source, func) = Self::resolve_kernel("sum", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_softmax(buf_input, buf_output, rows, cols)
     }
@@ -3123,7 +1978,7 @@ impl KernelRegistry {
         &self, device: &Device, dtype: DType, buf_input: &Buffer, buf_output: &Buffer,
         rows: usize, cols: usize,
     ) -> Result<()> {
-        let (source, func) = Self::resolve_kernel("mean_f32", dtype);
+        let (source, func) = Self::resolve_kernel("mean", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_softmax(buf_input, buf_output, rows, cols)
     }
@@ -3132,7 +1987,7 @@ impl KernelRegistry {
         &self, device: &Device, input_dtype: DType, buf_input: &Buffer, buf_output: &Buffer,
         rows: usize, cols: usize,
     ) -> Result<()> {
-        let (source, func) = Self::resolve_kernel("argmax_f32", input_dtype);
+        let (source, func) = Self::resolve_kernel("argmax", input_dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         // Reuse softmax dispatch (same buffer layout: input, output, rows, cols; 1D dispatch per row)
         pipeline.dispatch_softmax(buf_input, buf_output, rows, cols)
@@ -3144,7 +1999,7 @@ impl KernelRegistry {
         &self, device: &Device, dtype: DType, queue: *mut std::ffi::c_void,
         buf_input: &Buffer, buf_output: &Buffer, cols: usize, start_row: usize, out_rows: usize,
     ) -> Result<*mut std::ffi::c_void> {
-        let (source, func) = Self::resolve_kernel("slice_dim0_f32", dtype);
+        let (source, func) = Self::resolve_kernel("slice_dim0", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_slice_dim0_nb(queue, buf_input, buf_output, cols, start_row, out_rows)
     }
@@ -3153,7 +2008,7 @@ impl KernelRegistry {
         &self, device: &Device, dtype: DType, queue: *mut std::ffi::c_void,
         buf_input: &Buffer, buf_output: &Buffer, in_cols: usize, out_cols: usize, start_col: usize, rows: usize,
     ) -> Result<*mut std::ffi::c_void> {
-        let (source, func) = Self::resolve_kernel("slice_dim1_f32", dtype);
+        let (source, func) = Self::resolve_kernel("slice_dim1", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_slice_dim1_nb(queue, buf_input, buf_output, in_cols, out_cols, start_col, rows)
     }
@@ -3162,7 +2017,7 @@ impl KernelRegistry {
         &self, device: &Device, dtype: DType, queue: *mut std::ffi::c_void,
         buf_a: &Buffer, buf_b: &Buffer, buf_output: &Buffer, rows_a: usize, cols: usize, total_rows: usize,
     ) -> Result<*mut std::ffi::c_void> {
-        let (source, func) = Self::resolve_kernel("concat_dim0_f32", dtype);
+        let (source, func) = Self::resolve_kernel("concat_dim0", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_concat_dim0_nb(queue, buf_a, buf_b, buf_output, rows_a, cols, total_rows)
     }
@@ -3171,7 +2026,7 @@ impl KernelRegistry {
         &self, device: &Device, dtype: DType, queue: *mut std::ffi::c_void,
         buf_a: &Buffer, buf_b: &Buffer, buf_output: &Buffer, rows: usize, cols_a: usize, cols_b: usize,
     ) -> Result<*mut std::ffi::c_void> {
-        let (source, func) = Self::resolve_kernel("concat_dim1_f32", dtype);
+        let (source, func) = Self::resolve_kernel("concat_dim1", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_concat_dim1_nb(queue, buf_a, buf_b, buf_output, rows, cols_a, cols_b)
     }
@@ -3180,7 +2035,7 @@ impl KernelRegistry {
         &self, device: &Device, dtype: DType, queue: *mut std::ffi::c_void,
         buf_input: &Buffer, buf_bias: &Buffer, buf_output: &Buffer, rows: usize, cols: usize,
     ) -> Result<*mut std::ffi::c_void> {
-        let (source, func) = Self::resolve_kernel("add_bias_f32", dtype);
+        let (source, func) = Self::resolve_kernel("add_bias", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_add_bias_nb(queue, buf_input, buf_bias, buf_output, rows, cols)
     }
@@ -3189,7 +2044,7 @@ impl KernelRegistry {
         &self, device: &Device, dtype: DType, queue: *mut std::ffi::c_void,
         buf_input: &Buffer, buf_output: &Buffer, batch_size: usize, rows: usize, cols: usize,
     ) -> Result<*mut std::ffi::c_void> {
-        let (source, func) = Self::resolve_kernel("softmax_causal_f32", dtype);
+        let (source, func) = Self::resolve_kernel("softmax_causal", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_softmax_causal_nb(queue, buf_input, buf_output, batch_size, rows, cols)
     }
@@ -3198,7 +2053,7 @@ impl KernelRegistry {
         &self, device: &Device, dtype: DType, queue: *mut std::ffi::c_void,
         buf_input: &Buffer, buf_output: &Buffer, rows: usize, cols: usize,
     ) -> Result<*mut std::ffi::c_void> {
-        let (source, func) = Self::resolve_kernel("sum_f32", dtype);
+        let (source, func) = Self::resolve_kernel("sum", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_softmax_nb(queue, buf_input, buf_output, rows, cols)
     }
@@ -3207,7 +2062,7 @@ impl KernelRegistry {
         &self, device: &Device, dtype: DType, queue: *mut std::ffi::c_void,
         buf_input: &Buffer, buf_output: &Buffer, rows: usize, cols: usize,
     ) -> Result<*mut std::ffi::c_void> {
-        let (source, func) = Self::resolve_kernel("mean_f32", dtype);
+        let (source, func) = Self::resolve_kernel("mean", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_softmax_nb(queue, buf_input, buf_output, rows, cols)
     }
@@ -3216,7 +2071,7 @@ impl KernelRegistry {
         &self, device: &Device, input_dtype: DType, queue: *mut std::ffi::c_void,
         buf_input: &Buffer, buf_output: &Buffer, rows: usize, cols: usize,
     ) -> Result<*mut std::ffi::c_void> {
-        let (source, func) = Self::resolve_kernel("argmax_f32", input_dtype);
+        let (source, func) = Self::resolve_kernel("argmax", input_dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_softmax_nb(queue, buf_input, buf_output, rows, cols)
     }
@@ -3227,7 +2082,7 @@ impl KernelRegistry {
         &self, device: &Device, dtype: DType, queue: *mut std::ffi::c_void,
         buf_input: &Buffer, buf_out: &Buffer, element_count: usize,
     ) -> Result<*mut std::ffi::c_void> {
-        let (source, func) = Self::resolve_kernel("gelu_f32", dtype);
+        let (source, func) = Self::resolve_kernel("gelu", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_unary_nb(queue, buf_input, buf_out, element_count)
     }
@@ -3237,7 +2092,7 @@ impl KernelRegistry {
         buf_input: &Buffer, buf_gamma: &Buffer, buf_beta: &Buffer, buf_out: &Buffer,
         rows: usize, cols: usize, eps: f32,
     ) -> Result<*mut std::ffi::c_void> {
-        let (source, func) = Self::resolve_kernel("layer_norm_f32", dtype);
+        let (source, func) = Self::resolve_kernel("layer_norm", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_layer_norm_nb(queue, buf_input, buf_gamma, buf_beta, buf_out, rows, cols, eps)
     }
@@ -3247,7 +2102,7 @@ impl KernelRegistry {
         buf_grad_output: &Buffer, buf_output: &Buffer, buf_grad_input: &Buffer,
         rows: usize, cols: usize,
     ) -> Result<*mut std::ffi::c_void> {
-        let (source, func) = Self::resolve_kernel("softmax_backward_f32", dtype);
+        let (source, func) = Self::resolve_kernel("softmax_backward", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_softmax_backward_nb(queue, buf_grad_output, buf_output, buf_grad_input, rows, cols)
     }
@@ -3257,7 +2112,7 @@ impl KernelRegistry {
         buf_grad_output: &Buffer, buf_input: &Buffer, buf_gamma: &Buffer, buf_grad_input: &Buffer,
         rows: usize, cols: usize, eps: f32,
     ) -> Result<*mut std::ffi::c_void> {
-        let (source, func) = Self::resolve_kernel("layer_norm_backward_f32", dtype);
+        let (source, func) = Self::resolve_kernel("layer_norm_backward", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_layer_norm_backward_nb(queue, buf_grad_output, buf_input, buf_gamma, buf_grad_input, rows, cols, eps)
     }
@@ -3267,7 +2122,7 @@ impl KernelRegistry {
         buf_weights: &Buffer, buf_indices: &Buffer, buf_out: &Buffer,
         seq_len: usize, embed_dim: usize,
     ) -> Result<*mut std::ffi::c_void> {
-        let (source, func) = Self::resolve_kernel("embedding_f32", dtype);
+        let (source, func) = Self::resolve_kernel("embedding", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_embedding_nb(queue, buf_weights, buf_indices, buf_out, seq_len, embed_dim)
     }
@@ -3294,7 +2149,7 @@ impl KernelRegistry {
         &self, device: &Device, dtype: DType, queue: *mut std::ffi::c_void,
         buf_a: &Buffer, buf_b: &Buffer, buf_c: &Buffer, m: usize, n: usize, k: usize,
     ) -> Result<*mut std::ffi::c_void> {
-        let (source, func) = Self::resolve_kernel("matmul_f32", dtype);
+        let (source, func) = Self::resolve_kernel("matmul", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_matmul_nb(queue, buf_a, buf_b, buf_c, m, n, k)
     }
@@ -3305,7 +2160,7 @@ impl KernelRegistry {
         m: usize, n: usize, k: usize,
         batch_size: usize, a_batch_stride: usize, b_batch_stride: usize,
     ) -> Result<*mut std::ffi::c_void> {
-        let (source, func) = Self::resolve_kernel("matmul_f32", dtype);
+        let (source, func) = Self::resolve_kernel("matmul", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_matmul_batched_nb(queue, buf_a, buf_b, buf_c, m, n, k, batch_size, a_batch_stride, b_batch_stride)
     }
@@ -3314,7 +2169,7 @@ impl KernelRegistry {
         &self, device: &Device, dtype: DType, queue: *mut std::ffi::c_void,
         buf_input: &Buffer, buf_output: &Buffer, rows: usize, cols: usize,
     ) -> Result<*mut std::ffi::c_void> {
-        let (source, func) = Self::resolve_kernel("softmax_f32", dtype);
+        let (source, func) = Self::resolve_kernel("softmax", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_softmax_nb(queue, buf_input, buf_output, rows, cols)
     }
@@ -3323,7 +2178,7 @@ impl KernelRegistry {
         &self, device: &Device, dtype: DType, queue: *mut std::ffi::c_void,
         buf_input: &Buffer, buf_output: &Buffer, rows: usize, cols: usize,
     ) -> Result<*mut std::ffi::c_void> {
-        let (source, func) = Self::resolve_kernel("transpose_f32", dtype);
+        let (source, func) = Self::resolve_kernel("transpose", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_transpose_nb(queue, buf_input, buf_output, rows, cols)
     }
@@ -3332,7 +2187,7 @@ impl KernelRegistry {
         &self, device: &Device, dtype: DType, queue: *mut std::ffi::c_void,
         buf_input: &Buffer, buf_output: &Buffer, batch_size: usize, rows: usize, cols: usize,
     ) -> Result<*mut std::ffi::c_void> {
-        let (source, func) = Self::resolve_kernel("transpose_batched_f32", dtype);
+        let (source, func) = Self::resolve_kernel("transpose_batched", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_transpose_batched_nb(queue, buf_input, buf_output, batch_size, rows, cols)
     }
@@ -3341,7 +2196,7 @@ impl KernelRegistry {
         &self, device: &Device, dtype: DType, queue: *mut std::ffi::c_void,
         buf_input: &Buffer, buf_output: &Buffer, scale: f32, element_count: usize,
     ) -> Result<*mut std::ffi::c_void> {
-        let (source, func) = Self::resolve_kernel("scalar_mul_f32", dtype);
+        let (source, func) = Self::resolve_kernel("scalar_mul", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_scalar_mul_nb(queue, buf_input, buf_output, scale, element_count)
     }
@@ -3450,7 +2305,7 @@ impl KernelRegistry {
         buf_input: &Buffer, buf_indices: &Buffer, buf_out: &Buffer,
         num_indices: usize, cols: usize,
     ) -> Result<()> {
-        let (source, func) = Self::resolve_kernel("index_select_dim0_f32", dtype);
+        let (source, func) = Self::resolve_kernel("index_select_dim0", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_index_select_dim0(buf_input, buf_indices, buf_out, num_indices, cols)
     }
@@ -3461,7 +2316,7 @@ impl KernelRegistry {
         buf_input: &Buffer, buf_indices: &Buffer, buf_out: &Buffer,
         num_indices: usize, cols: usize,
     ) -> Result<*mut std::ffi::c_void> {
-        let (source, func) = Self::resolve_kernel("index_select_dim0_f32", dtype);
+        let (source, func) = Self::resolve_kernel("index_select_dim0", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_index_select_dim0_nb(queue, buf_input, buf_indices, buf_out, num_indices, cols)
     }
@@ -3471,7 +2326,7 @@ impl KernelRegistry {
         buf_input: &Buffer, buf_indices: &Buffer, buf_out: &Buffer,
         rows: usize, in_cols: usize, num_indices: usize,
     ) -> Result<()> {
-        let (source, func) = Self::resolve_kernel("index_select_dim1_f32", dtype);
+        let (source, func) = Self::resolve_kernel("index_select_dim1", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_index_select_dim1(buf_input, buf_indices, buf_out, rows, in_cols, num_indices)
     }
@@ -3482,7 +2337,7 @@ impl KernelRegistry {
         buf_input: &Buffer, buf_indices: &Buffer, buf_out: &Buffer,
         rows: usize, in_cols: usize, num_indices: usize,
     ) -> Result<*mut std::ffi::c_void> {
-        let (source, func) = Self::resolve_kernel("index_select_dim1_f32", dtype);
+        let (source, func) = Self::resolve_kernel("index_select_dim1", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_index_select_dim1_nb(queue, buf_input, buf_indices, buf_out, rows, in_cols, num_indices)
     }

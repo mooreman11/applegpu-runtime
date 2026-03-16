@@ -281,8 +281,9 @@ impl LazyRuntime {
                 padding.1 as u32,    // pad_w
             ];
             let grid_y = out_dims[2] as u32 * w_dims[1] as u32;
+            let (k_src, k_fn) = KernelRegistry::resolve_kernel("conv2d_backward_input", dtype);
             REGISTRY.dispatch_cnn_3d(
-                device, crate::compute::CONV2D_BACKWARD_INPUT_KERNEL_SOURCE, "conv2d_backward_input_f32",
+                device, &k_src, &k_fn,
                 &[&grad_output.buffer, &weight.buffer], &out.buffer,
                 &uint_params, &[], (out_dims[3] as u32, grid_y, go_dims[0] as u32),
             )?;
@@ -299,8 +300,9 @@ impl LazyRuntime {
             let seq_len = indices.meta.layout.shape.numel();
             let embed_dim = node.out_shape.dims()[1];
             let uint_params: Vec<u32> = vec![seq_len as u32, embed_dim as u32];
+            let (k_src, k_fn) = KernelRegistry::resolve_kernel("embedding_backward", dtype);
             REGISTRY.dispatch_cnn_3d(
-                device, crate::compute::EMBEDDING_BACKWARD_KERNEL_SOURCE, "embedding_backward_f32",
+                device, &k_src, &k_fn,
                 &[&grad_output.buffer, &indices.buffer], &out.buffer,
                 &uint_params, &[], (embed_dim as u32, seq_len as u32, 1),
             )?;
@@ -319,8 +321,9 @@ impl LazyRuntime {
             let spatial: usize = in_dims[2..].iter().product();
             let uint_params: Vec<u32> = vec![batch as u32, channels as u32, spatial as u32];
             let float_params: Vec<f32> = vec![eps];
+            let (k_src, k_fn) = KernelRegistry::resolve_kernel("batch_norm_backward", dtype);
             REGISTRY.dispatch_cnn_3d(
-                device, crate::compute::BATCH_NORM_BACKWARD_KERNEL_SOURCE, "batch_norm_backward_f32",
+                device, &k_src, &k_fn,
                 &[&grad_output.buffer, &weight.buffer, &running_var.buffer],
                 &out.buffer, &uint_params, &float_params,
                 (spatial as u32, channels as u32, batch as u32),
@@ -352,7 +355,7 @@ impl LazyRuntime {
                 let ndim_u32 = ndim as u32;
                 let numel = node.out_shape.numel() as u32;
                 REGISTRY.dispatch_unary_nd_typed(
-                    device, "copy_strided_f32", dtype,
+                    device, "copy_strided", dtype,
                     &input.buffer, &in_strides, &out.buffer, &out_shape_u32, ndim_u32, numel,
                 )?;
             }
@@ -463,7 +466,7 @@ impl LazyRuntime {
             let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
             let input = self.get_tensor(node.inputs[0])?;
             REGISTRY.dispatch_unary_nd_typed(
-                device, "gelu_f32", dtype,
+                device, "gelu", dtype,
                 &input.buffer, &in_strides, &out.buffer, &out_shape_u32, ndim, numel,
             )?;
             return Ok(out);
@@ -514,8 +517,9 @@ impl LazyRuntime {
                 stride as u32,
                 padding as u32,
             ];
+            let (k_src, k_fn) = KernelRegistry::resolve_kernel("conv1d", dtype);
             REGISTRY.dispatch_cnn_3d(
-                device, crate::compute::CONV1D_KERNEL_SOURCE, "conv1d_f32",
+                device, &k_src, &k_fn,
                 &[&input.buffer, &weight.buffer], &out.buffer,
                 &uint_params, &[], (out_dims[2] as u32, w_dims[0] as u32, in_dims[0] as u32),
             )?;
@@ -547,8 +551,9 @@ impl LazyRuntime {
             ];
             // Grid: (out_w, out_h * out_channels, batch)
             let grid_y = out_dims[2] as u32 * w_dims[0] as u32;
+            let (k_src, k_fn) = KernelRegistry::resolve_kernel("conv2d", dtype);
             REGISTRY.dispatch_cnn_3d(
-                device, crate::compute::CONV2D_KERNEL_SOURCE, "conv2d_f32",
+                device, &k_src, &k_fn,
                 &[&input.buffer, &weight.buffer], &out.buffer,
                 &uint_params, &[], (out_dims[3] as u32, grid_y, in_dims[0] as u32),
             )?;
@@ -573,8 +578,9 @@ impl LazyRuntime {
                 spatial as u32,
             ];
             let float_params: Vec<f32> = vec![eps];
+            let (k_src, k_fn) = KernelRegistry::resolve_kernel("batch_norm", dtype);
             REGISTRY.dispatch_cnn_3d(
-                device, crate::compute::BATCH_NORM_KERNEL_SOURCE, "batch_norm_f32",
+                device, &k_src, &k_fn,
                 &[&input.buffer, &mean.buffer, &var.buffer, &weight.buffer, &bias.buffer],
                 &out.buffer, &uint_params, &float_params,
                 (spatial as u32, channels as u32, batch as u32),
@@ -603,8 +609,9 @@ impl LazyRuntime {
                 padding.1 as u32,
             ];
             let grid_y = out_dims[2] as u32 * in_dims[1] as u32;
+            let (k_src, k_fn) = KernelRegistry::resolve_kernel("max_pool2d", dtype);
             REGISTRY.dispatch_cnn_3d(
-                device, crate::compute::MAX_POOL2D_KERNEL_SOURCE, "max_pool2d_f32",
+                device, &k_src, &k_fn,
                 &[&input.buffer], &out.buffer,
                 &uint_params, &[], (out_dims[3] as u32, grid_y, in_dims[0] as u32),
             )?;
@@ -632,8 +639,9 @@ impl LazyRuntime {
                 padding.1 as u32,
             ];
             let grid_y = out_dims[2] as u32 * in_dims[1] as u32;
+            let (k_src, k_fn) = KernelRegistry::resolve_kernel("avg_pool2d", dtype);
             REGISTRY.dispatch_cnn_3d(
-                device, crate::compute::AVG_POOL2D_KERNEL_SOURCE, "avg_pool2d_f32",
+                device, &k_src, &k_fn,
                 &[&input.buffer], &out.buffer,
                 &uint_params, &[], (out_dims[3] as u32, grid_y, in_dims[0] as u32),
             )?;
@@ -948,8 +956,9 @@ impl LazyRuntime {
                 padding.0 as u32, padding.1 as u32,
             ];
             let grid_y = out_dims[2] as u32 * w_dims[1] as u32;
+            let (k_src, k_fn) = KernelRegistry::resolve_kernel("conv2d_backward_input", dtype);
             return REGISTRY.dispatch_cnn_3d_nb(
-                device, crate::compute::CONV2D_BACKWARD_INPUT_KERNEL_SOURCE, "conv2d_backward_input_f32", queue,
+                device, &k_src, &k_fn, queue,
                 &[&grad_output.buffer, &weight.buffer], &out.buffer,
                 &uint_params, &[], (out_dims[3] as u32, grid_y, go_dims[0] as u32),
             );
@@ -963,8 +972,9 @@ impl LazyRuntime {
             let seq_len = indices.meta.layout.shape.numel();
             let embed_dim = node.out_shape.dims()[1];
             let uint_params: Vec<u32> = vec![seq_len as u32, embed_dim as u32];
+            let (k_src, k_fn) = KernelRegistry::resolve_kernel("embedding_backward", dtype);
             return REGISTRY.dispatch_cnn_3d_nb(
-                device, crate::compute::EMBEDDING_BACKWARD_KERNEL_SOURCE, "embedding_backward_f32", queue,
+                device, &k_src, &k_fn, queue,
                 &[&grad_output.buffer, &indices.buffer], &out.buffer,
                 &uint_params, &[], (embed_dim as u32, seq_len as u32, 1),
             );
@@ -980,8 +990,9 @@ impl LazyRuntime {
             let spatial: usize = in_dims[2..].iter().product();
             let uint_params: Vec<u32> = vec![batch as u32, channels as u32, spatial as u32];
             let float_params: Vec<f32> = vec![eps];
+            let (k_src, k_fn) = KernelRegistry::resolve_kernel("batch_norm_backward", dtype);
             return REGISTRY.dispatch_cnn_3d_nb(
-                device, crate::compute::BATCH_NORM_BACKWARD_KERNEL_SOURCE, "batch_norm_backward_f32", queue,
+                device, &k_src, &k_fn, queue,
                 &[&grad_output.buffer, &weight.buffer, &running_var.buffer],
                 &out.buffer, &uint_params, &float_params,
                 (spatial as u32, channels as u32, batch as u32),
@@ -1010,7 +1021,7 @@ impl LazyRuntime {
                 let ndim_u32 = ndim as u32;
                 let numel = node.out_shape.numel() as u32;
                 return REGISTRY.dispatch_unary_nd_typed_nb(
-                    device, "copy_strided_f32", dtype, queue,
+                    device, "copy_strided", dtype, queue,
                     &input.buffer, &in_strides, &out.buffer, &out_shape_u32, ndim_u32, numel,
                 );
             }
@@ -1097,7 +1108,7 @@ impl LazyRuntime {
             let (in_strides, out_shape_u32, ndim, numel) = self.unary_nd_params(node)?;
             let input = self.get_tensor(node.inputs[0])?;
             return REGISTRY.dispatch_unary_nd_typed_nb(
-                device, "gelu_f32", dtype, queue,
+                device, "gelu", dtype, queue,
                 &input.buffer, &in_strides, &out.buffer, &out_shape_u32, ndim, numel,
             );
         }
@@ -1134,8 +1145,9 @@ impl LazyRuntime {
                 in_dims[2] as u32, out_dims[2] as u32, w_dims[2] as u32,
                 stride as u32, padding as u32,
             ];
+            let (k_src, k_fn) = KernelRegistry::resolve_kernel("conv1d", dtype);
             return REGISTRY.dispatch_cnn_3d_nb(
-                device, crate::compute::CONV1D_KERNEL_SOURCE, "conv1d_f32", queue,
+                device, &k_src, &k_fn, queue,
                 &[&input.buffer, &weight.buffer], &out.buffer,
                 &uint_params, &[], (out_dims[2] as u32, w_dims[0] as u32, in_dims[0] as u32),
             );
@@ -1156,8 +1168,9 @@ impl LazyRuntime {
                 padding.0 as u32, padding.1 as u32,
             ];
             let grid_y = out_dims[2] as u32 * w_dims[0] as u32;
+            let (k_src, k_fn) = KernelRegistry::resolve_kernel("conv2d", dtype);
             return REGISTRY.dispatch_cnn_3d_nb(
-                device, crate::compute::CONV2D_KERNEL_SOURCE, "conv2d_f32", queue,
+                device, &k_src, &k_fn, queue,
                 &[&input.buffer, &weight.buffer], &out.buffer,
                 &uint_params, &[], (out_dims[3] as u32, grid_y, in_dims[0] as u32),
             );
@@ -1175,8 +1188,9 @@ impl LazyRuntime {
             let spatial: usize = in_dims[2..].iter().product();
             let uint_params: Vec<u32> = vec![batch as u32, channels as u32, spatial as u32];
             let float_params: Vec<f32> = vec![eps];
+            let (k_src, k_fn) = KernelRegistry::resolve_kernel("batch_norm", dtype);
             return REGISTRY.dispatch_cnn_3d_nb(
-                device, crate::compute::BATCH_NORM_KERNEL_SOURCE, "batch_norm_f32", queue,
+                device, &k_src, &k_fn, queue,
                 &[&input.buffer, &mean.buffer, &var.buffer, &weight.buffer, &bias.buffer],
                 &out.buffer, &uint_params, &float_params,
                 (spatial as u32, channels as u32, batch as u32),
@@ -1195,8 +1209,9 @@ impl LazyRuntime {
                 padding.0 as u32, padding.1 as u32,
             ];
             let grid_y = out_dims[2] as u32 * in_dims[1] as u32;
+            let (k_src, k_fn) = KernelRegistry::resolve_kernel("max_pool2d", dtype);
             return REGISTRY.dispatch_cnn_3d_nb(
-                device, crate::compute::MAX_POOL2D_KERNEL_SOURCE, "max_pool2d_f32", queue,
+                device, &k_src, &k_fn, queue,
                 &[&input.buffer], &out.buffer,
                 &uint_params, &[], (out_dims[3] as u32, grid_y, in_dims[0] as u32),
             );
@@ -1214,8 +1229,9 @@ impl LazyRuntime {
                 padding.0 as u32, padding.1 as u32,
             ];
             let grid_y = out_dims[2] as u32 * in_dims[1] as u32;
+            let (k_src, k_fn) = KernelRegistry::resolve_kernel("avg_pool2d", dtype);
             return REGISTRY.dispatch_cnn_3d_nb(
-                device, crate::compute::AVG_POOL2D_KERNEL_SOURCE, "avg_pool2d_f32", queue,
+                device, &k_src, &k_fn, queue,
                 &[&input.buffer], &out.buffer,
                 &uint_params, &[], (out_dims[3] as u32, grid_y, in_dims[0] as u32),
             );

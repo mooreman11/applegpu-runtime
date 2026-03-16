@@ -120,7 +120,8 @@ pub enum OpKind {
 }
 
 impl OpKind {
-    /// Map to the MSL kernel function name.
+    /// Map to the MSL kernel base name (without dtype suffix).
+    /// The dtype suffix is appended by resolve_kernel at dispatch time.
     pub fn kernel_name(&self) -> &str {
         match self {
             OpKind::Add => "elementwise_add",
@@ -132,43 +133,43 @@ impl OpKind {
             OpKind::Exp => "elementwise_exp",
             OpKind::Log => "elementwise_log",
             OpKind::Sqrt => "elementwise_sqrt",
-            OpKind::Matmul => "matmul_f32",
+            OpKind::Matmul => "matmul",
             OpKind::FusedElementwise { ref function_name, .. } => function_name.as_str(),
-            OpKind::Softmax => "softmax_f32",
-            OpKind::Transpose { .. } => "transpose_f32",
-            OpKind::ScalarMul(_) => "scalar_mul_f32",
+            OpKind::Softmax => "softmax",
+            OpKind::Transpose { .. } => "transpose",
+            OpKind::ScalarMul(_) => "scalar_mul",
             OpKind::Tanh => "elementwise_tanh",
-            OpKind::Gelu => "gelu_f32",
-            OpKind::LayerNorm { .. } => "layer_norm_f32",
-            OpKind::Embedding => "embedding_f32",
+            OpKind::Gelu => "gelu",
+            OpKind::LayerNorm { .. } => "layer_norm",
+            OpKind::Embedding => "embedding",
             OpKind::Reshape { .. } => "reshape",
-            OpKind::Slice { dim, .. } => if *dim == 0 { "slice_dim0_f32" } else { "slice_dim1_f32" },
-            OpKind::Concat { dim } => if *dim == 0 { "concat_dim0_f32" } else { "concat_dim1_f32" },
-            OpKind::AddBias => "add_bias_f32",
-            OpKind::SoftmaxCausal => "softmax_causal_f32",
-            OpKind::Argmax => "argmax_f32",
-            OpKind::Sum => "sum_f32",
-            OpKind::Mean => "mean_f32",
+            OpKind::Slice { dim, .. } => if *dim == 0 { "slice_dim0" } else { "slice_dim1" },
+            OpKind::Concat { dim } => if *dim == 0 { "concat_dim0" } else { "concat_dim1" },
+            OpKind::AddBias => "add_bias",
+            OpKind::SoftmaxCausal => "softmax_causal",
+            OpKind::Argmax => "argmax",
+            OpKind::Sum => "sum",
+            OpKind::Mean => "mean",
             OpKind::Abs => "elementwise_abs",
             OpKind::Sign => "elementwise_sign",
-            OpKind::Pow { .. } => "pow_f32",
-            OpKind::Clamp { .. } => "clamp_f32",
-            OpKind::Where => "where_f32",
-            OpKind::MaskedFill { .. } => "masked_fill_f32",
-            OpKind::Triu { .. } => "triu_f32",
-            OpKind::Tril { .. } => "tril_f32",
-            OpKind::Gather { dim } => if *dim == 0 { "gather_dim0_f32" } else { "gather_dim1_f32" },
-            OpKind::IndexSelect { dim } => if *dim == 0 { "index_select_dim0_f32" } else { "index_select_dim1_f32" },
-            OpKind::Conv1d { .. } => "conv1d_f32",
-            OpKind::Conv2d { .. } => "conv2d_f32",
-            OpKind::BatchNorm { .. } => "batch_norm_f32",
-            OpKind::MaxPool2d { .. } => "max_pool2d_f32",
-            OpKind::AvgPool2d { .. } => "avg_pool2d_f32",
-            OpKind::SoftmaxBackward => "softmax_backward_f32",
-            OpKind::LayerNormBackward { .. } => "layer_norm_backward_f32",
-            OpKind::Conv2dBackwardInput { .. } => "conv2d_backward_input_f32",
-            OpKind::EmbeddingBackward => "embedding_backward_f32",
-            OpKind::BatchNormBackward { .. } => "batch_norm_backward_f32",
+            OpKind::Pow { .. } => "pow",
+            OpKind::Clamp { .. } => "clamp",
+            OpKind::Where => "where",
+            OpKind::MaskedFill { .. } => "masked_fill",
+            OpKind::Triu { .. } => "triu",
+            OpKind::Tril { .. } => "tril",
+            OpKind::Gather { dim } => if *dim == 0 { "gather_dim0" } else { "gather_dim1" },
+            OpKind::IndexSelect { dim } => if *dim == 0 { "index_select_dim0" } else { "index_select_dim1" },
+            OpKind::Conv1d { .. } => "conv1d",
+            OpKind::Conv2d { .. } => "conv2d",
+            OpKind::BatchNorm { .. } => "batch_norm",
+            OpKind::MaxPool2d { .. } => "max_pool2d",
+            OpKind::AvgPool2d { .. } => "avg_pool2d",
+            OpKind::SoftmaxBackward => "softmax_backward",
+            OpKind::LayerNormBackward { .. } => "layer_norm_backward",
+            OpKind::Conv2dBackwardInput { .. } => "conv2d_backward_input",
+            OpKind::EmbeddingBackward => "embedding_backward",
+            OpKind::BatchNormBackward { .. } => "batch_norm_backward",
         }
     }
 
@@ -477,7 +478,7 @@ mod tests {
     #[test]
     fn op_kind_kernel_names() {
         assert_eq!(OpKind::Add.kernel_name(), "elementwise_add");
-        assert_eq!(OpKind::Matmul.kernel_name(), "matmul_f32");
+        assert_eq!(OpKind::Matmul.kernel_name(), "matmul");
         assert!(OpKind::Neg.is_unary());
         assert!(!OpKind::Add.is_unary());
         assert!(OpKind::Matmul.is_matmul());
