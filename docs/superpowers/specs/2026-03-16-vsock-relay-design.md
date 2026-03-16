@@ -1,179 +1,184 @@
 # Vsock Socket Relay Design
 
 **Date:** 2026-03-16
+**Updated:** 2026-03-16 (post API exploration)
 **Status:** Approved
-**Scope:** Replace TCP bridge with Unix socket relay via Apple Containerization framework. Three-tier fallback. Extract shared socket helpers. Fix async blocking.
+**Scope:** Replace TCP bridge with Unix socket relay via Apple Containerization framework. Three-tier fallback. Extract shared socket helpers.
 
 ## Overview
 
-The current `gpu-container run` shells out to the `container` CLI and sets up a TCP bridge (port 7654) to forward connections from the Linux container to the gpu-service Unix socket on the host. This adds ~10ms latency per round-trip and requires managing a TCP relay process.
-
-With macOS 26.2 and the `apple/containerization` Swift package (v0.10.0), we can use `UnixSocketConfiguration` to relay Unix sockets directly over vsock — the framework handles the relay internally. The container-side Python connects to a Unix socket (same as Docker bind-mount), not TCP.
+Replace the TCP bridge with direct Unix socket relay using `apple/containerization` Swift package. The `ContainerManager` provides a high-level API that handles image pulling, rootfs creation, VM setup, and container lifecycle. `UnixSocketConfiguration` relays Unix sockets over vsock.
 
 ## Environment
 
 - macOS 26.2, SDK 26.2, Swift 6.2
-- `container` CLI 0.10.0 installed via Homebrew
-- Container runtime running (`container system status` → running)
-- `container run alpine echo "hello"` works
-- Bind-mounting directories works, but Unix sockets inside bind-mounts are NOT connectable from guest (confirmed by testing — socket inode visible but connection fails)
+- `container` CLI 0.10.0, runtime running
+- Kernel: `vmlinux-6.18.5-177` at `~/Library/Application Support/com.apple.container/kernels/`
+- Init image: `ghcr.io/apple/containerization/vminit:0.26.5`
 
-## Three-Tier Fallback Architecture
+## Verified API (from actual source at .build/checkouts/containerization/)
 
-```
-Run.swift → try Tier 1 → catch → try Tier 2 → catch → Tier 3
-```
-
-### Tier 1: Full Programmatic (macOS 26+)
-
-Use `apple/containerization` Swift package for everything:
-1. Pull OCI image via framework's registry client
-2. Create `LinuxContainer` with `UnixSocketConfiguration` for gpu-service socket
-3. Start container, wait for exit
+### ContainerManager — High-Level API
 
 ```swift
 import Containerization
 
-let config = LinuxContainer.Configuration()
-config.cpus = cpus
-config.memoryInBytes = UInt64(memory) * 1024 * 1024
-config.sockets = [
-    UnixSocketConfiguration(
-        source: URL(fileURLWithPath: socketPath),
-        destination: URL(fileURLWithPath: "/var/run/applegpu.sock"),
-        direction: .into
-    )
-]
-config.process.environment["APPLEGPU_SOCKET"] = "/var/run/applegpu.sock"
-config.process.arguments = command
+// 1. Create manager with kernel + initfs + network
+var manager = try await ContainerManager(
+    kernel: Kernel(
+        path: URL(fileURLWithPath: kernelPath),
+        platform: .linuxArm
+    ),
+    initfsReference: "ghcr.io/apple/containerization/vminit:0.26.5",
+    network: try ContainerManager.VmnetNetwork()
+)
 
-let container = try await LinuxContainer(image: image, configuration: config)
+// 2. Create container from image reference (handles pull + rootfs)
+let container = try await manager.create(
+    "gpu-run-\(UUID().uuidString.prefix(8))",
+    reference: "python:3.11-slim",
+    rootfsSizeInBytes: 8.gib()
+) { @Sendable config in
+    config.cpus = cpus
+    config.memoryInBytes = UInt64(memory).mib()
+    config.sockets = [
+        UnixSocketConfiguration(
+            source: URL(fileURLWithPath: socketPath),
+            destination: URL(fileURLWithPath: "/var/run/applegpu.sock"),
+            direction: .into
+        )
+    ]
+    config.process.environmentVariables.append("APPLEGPU_SOCKET=/var/run/applegpu.sock")
+    config.process.arguments = command
+}
+
+// 3. Lifecycle: create → start → wait → stop (stop MUST be called)
+try await container.create()
 try await container.start()
 let status = try await container.wait()
+try await container.stop()
+try manager.delete(containerId)
 ```
 
-**Risk:** The image pull API may differ from what's sketched. If it requires explicit registry client setup, OCI manifest resolution, or rootfs unpacking, this tier becomes complex.
+### Key API Facts (verified against source)
+- `LinuxProcessConfiguration.environmentVariables` is `[String]` (OCI-style `KEY=VALUE`), NOT a dictionary
+- `container.stop()` MUST be called even after `wait()` returns (per doc comments)
+- `manager.delete(id)` cleans up rootfs and resources
+- `ContainerManager.VmnetNetwork()` provides NAT networking with vmnet
+- Kernel path: `~/Library/Application Support/com.apple.container/kernels/default.kernel-arm64`
+- Init image reference: `ghcr.io/apple/containerization/vminit:0.26.5`
 
-### Tier 2: Hybrid (macOS 26+)
+## Three-Tier Fallback Architecture
 
-Shell out to `container pull <image>` for image caching, then use programmatic API for container lifecycle + socket relay.
+### Tier 1: Full Programmatic (macOS 26+)
+
+`ContainerManager` handles everything — image pull, rootfs, VMM, socket relay:
 
 ```swift
-// Pull image via CLI
+@available(macOS 26, *)
+enum ContainerRunner {
+    static func run(image: String, cpus: Int, memory: Int,
+                    socketPath: String, command: [String]) async throws {
+        let kernelPath = Self.findKernel()
+        var manager = try await ContainerManager(
+            kernel: Kernel(path: URL(fileURLWithPath: kernelPath), platform: .linuxArm),
+            initfsReference: "ghcr.io/apple/containerization/vminit:0.26.5",
+            network: try ContainerManager.VmnetNetwork()
+        )
+
+        let containerId = "gpu-\(UUID().uuidString.prefix(8))"
+        let container = try await manager.create(
+            containerId, reference: image
+        ) { @Sendable config in
+            config.cpus = cpus
+            config.memoryInBytes = UInt64(memory) * 1024 * 1024
+            config.sockets = [
+                UnixSocketConfiguration(
+                    source: URL(fileURLWithPath: socketPath),
+                    destination: URL(fileURLWithPath: "/var/run/applegpu.sock"),
+                    direction: .into
+                )
+            ]
+            config.process.environmentVariables.append("APPLEGPU_SOCKET=/var/run/applegpu.sock")
+            config.process.arguments = command.filter { $0 != "--" }
+        }
+        defer { try? manager.delete(containerId) }
+
+        try await container.create()
+        try await container.start()
+        let status = try await container.wait()
+        try await container.stop()
+
+        if case .exited(let code) = status, code != 0 {
+            throw GPUContainerError.containerExited(code: Int(code))
+        }
+    }
+
+    static func findKernel() -> String {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let kernelPath = appSupport.appendingPathComponent("com.apple.container/kernels/default.kernel-arm64").path
+        return kernelPath
+    }
+}
+```
+
+### Tier 2: Hybrid (macOS 26+, image pull fallback)
+
+If Tier 1's image pull fails (registry auth, network, etc.), shell out to `container pull` then retry with cached image:
+
+```swift
+// In the catch block of Tier 1, if error is image-pull related:
 let pullProcess = Process()
 pullProcess.executableURL = URL(fileURLWithPath: containerBinary)
 pullProcess.arguments = ["pull", image]
 try pullProcess.run()
-pullProcess.waitUntilExit()
-
-// Then create container programmatically with socket relay
-// (same as Tier 1 but image is already cached)
+// ... then retry manager.create() which will find the cached image
 ```
 
-This gets the vsock socket relay benefit without reimplementing OCI registry client code.
+### Tier 3: CLI + TCP Bridge (pre-macOS 26 fallback)
 
-### Tier 3: CLI + TCP Bridge (pre-macOS 26)
+Existing path, unchanged. Shell out to `container run` with TCP bridge.
 
-Existing path, unchanged:
-1. Shell out to `container run` with `--env APPLEGPU_HOST=192.168.64.1 --env APPLEGPU_PORT=7654`
-2. `TCPBridge` relays TCP port 7654 → Unix socket
+## Error Classification for Fallback
 
-## Data Flow (Tier 1/2)
-
-```
-Container (Linux guest)         Host (macOS)
-┌────────────────────┐          ┌───────────────────────┐
-│ Python code        │          │  gpu-container         │
-│  └─ applegpu       │──vsock──▶│  └─ ContainerRunner   │
-│     (SocketBackend │  (auto)  │     └─ Containerization│
-│      connects to   │          │        framework       │
-│      /var/run/     │          │        relays to       │
-│      applegpu.sock)│          │        ~/.applegpu/    │
-└────────────────────┘          │        runtime.sock    │
-                                └───────────────────────┘
-```
-
-Container-side Python uses `APPLEGPU_SOCKET=/var/run/applegpu.sock` — same env var as Docker bind-mount, same SocketBackend code path.
+| Error Type | Fallback? | Rationale |
+|-----------|-----------|-----------|
+| Containerization framework not available | Yes → Tier 3 | Pre-macOS 26 |
+| Image pull failed (registry, auth, network) | Yes → Tier 2 | Try CLI pull |
+| Kernel not found | Yes → Tier 3 | container CLI handles its own kernel |
+| Container exited non-zero | No | Real application error |
+| Socket path not found | No | Configuration error |
+| Permission denied | No | Real error |
+| VmnetNetwork init failed | Yes → Tier 3 | Networking config issue |
 
 ## Files Changed
 
-### Modified
-
 | File | Change |
 |------|--------|
-| `swift/GPUContainer/Package.swift` | Uncomment `apple/containerization` dep, bump swift-tools-version to 6.1 |
-| `swift/GPUContainer/Sources/ContainerRunner.swift` | Implement Tiers 1 + 2 with real Containerization API |
-| `swift/GPUContainer/Sources/Run.swift` | Fix `waitUntilExit()` async blocking, deduplicate `filteredCommand` |
-| `swift/GPUContainer/Sources/VsockRelay.swift` | Add deprecation notice |
+| `swift/GPUContainer/Package.swift` | swift-tools-version 6.1, macOS 26.0 platform, uncomment containerization dep |
+| `swift/GPUContainer/Sources/ContainerRunner.swift` | Full implementation with Tier 1 + 2 |
+| `swift/GPUContainer/Sources/Run.swift` | Fix async blocking, add `APPLEGPU_FORCE_TCP` env var |
+| `swift/GPUContainer/Sources/VsockRelay.swift` | Add `@available(*, deprecated)` |
+| `swift/GPUContainer/Sources/UnixSocketHelper.swift` | New — extracted relay + connect code |
 
-### Created
+## Other Fixes
 
-| File | Purpose |
-|------|---------|
-| `swift/GPUContainer/Sources/UnixSocketHelper.swift` | Shared `connectToUnixSocket()` + `relay()` extracted from TCPBridge, VsockRelay, ServiceManager |
+- **Extract `UnixSocketHelper`** — deduplicate relay + connect across TCPBridge, VsockRelay, ServiceManager
+- **Fix `waitUntilExit()` blocking** — set `terminationHandler` before `process.run()`
+- **Make TCPBridge IP configurable** — `APPLEGPU_BRIDGE_HOST` env var (default `192.168.64.1`)
+- **Use `@available(*, deprecated)`** on VsockRelay — proper Swift deprecation
+- **Add `APPLEGPU_FORCE_TCP`** env var to force Tier 3 for testing
 
-## Specific Fixes
+## Testing
 
-### Extract UnixSocketHelper
-
-Three files duplicate the same relay and Unix socket connect code. Extract into shared helper:
-
-```swift
-enum UnixSocketHelper {
-    /// Connect to a Unix domain socket, returning the fd.
-    static func connect(to path: String) -> Int32? { ... }
-
-    /// Bidirectional relay between two file descriptors.
-    static func relay(from: Int32, to: Int32, group: DispatchGroup) { ... }
-}
-```
-
-Update TCPBridge, VsockRelay, and ServiceManager to use the helper.
-
-### Fix waitUntilExit() blocking async
-
-In `Run.swift`, replace:
-```swift
-process.waitUntilExit()
-```
-With:
-```swift
-await withCheckedContinuation { continuation in
-    process.terminationHandler = { _ in continuation.resume() }
-}
-```
-
-### Make TCPBridge IP configurable
-
-Replace hardcoded `192.168.64.1` with:
-```swift
-let hostIP = ProcessInfo.processInfo.environment["APPLEGPU_BRIDGE_HOST"] ?? "192.168.64.1"
-```
-
-### VsockRelay deprecation
-
-Add to top of file:
-```swift
-/// @deprecated Use ContainerRunner with UnixSocketConfiguration instead.
-/// Kept for potential AVF VM backend use. Remove once confirmed unnecessary.
-```
-
-## Testing Strategy
-
-- **End-to-end test (Tier 1/2):** `gpu-container run python:3.11-slim -- python3 -c "import applegpu_runtime as gpu; ..."` with gpu-service running. Verify Add, Int32, Cast, Embedding work.
-- **Fallback test:** Force Tier 3 by setting `APPLEGPU_FORCE_TCP=1` env var or by testing on a pre-macOS 26 system.
-- **Socket helper unit tests (deferred):** Test `UnixSocketHelper.connect` and `relay` with temporary Unix sockets. No GPU needed.
-
-## Not Included (deferred to backlog)
-
-- Removing TCP bridge (kept for backward compat)
-- Deleting VsockRelay.swift (kept with deprecation notice)
-- Socket helper unit tests (no GPU needed, can add to CI later)
+1. `gpu-container run python:3.11-slim -- python3 -c "import applegpu_runtime as gpu; gpu.init_backend(); print((gpu.tensor([1,2,3]) + gpu.tensor([4,5,6])).to_list())"` — Tier 1 vsock
+2. `APPLEGPU_FORCE_TCP=1 gpu-container run ...` — verify Tier 3 still works
+3. Docker bind-mount path unchanged — verify still works
 
 ## Success Criteria
 
-1. `gpu-container run python:3.11-slim -- python3 -c "import applegpu_runtime; ..."` works with vsock (no TCP bridge, no port)
+1. `gpu-container run` works without TCP bridge (vsock socket relay)
 2. Container connects via Unix socket at `/var/run/applegpu.sock`
-3. F32 add, Int32 add, Cast+embedding, comparison ops all work from container
-4. Falls back to TCP bridge gracefully on error
-5. Existing Docker bind-mount path still works unchanged
+3. All ops work: F32 add, Int32, Cast+embedding, comparison
+4. Falls back gracefully to TCP bridge when vsock unavailable
+5. Docker bind-mount path still works unchanged
