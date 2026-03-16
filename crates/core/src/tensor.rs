@@ -32,6 +32,11 @@ impl DType {
         matches!(self, DType::Float32 | DType::Float16)
     }
 
+    /// Whether this dtype is a floating-point type.
+    pub fn is_float(&self) -> bool {
+        matches!(self, DType::Float32 | DType::Float16 | DType::BFloat16 | DType::Float64)
+    }
+
     /// Map from string name to DType.
     pub fn from_name(name: &str) -> Option<DType> {
         match name {
