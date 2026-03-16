@@ -1,8 +1,8 @@
 pub mod transport;
 
 use std::io;
-use std::net::Shutdown;
-use std::os::unix::net::UnixStream;
+
+use crate::transport::Transport;
 
 use applegpu_wire::{
     self as wire,
@@ -39,7 +39,7 @@ pub type Result<T> = std::result::Result<T, ClientError>;
 pub const DEFAULT_VSOCK_PORT: u32 = 5678;
 
 pub struct GpuClient {
-    stream: UnixStream,
+    stream: Box<dyn Transport>,
     pub container_id: u64,
     pub granted_memory: u64,
 }
@@ -47,21 +47,20 @@ pub struct GpuClient {
 impl GpuClient {
     pub fn connect_unix(path: &str, requested_memory: u64) -> Result<Self> {
         let stream = transport::connect_unix(path)?;
-        Self::handshake(stream, requested_memory)
+        Self::handshake(Box::new(stream), requested_memory)
     }
 
     pub fn connect_vsock(port: u32, requested_memory: u64) -> Result<Self> {
-        // transport::connect_vsock returns Box<dyn Transport>.
-        // Task 4 will type-erase GpuClient.stream and handshake() to accept
-        // Box<dyn Transport> — at that point this becomes a direct delegation.
         let stream = transport::connect_vsock(2, port)?;
-        drop((stream, requested_memory));
-        Err(ClientError::Protocol(
-            "connect_vsock: handshake not yet type-erased; upgrade to Task 4".into(),
-        ))
+        Self::handshake(stream, requested_memory) // already Box<dyn Transport>
     }
 
-    fn handshake(mut stream: UnixStream, requested_memory: u64) -> Result<Self> {
+    pub fn connect_tcp(host: &str, port: u16, requested_memory: u64) -> Result<Self> {
+        let stream = transport::connect_tcp(host, port)?;
+        Self::handshake(Box::new(stream), requested_memory)
+    }
+
+    fn handshake(mut stream: Box<dyn Transport>, requested_memory: u64) -> Result<Self> {
         let hs = HandshakeRequest {
             protocol_version: PROTOCOL_VERSION,
             requested_memory,
@@ -107,13 +106,14 @@ impl GpuClient {
 
 impl Drop for GpuClient {
     fn drop(&mut self) {
-        let _ = self.stream.shutdown(Shutdown::Both);
+        let _ = self.stream.shutdown();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::net::UnixStream;
     use std::thread;
 
     fn mock_gpu_service(mut stream: UnixStream) {
@@ -142,7 +142,7 @@ mod tests {
         let (client_stream, server_stream) = UnixStream::pair().unwrap();
         let server = thread::spawn(move || mock_gpu_service(server_stream));
 
-        let mut client = GpuClient::handshake(client_stream, 1024 * 1024).unwrap();
+        let mut client = GpuClient::handshake(Box::new(client_stream), 1024 * 1024).unwrap();
         assert_eq!(client.container_id, 7);
 
         let req = EvalRequest {
@@ -200,7 +200,7 @@ mod tests {
         let (client_stream, server_stream) = UnixStream::pair().unwrap();
         let server = thread::spawn(move || mock_gpu_service_with_read(server_stream));
 
-        let mut client = GpuClient::handshake(client_stream, 1024 * 1024).unwrap();
+        let mut client = GpuClient::handshake(Box::new(client_stream), 1024 * 1024).unwrap();
         assert_eq!(client.container_id, 8);
 
         // First do an eval
@@ -253,7 +253,7 @@ mod tests {
         let (client_stream, server_stream) = UnixStream::pair().unwrap();
         let server = thread::spawn(move || mock_gpu_service_read_not_found(server_stream));
 
-        let mut client = GpuClient::handshake(client_stream, 1024 * 1024).unwrap();
+        let mut client = GpuClient::handshake(Box::new(client_stream), 1024 * 1024).unwrap();
         let result = client.read_tensor(999);
         assert!(result.is_err());
         let err_msg = format!("{}", result.unwrap_err());
@@ -276,8 +276,30 @@ mod tests {
             wire::write_message(&mut server_stream, &resp.serialize()).unwrap();
         });
 
-        let result = GpuClient::handshake(client_stream, 1024);
+        let result = GpuClient::handshake(Box::new(client_stream), 1024);
         assert!(result.is_err());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn gpu_client_works_with_boxed_transport() {
+        let (client_stream, server_stream) = UnixStream::pair().unwrap();
+        let server = thread::spawn(move || mock_gpu_service(server_stream));
+
+        let boxed: Box<dyn transport::Transport> = Box::new(client_stream);
+        let mut client = GpuClient::handshake(boxed, 1024 * 1024).unwrap();
+        assert_eq!(client.container_id, 7);
+
+        let req = EvalRequest {
+            target_id: 1,
+            tensors: vec![],
+            nodes: vec![],
+        };
+        let resp = client.eval(&req).unwrap();
+        match resp {
+            EvalResponse::Ok { tensor_id, .. } => assert_eq!(tensor_id, 1),
+            _ => panic!("Expected Ok"),
+        }
         server.join().unwrap();
     }
 }
