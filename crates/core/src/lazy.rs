@@ -275,6 +275,13 @@ impl LazyRuntime {
     /// Retained for eval_remote and any path that needs synchronous single-op execution.
     #[allow(dead_code)]
     fn execute_node(&mut self, device: &Device, node: &OpNode) -> Result<Tensor> {
+        // Int64 kernels require Apple9+ GPU (M3/M4)
+        if matches!(node.out_dtype, DType::Int64) && !device.supports_int64() {
+            return Err(GpuError::UnsupportedDtype(
+                "Int64 requires Apple9+ GPU (M3/M4). This device does not support it.".to_string(),
+            ));
+        }
+
         let out_size = node.out_shape.numel() * node.out_dtype.size_bytes();
 
         // Pre-check: if the node references an existing tensor as output, reject borrowed buffers
@@ -991,6 +998,13 @@ impl LazyRuntime {
         node: &OpNode,
         out: &Tensor,
     ) -> Result<*mut std::ffi::c_void> {
+        // Int64 kernels require Apple9+ GPU (M3/M4)
+        if matches!(node.out_dtype, DType::Int64) && !device.supports_int64() {
+            return Err(GpuError::UnsupportedDtype(
+                "Int64 requires Apple9+ GPU (M3/M4). This device does not support it.".to_string(),
+            ));
+        }
+
         // Reject borrowed (immutable) buffers as output targets
         if out.buffer.kind.is_borrowed() {
             return Err(GpuError::ImmutableBuffer(out.meta.id));

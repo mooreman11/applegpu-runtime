@@ -43,6 +43,13 @@ public func gpuBridgeDeviceName(_ ptr: UnsafeRawPointer?) -> UnsafePointer<CChar
     return device.namePtr
 }
 
+@_cdecl("gpu_bridge_supports_apple9")
+public func gpuBridgeSupportsApple9(_ devicePtr: UnsafeRawPointer?) -> Bool {
+    guard let devicePtr = devicePtr else { return false }
+    let gpuDevice = getGPUDevice(from: devicePtr)
+    return gpuDevice.device.supportsFamily(.apple9)
+}
+
 /// Internal helper: extract GPUDevice from opaque handle.
 /// Used by buffer.swift and compute.swift.
 func getGPUDevice(from ptr: UnsafeRawPointer) -> GPUDevice {
