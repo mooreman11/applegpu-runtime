@@ -85,7 +85,7 @@ pub const MAGIC_HANDSHAKE_RESP: &[u8; 4] = b"AGHO";
 pub const HANDSHAKE_OK: u32 = 0;
 pub const HANDSHAKE_REJECTED_QUOTA: u32 = 1;
 pub const HANDSHAKE_REJECTED_CAPACITY: u32 = 2;
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 // ---------------------------------------------------------------------------
 // Handshake types
@@ -219,6 +219,19 @@ pub enum WireOpKind {
     Conv2dBackwardInput { stride: (usize, usize), padding: (usize, usize) },
     EmbeddingBackward,
     BatchNormBackward { eps: f32 },
+    // 46: type conversion
+    Cast { target_dtype: u8 },
+    // 47–52: comparison (output Bool)
+    Lt, Gt, Le, Ge, Eq, Ne,
+    // 53–56: bitwise
+    BitwiseAnd, BitwiseOr, BitwiseXor, BitwiseNot,
+    // 57–58: shifts
+    Shl { shift: u32 }, Shr { shift: u32 },
+    // 59–62: utility
+    Mod, ElemMin, ElemMax, LogicalNot,
+    // 63–64: quantization
+    Quantize { scale: f32, zero_point: i32, target_dtype: u8 },
+    Dequantize { scale: f32, zero_point: i32, target_dtype: u8 },
 }
 
 impl WireOpKind {
@@ -270,6 +283,25 @@ impl WireOpKind {
             WireOpKind::Conv2dBackwardInput { .. } => 43,
             WireOpKind::EmbeddingBackward => 44,
             WireOpKind::BatchNormBackward { .. } => 45,
+            WireOpKind::Cast { .. } => 46,
+            WireOpKind::Lt => 47,
+            WireOpKind::Gt => 48,
+            WireOpKind::Le => 49,
+            WireOpKind::Ge => 50,
+            WireOpKind::Eq => 51,
+            WireOpKind::Ne => 52,
+            WireOpKind::BitwiseAnd => 53,
+            WireOpKind::BitwiseOr => 54,
+            WireOpKind::BitwiseXor => 55,
+            WireOpKind::BitwiseNot => 56,
+            WireOpKind::Shl { .. } => 57,
+            WireOpKind::Shr { .. } => 58,
+            WireOpKind::Mod => 59,
+            WireOpKind::ElemMin => 60,
+            WireOpKind::ElemMax => 61,
+            WireOpKind::LogicalNot => 62,
+            WireOpKind::Quantize { .. } => 63,
+            WireOpKind::Dequantize { .. } => 64,
         }
     }
 
@@ -284,7 +316,13 @@ impl WireOpKind {
             | WireOpKind::SoftmaxCausal | WireOpKind::Argmax | WireOpKind::Sum
             | WireOpKind::Mean | WireOpKind::Abs | WireOpKind::Sign | WireOpKind::Where
             | WireOpKind::Tanh | WireOpKind::SoftmaxBackward
-            | WireOpKind::EmbeddingBackward => Ok(()),
+            | WireOpKind::EmbeddingBackward
+            | WireOpKind::Lt | WireOpKind::Gt | WireOpKind::Le | WireOpKind::Ge
+            | WireOpKind::Eq | WireOpKind::Ne
+            | WireOpKind::BitwiseAnd | WireOpKind::BitwiseOr | WireOpKind::BitwiseXor
+            | WireOpKind::BitwiseNot
+            | WireOpKind::Mod | WireOpKind::ElemMin | WireOpKind::ElemMax
+            | WireOpKind::LogicalNot => Ok(()),
 
             WireOpKind::FusedElementwise { kernel_source, function_name } => {
                 write_u32(w, kernel_source.len() as u32)?;
@@ -356,6 +394,19 @@ impl WireOpKind {
                 write_u64(w, padding.1 as u64)
             }
             WireOpKind::BatchNormBackward { eps } => write_f32(w, *eps),
+            WireOpKind::Cast { target_dtype } => w.write_all(&[*target_dtype]),
+            WireOpKind::Shl { shift } => write_u32(w, *shift),
+            WireOpKind::Shr { shift } => write_u32(w, *shift),
+            WireOpKind::Quantize { scale, zero_point, target_dtype } => {
+                write_f32(w, *scale)?;
+                write_i32(w, *zero_point)?;
+                w.write_all(&[*target_dtype])
+            }
+            WireOpKind::Dequantize { scale, zero_point, target_dtype } => {
+                write_f32(w, *scale)?;
+                write_i32(w, *zero_point)?;
+                w.write_all(&[*target_dtype])
+            }
         }
     }
 
@@ -476,6 +527,41 @@ impl WireOpKind {
             }
             44 => Ok(WireOpKind::EmbeddingBackward),
             45 => Ok(WireOpKind::BatchNormBackward { eps: read_f32(r)? }),
+            46 => {
+                let mut b = [0u8; 1];
+                r.read_exact(&mut b)?;
+                Ok(WireOpKind::Cast { target_dtype: b[0] })
+            }
+            47 => Ok(WireOpKind::Lt),
+            48 => Ok(WireOpKind::Gt),
+            49 => Ok(WireOpKind::Le),
+            50 => Ok(WireOpKind::Ge),
+            51 => Ok(WireOpKind::Eq),
+            52 => Ok(WireOpKind::Ne),
+            53 => Ok(WireOpKind::BitwiseAnd),
+            54 => Ok(WireOpKind::BitwiseOr),
+            55 => Ok(WireOpKind::BitwiseXor),
+            56 => Ok(WireOpKind::BitwiseNot),
+            57 => Ok(WireOpKind::Shl { shift: read_u32(r)? }),
+            58 => Ok(WireOpKind::Shr { shift: read_u32(r)? }),
+            59 => Ok(WireOpKind::Mod),
+            60 => Ok(WireOpKind::ElemMin),
+            61 => Ok(WireOpKind::ElemMax),
+            62 => Ok(WireOpKind::LogicalNot),
+            63 => {
+                let scale = read_f32(r)?;
+                let zero_point = read_i32(r)?;
+                let mut b = [0u8; 1];
+                r.read_exact(&mut b)?;
+                Ok(WireOpKind::Quantize { scale, zero_point, target_dtype: b[0] })
+            }
+            64 => {
+                let scale = read_f32(r)?;
+                let zero_point = read_i32(r)?;
+                let mut b = [0u8; 1];
+                r.read_exact(&mut b)?;
+                Ok(WireOpKind::Dequantize { scale, zero_point, target_dtype: b[0] })
+            }
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("Unknown op discriminant: {}", disc),
