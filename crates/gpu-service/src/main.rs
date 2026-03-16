@@ -321,6 +321,13 @@ fn remove_pid_file(pid_path: &str) {
 }
 
 fn main() {
+    // Handle --version before anything else
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() > 1 && args[1] == "--version" {
+        println!("gpu-service {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+
     let socket_path = std::env::var("APPLEGPU_SOCKET")
         .unwrap_or_else(|_| applegpu_core::ipc::default_socket_path());
     let pid_path = std::env::var("APPLEGPU_PID_FILE")
