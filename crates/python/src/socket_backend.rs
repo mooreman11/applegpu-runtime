@@ -209,7 +209,7 @@ impl Backend for SocketBackend {
         let requested_memory: u64 = std::env::var("APPLEGPU_MEMORY_MB")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(4096)
+            .unwrap_or(1024)
             * 1024
             * 1024;
 
