@@ -13,3 +13,5 @@ __pycache__/
 *.dSYM/
 .venv/
 .worktrees/
+dist/
+.claude/worktrees/
