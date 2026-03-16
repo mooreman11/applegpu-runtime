@@ -1,14 +1,15 @@
 # Multi-Dtype Compute Kernels Design
 
 **Date:** 2026-03-16
+**Updated:** 2026-03-16 (post Plan 2 review)
 **Status:** Approved
-**Scope:** Add compute kernels for all missing dtypes (BFloat16, Int32, Int64, UInt8, UInt32, Int8, Int16, Bool). Refactor kernel generation to templates. Add new ops (cast, comparison, bitwise, element-wise min/max, quantize/dequantize).
+**Scope:** Validate and test all existing ops for new dtypes. Add new ops (comparison, bitwise, element-wise min/max, quantize/dequantize). Add op-level dtype validation. Gate Int64 on Apple9+ hardware.
 
 ## Overview
 
-Currently only Float32 and Float16 have compute kernels (~25 ops each). All other dtypes are storage-only — tensors can be created, serialized, and transferred, but no GPU computation is possible. This blocks GPT-2 in containers (Int64 embedding indices) and limits the library to float-only workloads.
+Plan 2 completed the kernel template infrastructure — all ~25 MSL kernel categories are generated from parameterized templates in `kernel_templates.rs`, with a unified `resolve_kernel()` dispatch path for all dtypes. Cast, byte-copy shape ops, and `is_compute_supported()` expansion are done.
 
-This design adds compute support for 6 additional dtype categories, ~15 new op types, and refactors the kernel infrastructure from hand-duplicated MSL strings to a template-based generator.
+What remains: validating that each template produces correct results for each dtype, adding ~14 new op types, enforcing the coverage matrix (preventing nonsensical combos like `exp(Int32)`), and gating Int64 on Apple9+ hardware.
 
 ## Hardware Constraints (verified on M4)
 
@@ -19,38 +20,39 @@ This design adds compute support for 6 additional dtype categories, ~15 new op t
 
 ## Coverage Matrix
 
-### Existing ops (currently F32+F16 only, extending to new dtypes)
+### Existing ops — templates exist for all, but only these combos are semantically valid
 
-| Op | BF16 | Int32 | Int64 (Apple9+) | UInt8/32 | Int8/16 | Bool |
-|---|---|---|---|---|---|---|
-| add, sub, mul, div | Yes | Yes | Yes | Yes | No | No |
-| neg, abs, sign | Yes | Yes | Yes | abs/sign | No | No |
-| exp, log, sqrt, tanh | Yes | No | No | No | No | No |
-| relu, gelu | Yes | No | No | No | No | No |
-| pow | Yes | Int32 only | No | No | No | No |
-| clamp | Yes | Yes | Yes | Yes | No | No |
-| softmax, softmax_causal | Yes | No | No | No | No | No |
-| matmul | Yes | No | No | No | No | No |
-| layer_norm, batch_norm | Yes | No | No | No | No | No |
-| conv1d, conv2d | Yes | No | No | No | No | No |
-| max_pool2d, avg_pool2d | Yes | No | No | No | No | No |
-| embedding | Yes | N/A (index is always int) | N/A | No | No | No |
-| sum, mean, argmax | Yes | sum/argmax | sum/argmax | sum→u32, argmax | sum→i32, argmax | sum (count) |
-| max, min (reduction) | Yes | Yes | Yes | No | No | No |
-| where (condition=Bool) | Yes | Yes | Yes | Yes | Yes | Yes |
-| masked_fill (mask=Bool) | Yes | Yes | Yes | Yes | Yes | Yes |
-| triu, tril | Yes | Yes | Yes | Yes | Yes | Yes |
-| gather, index_select | Yes | Yes | Yes | Yes | Yes | No |
-| scalar_mul | Yes | Yes | Yes | Yes | No | No |
-| add_bias | Yes | No | No | No | No | No |
-| transpose, slice, concat | Byte-copy kernel (dtype-agnostic, parameterized by element size) |
+| Op | F32/F16 | BF16 | Int32 | Int64 (Apple9+) | UInt8/32 | Int8/16 | Bool |
+|---|---|---|---|---|---|---|---|
+| add, sub, mul, div | Yes | Yes | Yes | Yes | Yes | No | No |
+| neg, abs, sign | Yes | Yes | Yes | Yes | abs/sign | No | No |
+| exp, log, sqrt, tanh | Yes | Yes | No | No | No | No | No |
+| relu, gelu | Yes | Yes | No | No | No | No | No |
+| pow | Yes | Yes | Int32 only | No | No | No | No |
+| clamp | Yes | Yes | Yes | Yes | Yes | No | No |
+| softmax, softmax_causal | Yes | Yes | No | No | No | No | No |
+| matmul | Yes | Yes | No | No | No | No | No |
+| layer_norm, batch_norm | Yes | Yes | No | No | No | No | No |
+| conv1d, conv2d | Yes | Yes | No | No | No | No | No |
+| max_pool2d, avg_pool2d | Yes | Yes | No | No | No | No | No |
+| embedding | Yes | Yes | N/A | N/A | No | No | No |
+| sum, mean, argmax | Yes | Yes | sum/argmax | sum/argmax | sum→u32, argmax | sum→i32, argmax | sum (count) |
+| where (condition=Bool) | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
+| masked_fill (mask=Bool) | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
+| triu, tril | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
+| gather, index_select | Yes | Yes | Yes | Yes | Yes | Yes | No |
+| scalar_mul | Yes | Yes | Yes | Yes | Yes | No | No |
+| add_bias | Yes | Yes | No | No | No | No | No |
+| cast | all↔all (via resolve_cast_kernel) |
+| transpose, slice, concat | Byte-copy kernel (parameterized by element size) |
 | reshape | Metadata only (no kernel needed) |
+
+**Important:** Template generators produce valid MSL for ANY dtype, but many combinations are semantically invalid (e.g., `exp(Int32)`, `softmax(Bool)`). The op-level dtype validation layer (Section 7) must enforce this matrix.
 
 ### New ops (not yet in OpKind enum)
 
 | Op | BF16 | Int32 | Int64 (Apple9+) | UInt8/32 | Int8/16 | Bool |
 |---|---|---|---|---|---|---|
-| **cast** (dtype conversion) | all↔all | all↔all | all↔all | all↔all | all↔all | all↔all |
 | **lt, gt, le, ge, eq, ne** → Bool output | Yes | Yes | Yes | Yes | Yes | eq/ne |
 | **min, max** (element-wise binary) | Yes | Yes | Yes | Yes | No | No |
 | **bitwise** (and, or, xor, not, shl, shr) | No | Yes | Yes | Yes | Yes | and/or/xor/not |
@@ -61,28 +63,25 @@ This design adds compute support for 6 additional dtype categories, ~15 new op t
 ### Explicitly out of scope
 
 - **Backward ops** (SoftmaxBackward, LayerNormBackward, Conv2dBackwardInput, EmbeddingBackward, BatchNormBackward) — extend to multi-dtype in a future design.
-- **Float64** — MSL does not support `double`. Backlog item: revisit when Apple hardware adds support.
+- **Float64** — MSL does not support `double`. Backlog item.
 - **Int8/Int16 arithmetic** — these are storage types for quantization. Use dequantize→compute→quantize instead.
 
 ## Condition and Scalar Parameter Typing
 
-**`where` and `masked_fill`:** The condition/mask tensor is always Bool (`device const bool*` or `device const uchar*`). Data tensors can be any supported dtype.
+**`where` and `masked_fill`:** The condition/mask tensor should be Bool (`device const uchar*`). Currently, both accept the data dtype for the condition tensor — the validation layer should enforce Bool condition inputs.
 
-**Scalar parameters need generalization.** Several existing OpKind variants carry `f32` scalar fields:
-- `Pow { exponent: f32 }` — needs `ScalarValue` for integer pow
-- `ScalarMul(f32)` — needs to carry the scalar in the tensor's dtype
-- `MaskedFill { value: f32 }` — needs dtype-aware fill value
-- `Clamp { min_val: f32, max_val: f32 }` — needs dtype-aware bounds
+**Scalar parameters:** Already generalized via `ScalarValue` enum in `graph.rs` (completed in Plan 1). `Pow`, `ScalarMul`, `Clamp`, and `MaskedFill` all use `ScalarValue`.
 
-Solution: introduce a `ScalarValue` enum in `graph.rs`:
-```rust
-pub enum ScalarValue {
-    Float(f64),   // covers f32, f16, bf16
-    Int(i64),     // covers i32, i64, i16, i8
-    UInt(u64),    // covers u32, u8
-    Bool(bool),
-}
-```
+## Comparison Ops — Bool Output Design
+
+Comparison ops (Lt, Gt, Le, Ge, Eq, Ne) take two same-dtype inputs and produce a Bool output. This breaks the assumption in `lazy_binary_op` (ops.rs) that `out_dtype == input_dtype`.
+
+**Solution:** Add a `lazy_comparison_op` helper parallel to `lazy_binary_op` that:
+- Validates both inputs have the same dtype
+- Sets `out_dtype = DType::Bool`
+- Records the op node with Bool output shape matching input shape
+
+The comparison kernel templates take `device const {t}*` inputs and write `device bool*` output.
 
 ## Reduction Output Dtypes
 
@@ -90,57 +89,73 @@ pub enum ScalarValue {
 |---|---|---|---|
 | Float32/16/BF16 | same | same | Int32 |
 | Int32 | Int32 (wrapping) | Float32 | Int32 |
-| Int64 | Int64 (wrapping) | Float64 (CPU) or Float32 | Int32 |
+| Int64 | Int64 (wrapping) | Float32 | Int32 |
 | UInt8/32 | UInt32 | Float32 | Int32 |
 | Int8/16 | Int32 | Float32 | Int32 |
 | Bool | Int32 (count of true) | Float32 (fraction) | Int32 |
 
+## Op-Level Dtype Validation
+
+**Problem:** Template generators produce MSL for any (op, dtype) pair. Without validation, `gpu.exp(int32_tensor)` silently produces garbage.
+
+**Solution:** Add `fn validate_op_dtype(op: &OpKind, dtype: DType) -> Result<()>` in `ops.rs` that encodes the coverage matrix above. Call it from every op-recording function before `record_op()`.
+
+Classification:
+- **Float-only ops:** exp, log, sqrt, tanh, relu, gelu, softmax, softmax_causal, matmul, layer_norm, batch_norm, conv1d, conv2d, max_pool2d, avg_pool2d, add_bias, embedding, backward ops
+- **Numeric ops (float + integer, not bool):** add, sub, mul, div, neg, abs, sign, clamp, scalar_mul, pow, sum, argmax, triu, tril, gather, index_select
+- **All-dtype ops:** where, masked_fill, cast, transpose, slice, concat, reshape
+- **Integer/Bool-only ops:** bitwise and/or/xor/not, shl, shr, modulo
+- **Bool-only ops:** logical_not
+
 ## FusedElementwise Interaction
 
-The template-based kernel generator and FusedElementwise both produce MSL at runtime. The fusion engine (`OpKind::FusedElementwise { kernel_source, function_name }`) generates complete MSL strings with hardcoded types. When extending fusion to multi-dtype:
-- The fusion pass must track the dtype of the fused chain
-- Generated MSL must use the correct Metal type (`half`, `bfloat`, `int`, `long`, etc.)
-- This is a natural extension of prerequisite 1 — the template generator provides type-mapping functions that the fusion engine can reuse
+The fusion engine generates complete MSL strings with hardcoded types. It already uses `kernel_templates::metal_type()` and `dtype_suffix()` for type mapping. When adding new element-wise ops to the fusion candidate list:
+- Comparison ops should NOT be fused (they change output dtype)
+- Bitwise ops CAN be fused within integer chains
+- Element-wise min/max CAN be fused
+- `is_elementwise()` in OpKind should be expanded to include new fusable ops
 
-## Prerequisites (ordered)
+## Remaining Prerequisites
 
-1. **Template-based kernel generation** — replace ~70 duplicated MSL string constants with `fn kernel_source(metal_type: &str, suffix: &str) -> String` generator. This is the architectural prerequisite that makes adding 6+ dtypes feasible.
+Six of eight original prerequisites are complete. Two remain:
 
-2. **OpKind enum expansion** — add ~15 new variants to `crates/core/src/graph.rs`: Cast, Lt, Gt, Le, Ge, Eq, Ne, BitwiseAnd, BitwiseOr, BitwiseXor, BitwiseNot, Shl, Shr, Mod, ElemMin, ElemMax, LogicalNot, Quantize, Dequantize. Also introduce `ScalarValue` enum for dtype-aware scalar parameters.
+| # | Prerequisite | Status |
+|---|---|---|
+| 1 | Template-based kernel generation | **DONE** (Plan 2) |
+| 2 | ScalarValue enum | **DONE** (Plan 1) |
+| 3 | UnsupportedDtype error | **DONE** (Plan 2) |
+| 4 | Per-op dtype validation | **NOT DONE** — `is_compute_supported()` allows all non-Float64 but doesn't prevent invalid combos |
+| 5 | BFloat16 from_name fix | **DONE** (already had "bfloat16"/"bf16" arms) |
+| 6 | Cast kernels | **DONE** (Plan 2) |
+| 7 | Byte-copy shape ops | **DONE** (Plan 2) — note: transpose still uses typed template, not byte-copy |
+| 8 | Device GPU family caching | **NOT DONE** — needed for Int64 runtime gating |
 
-3. **`UnsupportedDtype` error variant** — add to `crates/core/src/error.rs`. Needed by all subsequent prerequisites. Int64 on pre-Apple9 returns this error by default (no silent cast to Int32).
+## Implementation Order
 
-4. **`is_compute_supported()` refactor** — replace the boolean at `tensor.rs:31` with a per-op, per-device capability query. Something like `KernelRegistry::supports(op: OpKind, dtype: DType, device: &Device) -> bool`.
+Remaining work, batched by priority:
 
-5. **BFloat16 `from_name` bug fix** — add `"bfloat16" | "bf16"` match arm to `DType::from_name()` at `tensor.rs:36`. Pre-existing bug that blocks BFloat16 compute.
-
-6. **Cast kernels** — dtype conversion for all supported type pairs. Essential for multi-dtype to be usable.
-
-7. **Byte-copy transpose/slice/concat** — rewrite to use `device const char*` with element-size indexing, making them dtype-agnostic. Eliminates need for per-dtype shape op kernels.
-
-8. **Store device GPU family in Device struct** — cache `device.supportsFamily(.apple9)` etc. at init time for efficient runtime capability checks.
-
-## Implementation Order (after prerequisites)
-
-Batch by dtype category for maximum efficiency:
-
-1. **BFloat16** — one template parameter change if prerequisite 1 is done. Immediate win for transformer training.
-2. **Int32 arithmetic + comparison + bitwise** — most commonly needed integer ops. Unblocks index manipulation.
-3. **Int64 arithmetic + comparison** (Apple9+ gated) — unblocks GPT-2 container bug via proper Int64 support.
-4. **Cast kernels** — enables dtype interop.
-5. **UInt8/UInt32 arithmetic + comparison + bitwise** — completes unsigned integer support.
-6. **Bool comparison output + logical ops** — completes the type system.
-7. **Int8/UInt8 quantize/dequantize** — enables quantized inference.
-8. **Element-wise min/max, modulo** — utility ops.
+1. **Op-level dtype validation** — `validate_op_dtype()` encoding the coverage matrix. Prevents nonsensical operations.
+2. **Device GPU family caching + Int64 gating** — cache `supportsFamily(.apple9)` in Device, reject Int64 on older hardware.
+3. **Wire transpose to byte-copy** — switch resolve_kernel "transpose" to use `byte_copy_transpose_source`.
+4. **BFloat16 validation** — run all existing ops with BFloat16, verify results match Float16 within tolerance.
+5. **Int32 arithmetic validation + comparison ops** — verify add/sub/mul/div/neg/abs/sign/clamp/scalar_mul work. Add Lt/Gt/Le/Ge/Eq/Ne with Bool output.
+6. **Int64 arithmetic + comparison** (Apple9+ gated) — same as Int32 but gated. Fixes GPT-2 container bug.
+7. **Bitwise ops + modulo** — BitwiseAnd/Or/Xor/Not, Shl, Shr, Mod for integer types.
+8. **Element-wise min/max** — binary min/max ops.
+9. **UInt8/UInt32 arithmetic + comparison** — validate and test.
+10. **Bool logical ops** — LogicalNot, eq/ne for Bool.
+11. **Int8/UInt8 quantize/dequantize** — enables quantized inference.
 
 ## Testing Strategy
 
-- **Per-dtype kernel tests**: each new dtype × op combination gets a Rust unit test verifying correctness
+- **Per-dtype kernel tests**: each dtype × op combination gets a Rust unit test verifying correctness
 - **Python roundtrip tests**: `tensor(data, dtype=X) → op → to_list()` for each dtype
-- **Cross-dtype cast tests**: every supported type pair
-- **Int64 capability gating test**: verify error on unsupported hardware (mock)
-- **GPT-2 container regression**: end-to-end test that the Int64 embedding indices work after this
+- **Op-dtype rejection tests**: verify `exp(int32_tensor)` raises UnsupportedDtype, not garbage
+- **Cross-dtype cast tests**: every supported type pair (already partially done)
+- **Int64 capability gating test**: verify error on unsupported hardware (mock or feature flag)
+- **GPT-2 container regression**: end-to-end test that Int64 embedding indices work
 - **BFloat16 parity test**: verify BFloat16 matches Float16 results within tolerance
+- **Comparison op output dtype tests**: verify Lt/Gt etc. produce Bool output
 
 ## Backlog
 
@@ -149,3 +164,4 @@ Batch by dtype category for maximum efficiency:
 - **`isinf`/`isnan`** for float types → Bool output
 - **`fill`/`zeros`/`ones`** compute kernels for all dtypes
 - **Quantized matmul** — Int8 weights × Float16 activations with scale factors (dedicated kernel, not generic int matmul)
+- **Reduction output dtype overrides** — implement the reduction output dtype table (sum of Int32 → Int32, mean of Int32 → Float32, etc.)
