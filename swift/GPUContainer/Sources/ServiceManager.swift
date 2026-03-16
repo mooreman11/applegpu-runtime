@@ -14,7 +14,7 @@ enum ServiceManager {
             // Check if process is alive
             if kill(pid, 0) == 0 {
                 // Verify socket is connectable
-                if testConnect(socketPath) {
+                if UnixSocketHelper.testConnect(to: socketPath) {
                     return  // Already running and healthy
                 }
             }
@@ -39,7 +39,7 @@ enum ServiceManager {
         // Readiness probe: wait up to 5 seconds
         for _ in 0..<50 {
             try await Task.sleep(nanoseconds: 100_000_000)  // 100ms
-            if testConnect(socketPath) {
+            if UnixSocketHelper.testConnect(to: socketPath) {
                 print("  gpu-service is ready")
                 return
             }
@@ -49,25 +49,12 @@ enum ServiceManager {
 
     static func testConnect(_ socketPath: String) -> Bool {
         guard FileManager.default.fileExists(atPath: socketPath) else { return false }
-        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-        guard fd >= 0 else { return false }
-        defer { close(fd) }
+        return UnixSocketHelper.testConnect(to: socketPath)
+    }
 
-        var addr = sockaddr_un()
-        addr.sun_family = sa_family_t(AF_UNIX)
-        let pathBytes = socketPath.utf8CString
-        let maxLen = MemoryLayout.size(ofValue: addr.sun_path) - 1
-        withUnsafeMutableBytes(of: &addr.sun_path) { dest in
-            for i in 0..<min(pathBytes.count, maxLen) {
-                dest[i] = UInt8(bitPattern: pathBytes[i])
-            }
-        }
-
-        return withUnsafePointer(to: &addr) { ptr in
-            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
-                Foundation.connect(fd, sockPtr, socklen_t(MemoryLayout<sockaddr_un>.size)) == 0
-            }
-        }
+    static func findContainerBinary() -> String? {
+        ["/opt/homebrew/bin/container", "/usr/local/bin/container"]
+            .first { FileManager.default.isExecutableFile(atPath: $0) }
     }
 
     static func findServiceBinary() -> String? {

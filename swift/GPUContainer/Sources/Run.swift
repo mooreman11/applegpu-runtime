@@ -151,30 +151,15 @@ class TCPBridge {
                 guard clientFd >= 0 else { continue }
 
                 // Connect to Unix socket
-                let unixFd = socket(AF_UNIX, SOCK_STREAM, 0)
-                guard unixFd >= 0 else { close(clientFd); continue }
-
-                var unixAddr = sockaddr_un()
-                unixAddr.sun_family = sa_family_t(AF_UNIX)
-                let pathBytes = self.socketPath.utf8CString
-                let maxLen = MemoryLayout.size(ofValue: unixAddr.sun_path) - 1
-                withUnsafeMutableBytes(of: &unixAddr.sun_path) { dest in
-                    for i in 0..<min(pathBytes.count, maxLen) {
-                        dest[i] = UInt8(bitPattern: pathBytes[i])
-                    }
+                guard let unixFd = UnixSocketHelper.connect(to: self.socketPath) else {
+                    close(clientFd)
+                    continue
                 }
-
-                let connectResult = withUnsafePointer(to: &unixAddr) { ptr in
-                    ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
-                        Foundation.connect(unixFd, sockPtr, socklen_t(MemoryLayout<sockaddr_un>.size))
-                    }
-                }
-                guard connectResult == 0 else { close(clientFd); close(unixFd); continue }
 
                 // Bidirectional relay with proper shutdown
                 let group = DispatchGroup()
-                self.relay(from: clientFd, to: unixFd, group: group)
-                self.relay(from: unixFd, to: clientFd, group: group)
+                UnixSocketHelper.relay(from: clientFd, to: unixFd, group: group)
+                UnixSocketHelper.relay(from: unixFd, to: clientFd, group: group)
 
                 // Close both fds after both relay threads complete
                 Thread.detachNewThread {
@@ -192,29 +177,4 @@ class TCPBridge {
         if serverFd >= 0 { close(serverFd) }
     }
 
-    private func relay(from src: Int32, to dst: Int32, group: DispatchGroup) {
-        group.enter()
-        Thread.detachNewThread {
-            defer { group.leave() }
-            var buf = [UInt8](repeating: 0, count: 65536)
-            while true {
-                let n = read(src, &buf, buf.count)
-                if n <= 0 {
-                    Darwin.shutdown(dst, SHUT_WR)
-                    break
-                }
-                var written = 0
-                while written < n {
-                    let w = buf.withUnsafeBufferPointer { ptr in
-                        write(dst, ptr.baseAddress! + written, n - written)
-                    }
-                    if w <= 0 {
-                        Darwin.shutdown(src, SHUT_RD)
-                        return
-                    }
-                    written += w
-                }
-            }
-        }
-    }
 }
