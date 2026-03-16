@@ -17,6 +17,7 @@ enum ContainerRunner {
         let kernelPath = try findKernel()
         let filteredCommand = command.filter { $0 != "--" }
         let containerId = "gpu-\(UUID().uuidString.prefix(8))"
+        let normalizedImage = Self.normalizeImageReference(image)
 
         // Create container manager
         var manager = try await ContainerManager(
@@ -25,13 +26,13 @@ enum ContainerRunner {
                 platform: .linuxArm
             ),
             initfsReference: "ghcr.io/apple/containerization/vminit:0.26.5",
-            network: try ContainerManager.VmnetNetwork()
+            network: (try? ContainerManager.VmnetNetwork())  // nil if vmnet unavailable (no entitlement)
         )
 
         // Socket configuration for relaying gpu-service into the container
         let socketConfig = UnixSocketConfiguration(
             source: URL(fileURLWithPath: socketPath),
-            destination: URL(fileURLWithPath: "/var/run/applegpu.sock"),
+            destination: URL(fileURLWithPath: "/tmp/applegpu.sock"),
             direction: .into
         )
 
@@ -45,18 +46,19 @@ enum ContainerRunner {
         do {
             container = try await manager.create(
                 containerId,
-                reference: image,
+                reference: normalizedImage,
                 rootfsSizeInBytes: 8 * 1024 * 1024 * 1024 // 8 GiB
             ) { config in
                 config.cpus = cpuCount
                 config.memoryInBytes = UInt64(memoryMB) * 1024 * 1024
                 config.sockets = [socketConfig]
-                config.process.environmentVariables.append("APPLEGPU_SOCKET=/var/run/applegpu.sock")
+                config.process.environmentVariables.append("APPLEGPU_SOCKET=/tmp/applegpu.sock")
                 if !cmd.isEmpty {
                     config.process.arguments = cmd
                 }
             }
         } catch {
+            print("[ContainerRunner] Tier 1 failed: \(error)")
             // Tier 2: Try CLI image pull, then programmatic container creation
             container = try await fallbackWithCLIPull(
                 manager: &manager,
@@ -101,7 +103,7 @@ enum ContainerRunner {
         // Pull image via CLI
         let pullProcess = Process()
         pullProcess.executableURL = URL(fileURLWithPath: containerBin)
-        pullProcess.arguments = ["pull", image]
+        pullProcess.arguments = ["image", "pull", image]
         pullProcess.standardOutput = FileHandle.standardError // Don't pollute stdout
         try pullProcess.run()
         pullProcess.waitUntilExit()
@@ -121,11 +123,31 @@ enum ContainerRunner {
             config.cpus = cpus
             config.memoryInBytes = UInt64(memory) * 1024 * 1024
             config.sockets = [socketConfig]
-            config.process.environmentVariables.append("APPLEGPU_SOCKET=/var/run/applegpu.sock")
+            config.process.environmentVariables.append("APPLEGPU_SOCKET=/tmp/applegpu.sock")
             if !command.isEmpty {
                 config.process.arguments = command
             }
         }
+    }
+
+    /// Normalize a short image reference to a fully qualified one.
+    /// "alpine" → "docker.io/library/alpine:latest"
+    /// "python:3.11-slim" → "docker.io/library/python:3.11-slim"
+    /// "ghcr.io/foo/bar:v1" → unchanged
+    private static func normalizeImageReference(_ ref: String) -> String {
+        var result = ref
+        // Add default tag if missing
+        if !result.contains(":") || (result.contains("/") && !result.split(separator: "/").last!.contains(":")) {
+            if !result.contains(":") { result += ":latest" }
+        }
+        // Add docker.io/library/ prefix for short names
+        if !result.contains("/") {
+            result = "docker.io/library/" + result
+        } else if !result.contains(".") {
+            // user/repo but no domain → docker.io/
+            result = "docker.io/" + result
+        }
+        return result
     }
 
     /// Find the Linux kernel binary for VM boot.
