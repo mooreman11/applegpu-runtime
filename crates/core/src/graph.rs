@@ -63,7 +63,7 @@ pub enum OpKind {
     // Shape ops — general transpose swapping two dimensions
     Transpose { dim0: usize, dim1: usize },
     // Scalar multiply (carries the scalar value)
-    ScalarMul(f32),
+    ScalarMul(ScalarValue),
     // Transformer ops
     Tanh,
     Gelu,
@@ -90,13 +90,13 @@ pub enum OpKind {
     // Element-wise sign (-1, 0, 1)
     Sign,
     // Element-wise power by scalar exponent
-    Pow { exponent: f32 },
+    Pow { exponent: ScalarValue },
     // Element-wise clamp to [min, max]
-    Clamp { min_val: f32, max_val: f32 },
+    Clamp { min_val: ScalarValue, max_val: ScalarValue },
     // Ternary conditional: where(cond, x, y) — select x where cond != 0, else y
     Where,
     // Masked fill: set elements to value where mask is true
-    MaskedFill { value: f32 },
+    MaskedFill { value: ScalarValue },
     // Upper triangular: zero below diagonal
     Triu { diagonal: i32 },
     // Lower triangular: zero above diagonal

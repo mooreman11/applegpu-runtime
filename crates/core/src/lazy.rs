@@ -359,7 +359,8 @@ impl LazyRuntime {
             return Ok(out);
         }
 
-        if let crate::graph::OpKind::ScalarMul(scale) = node.op {
+        if let crate::graph::OpKind::ScalarMul(ref sv) = node.op {
+            let scale = sv.as_f64() as f32;
             let out_buf = self.pool.acquire(device, out_size)?;
             let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
             let input = self.get_tensor(node.inputs[0])?;
@@ -367,24 +368,27 @@ impl LazyRuntime {
             return Ok(out);
         }
 
-        if let crate::graph::OpKind::Pow { exponent } = node.op {
+        if let crate::graph::OpKind::Pow { ref exponent } = node.op {
+            let exp_f32 = exponent.as_f64() as f32;
             let (in_strides, out_shape_u32, ndim, numel) = self.unary_nd_params(node)?;
             let out_buf = self.pool.acquire(device, out_size)?;
             let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
             let input = self.get_tensor(node.inputs[0])?;
             REGISTRY.dispatch_pow_nd_typed(
-                device, dtype, &input.buffer, &in_strides, &out.buffer, &out_shape_u32, ndim, numel, exponent,
+                device, dtype, &input.buffer, &in_strides, &out.buffer, &out_shape_u32, ndim, numel, exp_f32,
             )?;
             return Ok(out);
         }
 
-        if let crate::graph::OpKind::Clamp { min_val, max_val } = node.op {
+        if let crate::graph::OpKind::Clamp { ref min_val, ref max_val } = node.op {
+            let min_f32 = min_val.as_f64() as f32;
+            let max_f32 = max_val.as_f64() as f32;
             let (in_strides, out_shape_u32, ndim, numel) = self.unary_nd_params(node)?;
             let out_buf = self.pool.acquire(device, out_size)?;
             let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
             let input = self.get_tensor(node.inputs[0])?;
             REGISTRY.dispatch_clamp_nd_typed(
-                device, dtype, &input.buffer, &in_strides, &out.buffer, &out_shape_u32, ndim, numel, min_val, max_val,
+                device, dtype, &input.buffer, &in_strides, &out.buffer, &out_shape_u32, ndim, numel, min_f32, max_f32,
             )?;
             return Ok(out);
         }
@@ -411,7 +415,8 @@ impl LazyRuntime {
             return Ok(out);
         }
 
-        if let crate::graph::OpKind::MaskedFill { value } = node.op {
+        if let crate::graph::OpKind::MaskedFill { ref value } = node.op {
+            let fill_f32 = value.as_f64() as f32;
             let (a_strides, b_strides, out_shape_u32, ndim, numel) = self.binary_nd_params(node)?;
             let out_buf = self.pool.acquire(device, out_size)?;
             let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
@@ -421,7 +426,7 @@ impl LazyRuntime {
                 device, dtype,
                 &input.buffer, &a_strides,
                 &mask.buffer, &b_strides,
-                &out.buffer, &out_shape_u32, ndim, numel, value,
+                &out.buffer, &out_shape_u32, ndim, numel, fill_f32,
             )?;
             return Ok(out);
         }
@@ -1011,24 +1016,28 @@ impl LazyRuntime {
             }
         }
 
-        if let crate::graph::OpKind::ScalarMul(scale) = node.op {
+        if let crate::graph::OpKind::ScalarMul(ref sv) = node.op {
+            let scale = sv.as_f64() as f32;
             let input = self.get_tensor(node.inputs[0])?;
             return REGISTRY.dispatch_scalar_mul_typed_nb(device, dtype, queue, &input.buffer, &out.buffer, scale, input.numel());
         }
 
-        if let crate::graph::OpKind::Pow { exponent } = node.op {
+        if let crate::graph::OpKind::Pow { ref exponent } = node.op {
+            let exp_f32 = exponent.as_f64() as f32;
             let (in_strides, out_shape_u32, ndim, numel) = self.unary_nd_params(node)?;
             let input = self.get_tensor(node.inputs[0])?;
             return REGISTRY.dispatch_pow_nd_typed_nb(
-                device, dtype, queue, &input.buffer, &in_strides, &out.buffer, &out_shape_u32, ndim, numel, exponent,
+                device, dtype, queue, &input.buffer, &in_strides, &out.buffer, &out_shape_u32, ndim, numel, exp_f32,
             );
         }
 
-        if let crate::graph::OpKind::Clamp { min_val, max_val } = node.op {
+        if let crate::graph::OpKind::Clamp { ref min_val, ref max_val } = node.op {
+            let min_f32 = min_val.as_f64() as f32;
+            let max_f32 = max_val.as_f64() as f32;
             let (in_strides, out_shape_u32, ndim, numel) = self.unary_nd_params(node)?;
             let input = self.get_tensor(node.inputs[0])?;
             return REGISTRY.dispatch_clamp_nd_typed_nb(
-                device, dtype, queue, &input.buffer, &in_strides, &out.buffer, &out_shape_u32, ndim, numel, min_val, max_val,
+                device, dtype, queue, &input.buffer, &in_strides, &out.buffer, &out_shape_u32, ndim, numel, min_f32, max_f32,
             );
         }
 
@@ -1051,7 +1060,8 @@ impl LazyRuntime {
             );
         }
 
-        if let crate::graph::OpKind::MaskedFill { value } = node.op {
+        if let crate::graph::OpKind::MaskedFill { ref value } = node.op {
+            let fill_f32 = value.as_f64() as f32;
             let (a_strides, b_strides, out_shape_u32, ndim, numel) = self.binary_nd_params(node)?;
             let input = self.get_tensor(node.inputs[0])?;
             let mask = self.get_tensor(node.inputs[1])?;
@@ -1059,7 +1069,7 @@ impl LazyRuntime {
                 device, dtype, queue,
                 &input.buffer, &a_strides,
                 &mask.buffer, &b_strides,
-                &out.buffer, &out_shape_u32, ndim, numel, value,
+                &out.buffer, &out_shape_u32, ndim, numel, fill_f32,
             );
         }
 
