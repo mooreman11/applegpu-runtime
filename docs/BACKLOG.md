@@ -129,14 +129,18 @@ _Containerization, multi-dtype completion, wire protocol v3, CI/packaging._
 ## Up Next
 
 ### PRIORITY 1: Packaging Polish
-- [ ] CI workflow — enable on push/PR with `macos-15-xlarge` M2 Pro GPU runners
-- [ ] Release workflow — triggered on `v*` tags, builds 8 wheels + 2 binaries
-- [ ] TestPyPI validation — upload wheels, verify `pip install` works
-- [ ] Install script — `curl | sh` for gpu-container + gpu-service binaries
-- [ ] `--version` flag for gpu-service and gpu-container
+- [x] CI workflow — enabled on push/PR with `macos-14` runners (Rust + Swift + Python 3.10-3.13 build checks)
+- [x] Release workflow — triggered on `v*` tags, builds 8 wheels + binaries uploaded via `gh release upload`
+- [x] `--version` flag for gpu-service and gpu-container
+- [x] Install script (`install.sh`) — downloads binaries from GitHub Releases with SHA256 checksums
+- [x] `make ci` / `make release-local` — local CI via act or direct build
+- [ ] TestPyPI validation — upload wheels, verify `pip install` works (needs TESTPYPI_TOKEN)
+- [ ] PyPI publishing — real PyPI after TestPyPI validation
+- [ ] Homebrew tap — `brew install mooreman11/tap/applegpu-runtime`
+- [ ] Binary signing/notarization — Apple Developer ID signing for gpu-container/gpu-service
 
 ### PRIORITY 2: Replace TCP Bridge with Unix Socket Relay / vsock
-_Blocked on macOS 26 SDK._
+_macOS 26 SDK available — ready to implement._
 - [ ] vsock relay — VZVirtioSocketListener relay in Swift process
 - [ ] Remove TCP bridge — once Containerization framework path is fully working
 
