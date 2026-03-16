@@ -12,6 +12,9 @@ dependencies = ["numpy"]
 [project.optional-dependencies]
 torch = ["torch>=2.0"]
 transformers = ["transformers", "torch>=2.0"]
+whisper = [
+    "openai-whisper>=20250625",
+]
 
 [dependency-groups]
 dev = ["pytest>=8.0"]
