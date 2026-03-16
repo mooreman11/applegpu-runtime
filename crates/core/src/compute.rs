@@ -1493,7 +1493,7 @@ impl KernelRegistry {
             "conv2d_backward_input" => kt::conv2d_backward_input_kernel_source(dtype),
             "embedding_backward" => kt::embedding_backward_kernel_source(dtype),
             "batch_norm_backward" => kt::batch_norm_backward_kernel_source(dtype),
-            "transpose" => kt::transpose_kernel_source(dtype),
+            "transpose" => return (kt::byte_copy_transpose_source(dtype.size_bytes()), format!("transpose_bytes{}", dtype.size_bytes())),
             "transpose_batched" => kt::transpose_batched_kernel_source(dtype),
             "copy_strided" => kt::copy_strided_kernel_source(dtype),
             "slice_dim0" => return (kt::byte_copy_slice_dim0_source(dtype.size_bytes()), format!("slice_dim0_bytes{}", dtype.size_bytes())),
