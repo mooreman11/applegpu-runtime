@@ -1515,6 +1515,150 @@ kernel void concat_dim1_bytes{es}(device const {t}* a [[buffer(0)]], device cons
     )
 }
 
+// ── Bitwise ops ─────────────────────────────────────────────────────────────
+
+/// Generate bitwise binary kernel source (and, or, xor) for a given dtype.
+/// Works on integer types and Bool.
+pub fn bitwise_binary_kernel_source(dtype: DType) -> String {
+    let t = metal_type(dtype);
+    let s = dtype_suffix(dtype);
+    format!(
+        r#"#include <metal_stdlib>
+using namespace metal;
+{nd}
+kernel void bitwise_and{s}(device const {t}* a [[buffer(0)]], device const {t}* b [[buffer(1)]], device {t}* out [[buffer(2)]], constant uint* a_strides [[buffer(3)]], constant uint* b_strides [[buffer(4)]], constant uint* out_shape [[buffer(5)]], constant uint& ndim [[buffer(6)]], constant uint& numel [[buffer(7)]], uint id [[thread_position_in_grid]]) {{
+    if (id >= numel) return;
+    uint a_off = nd_index_to_offset(id, out_shape, a_strides, ndim);
+    uint b_off = nd_index_to_offset(id, out_shape, b_strides, ndim);
+    out[id] = a[a_off] & b[b_off];
+}}
+kernel void bitwise_or{s}(device const {t}* a [[buffer(0)]], device const {t}* b [[buffer(1)]], device {t}* out [[buffer(2)]], constant uint* a_strides [[buffer(3)]], constant uint* b_strides [[buffer(4)]], constant uint* out_shape [[buffer(5)]], constant uint& ndim [[buffer(6)]], constant uint& numel [[buffer(7)]], uint id [[thread_position_in_grid]]) {{
+    if (id >= numel) return;
+    uint a_off = nd_index_to_offset(id, out_shape, a_strides, ndim);
+    uint b_off = nd_index_to_offset(id, out_shape, b_strides, ndim);
+    out[id] = a[a_off] | b[b_off];
+}}
+kernel void bitwise_xor{s}(device const {t}* a [[buffer(0)]], device const {t}* b [[buffer(1)]], device {t}* out [[buffer(2)]], constant uint* a_strides [[buffer(3)]], constant uint* b_strides [[buffer(4)]], constant uint* out_shape [[buffer(5)]], constant uint& ndim [[buffer(6)]], constant uint& numel [[buffer(7)]], uint id [[thread_position_in_grid]]) {{
+    if (id >= numel) return;
+    uint a_off = nd_index_to_offset(id, out_shape, a_strides, ndim);
+    uint b_off = nd_index_to_offset(id, out_shape, b_strides, ndim);
+    out[id] = a[a_off] ^ b[b_off];
+}}
+"#,
+        nd = ND_INDEX_HELPER, t = t, s = s,
+    )
+}
+
+/// Generate bitwise NOT kernel source (unary).
+pub fn bitwise_not_kernel_source(dtype: DType) -> String {
+    let t = metal_type(dtype);
+    let s = dtype_suffix(dtype);
+    format!(
+        r#"#include <metal_stdlib>
+using namespace metal;
+{nd}
+kernel void bitwise_not{s}(device const {t}* input [[buffer(0)]], device {t}* out [[buffer(1)]], constant uint* in_strides [[buffer(2)]], constant uint* out_shape [[buffer(3)]], constant uint& ndim [[buffer(4)]], constant uint& numel [[buffer(5)]], uint id [[thread_position_in_grid]]) {{
+    if (id >= numel) return;
+    uint in_off = nd_index_to_offset(id, out_shape, in_strides, ndim);
+    out[id] = ~input[in_off];
+}}
+"#,
+        nd = ND_INDEX_HELPER, t = t, s = s,
+    )
+}
+
+/// Generate shift kernel source (shl, shr). Shift amount is passed as float
+/// (for FFI compatibility with the pow dispatch path) and cast to uint in the kernel.
+pub fn shift_kernel_source(dtype: DType) -> String {
+    let t = metal_type(dtype);
+    let s = dtype_suffix(dtype);
+    format!(
+        r#"#include <metal_stdlib>
+using namespace metal;
+{nd}
+kernel void shl{s}(device const {t}* input [[buffer(0)]], device {t}* out [[buffer(1)]], constant uint* in_strides [[buffer(2)]], constant uint* out_shape [[buffer(3)]], constant uint& ndim [[buffer(4)]], constant uint& numel [[buffer(5)]], constant float& shift_f [[buffer(6)]], uint id [[thread_position_in_grid]]) {{
+    if (id >= numel) return;
+    uint in_off = nd_index_to_offset(id, out_shape, in_strides, ndim);
+    uint shift = uint(shift_f);
+    out[id] = input[in_off] << shift;
+}}
+kernel void shr{s}(device const {t}* input [[buffer(0)]], device {t}* out [[buffer(1)]], constant uint* in_strides [[buffer(2)]], constant uint* out_shape [[buffer(3)]], constant uint& ndim [[buffer(4)]], constant uint& numel [[buffer(5)]], constant float& shift_f [[buffer(6)]], uint id [[thread_position_in_grid]]) {{
+    if (id >= numel) return;
+    uint in_off = nd_index_to_offset(id, out_shape, in_strides, ndim);
+    uint shift = uint(shift_f);
+    out[id] = input[in_off] >> shift;
+}}
+"#,
+        nd = ND_INDEX_HELPER, t = t, s = s,
+    )
+}
+
+// ── Modulo op ───────────────────────────────────────────────────────────────
+
+/// Generate modulo kernel source (binary, integer-only).
+pub fn mod_kernel_source(dtype: DType) -> String {
+    let t = metal_type(dtype);
+    let s = dtype_suffix(dtype);
+    format!(
+        r#"#include <metal_stdlib>
+using namespace metal;
+{nd}
+kernel void mod{s}(device const {t}* a [[buffer(0)]], device const {t}* b [[buffer(1)]], device {t}* out [[buffer(2)]], constant uint* a_strides [[buffer(3)]], constant uint* b_strides [[buffer(4)]], constant uint* out_shape [[buffer(5)]], constant uint& ndim [[buffer(6)]], constant uint& numel [[buffer(7)]], uint id [[thread_position_in_grid]]) {{
+    if (id >= numel) return;
+    uint a_off = nd_index_to_offset(id, out_shape, a_strides, ndim);
+    uint b_off = nd_index_to_offset(id, out_shape, b_strides, ndim);
+    out[id] = a[a_off] % b[b_off];
+}}
+"#,
+        nd = ND_INDEX_HELPER, t = t, s = s,
+    )
+}
+
+// ── Element-wise min/max ────────────────────────────────────────────────────
+
+/// Generate element-wise min/max kernel source (binary).
+pub fn elem_minmax_kernel_source(dtype: DType) -> String {
+    let t = metal_type(dtype);
+    let s = dtype_suffix(dtype);
+    format!(
+        r#"#include <metal_stdlib>
+using namespace metal;
+{nd}
+kernel void elem_min{s}(device const {t}* a [[buffer(0)]], device const {t}* b [[buffer(1)]], device {t}* out [[buffer(2)]], constant uint* a_strides [[buffer(3)]], constant uint* b_strides [[buffer(4)]], constant uint* out_shape [[buffer(5)]], constant uint& ndim [[buffer(6)]], constant uint& numel [[buffer(7)]], uint id [[thread_position_in_grid]]) {{
+    if (id >= numel) return;
+    uint a_off = nd_index_to_offset(id, out_shape, a_strides, ndim);
+    uint b_off = nd_index_to_offset(id, out_shape, b_strides, ndim);
+    out[id] = min(a[a_off], b[b_off]);
+}}
+kernel void elem_max{s}(device const {t}* a [[buffer(0)]], device const {t}* b [[buffer(1)]], device {t}* out [[buffer(2)]], constant uint* a_strides [[buffer(3)]], constant uint* b_strides [[buffer(4)]], constant uint* out_shape [[buffer(5)]], constant uint& ndim [[buffer(6)]], constant uint& numel [[buffer(7)]], uint id [[thread_position_in_grid]]) {{
+    if (id >= numel) return;
+    uint a_off = nd_index_to_offset(id, out_shape, a_strides, ndim);
+    uint b_off = nd_index_to_offset(id, out_shape, b_strides, ndim);
+    out[id] = max(a[a_off], b[b_off]);
+}}
+"#,
+        nd = ND_INDEX_HELPER, t = t, s = s,
+    )
+}
+
+// ── Logical NOT ─────────────────────────────────────────────────────────────
+
+/// Generate logical NOT kernel source (Bool only, uchar -> uchar).
+pub fn logical_not_kernel_source() -> String {
+    format!(
+        r#"#include <metal_stdlib>
+using namespace metal;
+{nd}
+kernel void logical_not_bool(device const uchar* input [[buffer(0)]], device uchar* out [[buffer(1)]], constant uint* in_strides [[buffer(2)]], constant uint* out_shape [[buffer(3)]], constant uint& ndim [[buffer(4)]], constant uint& numel [[buffer(5)]], uint id [[thread_position_in_grid]]) {{
+    if (id >= numel) return;
+    uint in_off = nd_index_to_offset(id, out_shape, in_strides, ndim);
+    out[id] = input[in_off] ? 0 : 1;
+}}
+"#,
+        nd = ND_INDEX_HELPER,
+    )
+}
+
 /// Generate comparison kernel source (lt, gt, le, ge, eq, ne) for a given dtype.
 /// Input buffers use the input dtype; output buffer is always `uchar` (Bool).
 pub fn comparison_kernel_source(dtype: DType) -> String {
@@ -1801,5 +1945,75 @@ mod tests {
         let src = byte_copy_concat_dim1_source(8);
         assert!(src.contains("concat_dim1_bytes8"));
         assert!(src.contains("device const long*"));
+    }
+
+    // ── Bitwise ops tests ───────────────────────────────────────────
+
+    #[test]
+    fn bitwise_binary_kernel_typed() {
+        let src = bitwise_binary_kernel_source(DType::Int32);
+        assert!(src.contains("bitwise_and_i32"));
+        assert!(src.contains("bitwise_or_i32"));
+        assert!(src.contains("bitwise_xor_i32"));
+        assert!(src.contains("device const int*"));
+    }
+
+    #[test]
+    fn bitwise_binary_kernel_uint8() {
+        let src = bitwise_binary_kernel_source(DType::UInt8);
+        assert!(src.contains("bitwise_and_u8"));
+        assert!(src.contains("device const uchar*"));
+    }
+
+    #[test]
+    fn bitwise_not_kernel_typed() {
+        let src = bitwise_not_kernel_source(DType::UInt32);
+        assert!(src.contains("bitwise_not_u32"));
+        assert!(src.contains("device const uint*"));
+        assert!(src.contains("~input[in_off]"));
+    }
+
+    #[test]
+    fn shift_kernel_typed() {
+        let src = shift_kernel_source(DType::Int32);
+        assert!(src.contains("shl_i32"));
+        assert!(src.contains("shr_i32"));
+        assert!(src.contains("device const int*"));
+        assert!(src.contains("<< shift"));
+        assert!(src.contains(">> shift"));
+    }
+
+    #[test]
+    fn mod_kernel_typed() {
+        let src = mod_kernel_source(DType::Int32);
+        assert!(src.contains("mod_i32"));
+        assert!(src.contains("device const int*"));
+        assert!(src.contains("a[a_off] % b[b_off]"));
+    }
+
+    #[test]
+    fn elem_minmax_kernel_typed() {
+        let src = elem_minmax_kernel_source(DType::Float32);
+        assert!(src.contains("elem_min_f32"));
+        assert!(src.contains("elem_max_f32"));
+        assert!(src.contains("device const float*"));
+        assert!(src.contains("min(a[a_off], b[b_off])"));
+        assert!(src.contains("max(a[a_off], b[b_off])"));
+    }
+
+    #[test]
+    fn elem_minmax_kernel_int() {
+        let src = elem_minmax_kernel_source(DType::Int32);
+        assert!(src.contains("elem_min_i32"));
+        assert!(src.contains("elem_max_i32"));
+    }
+
+    #[test]
+    fn logical_not_kernel() {
+        let src = logical_not_kernel_source();
+        assert!(src.contains("logical_not_bool"));
+        assert!(src.contains("device const uchar*"));
+        assert!(src.contains("device uchar* out"));
+        assert!(src.contains("input[in_off] ? 0 : 1"));
     }
 }

@@ -823,6 +823,24 @@ impl Backend for SocketBackend {
     // Indexing
     // -----------------------------------------------------------------------
 
+    // Bitwise ops
+    fn bitwise_and(&self, _a: u64, _b: u64) -> BackendResult<u64> { Err("Bitwise ops not supported over socket".to_string()) }
+    fn bitwise_or(&self, _a: u64, _b: u64) -> BackendResult<u64> { Err("Bitwise ops not supported over socket".to_string()) }
+    fn bitwise_xor(&self, _a: u64, _b: u64) -> BackendResult<u64> { Err("Bitwise ops not supported over socket".to_string()) }
+    fn bitwise_not(&self, _a: u64) -> BackendResult<u64> { Err("Bitwise ops not supported over socket".to_string()) }
+    fn shl(&self, _a: u64, _shift: u32) -> BackendResult<u64> { Err("Shift ops not supported over socket".to_string()) }
+    fn shr(&self, _a: u64, _shift: u32) -> BackendResult<u64> { Err("Shift ops not supported over socket".to_string()) }
+
+    // Modulo
+    fn mod_op(&self, _a: u64, _b: u64) -> BackendResult<u64> { Err("Mod op not supported over socket".to_string()) }
+
+    // Element-wise min/max
+    fn elem_min(&self, _a: u64, _b: u64) -> BackendResult<u64> { Err("ElemMin not supported over socket".to_string()) }
+    fn elem_max(&self, _a: u64, _b: u64) -> BackendResult<u64> { Err("ElemMax not supported over socket".to_string()) }
+
+    // Logical NOT
+    fn logical_not(&self, _a: u64) -> BackendResult<u64> { Err("LogicalNot not supported over socket".to_string()) }
+
     // Comparison ops
     fn lt(&self, _a: u64, _b: u64) -> BackendResult<u64> { Err("Comparison ops not supported over socket".to_string()) }
     fn gt(&self, _a: u64, _b: u64) -> BackendResult<u64> { Err("Comparison ops not supported over socket".to_string()) }

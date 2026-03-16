@@ -530,6 +530,28 @@ impl LazyRuntime {
             return Ok(out);
         }
 
+        if let crate::graph::OpKind::Shl { shift } = node.op {
+            let (in_strides, out_shape_u32, ndim, numel) = self.unary_nd_params(node)?;
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+            let input = self.get_tensor(node.inputs[0])?;
+            REGISTRY.dispatch_pow_nd_typed(
+                device, dtype, &input.buffer, &in_strides, &out.buffer, &out_shape_u32, ndim, numel, shift as f32,
+            )?;
+            return Ok(out);
+        }
+
+        if let crate::graph::OpKind::Shr { shift } = node.op {
+            let (in_strides, out_shape_u32, ndim, numel) = self.unary_nd_params(node)?;
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+            let input = self.get_tensor(node.inputs[0])?;
+            REGISTRY.dispatch_pow_nd_typed(
+                device, dtype, &input.buffer, &in_strides, &out.buffer, &out_shape_u32, ndim, numel, shift as f32,
+            )?;
+            return Ok(out);
+        }
+
         if node.op.is_where() {
             let out_buf = self.pool.acquire(device, out_size)?;
             let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
@@ -1229,6 +1251,22 @@ impl LazyRuntime {
             let input = self.get_tensor(node.inputs[0])?;
             return REGISTRY.dispatch_clamp_nd_typed_nb(
                 device, dtype, queue, &input.buffer, &in_strides, &out.buffer, &out_shape_u32, ndim, numel, min_f32, max_f32,
+            );
+        }
+
+        if let crate::graph::OpKind::Shl { shift } = node.op {
+            let (in_strides, out_shape_u32, ndim, numel) = self.unary_nd_params(node)?;
+            let input = self.get_tensor(node.inputs[0])?;
+            return REGISTRY.dispatch_pow_nd_typed_nb(
+                device, dtype, queue, &input.buffer, &in_strides, &out.buffer, &out_shape_u32, ndim, numel, shift as f32,
+            );
+        }
+
+        if let crate::graph::OpKind::Shr { shift } = node.op {
+            let (in_strides, out_shape_u32, ndim, numel) = self.unary_nd_params(node)?;
+            let input = self.get_tensor(node.inputs[0])?;
+            return REGISTRY.dispatch_pow_nd_typed_nb(
+                device, dtype, queue, &input.buffer, &in_strides, &out.buffer, &out_shape_u32, ndim, numel, shift as f32,
             );
         }
 

@@ -1463,6 +1463,12 @@ impl KernelRegistry {
                 }
             }
             "lt" | "gt" | "le" | "ge" | "eq" | "ne" => kt::comparison_kernel_source(dtype),
+            "bitwise_and" | "bitwise_or" | "bitwise_xor" => kt::bitwise_binary_kernel_source(dtype),
+            "bitwise_not" => kt::bitwise_not_kernel_source(dtype),
+            "shl" | "shr" => kt::shift_kernel_source(dtype),
+            "mod" => kt::mod_kernel_source(dtype),
+            "elem_min" | "elem_max" => kt::elem_minmax_kernel_source(dtype),
+            "logical_not" => return (kt::logical_not_kernel_source(), "logical_not_bool".to_string()),
             "scalar_mul" => kt::scalar_mul_kernel_source(dtype),
             "pow" => kt::pow_kernel_source(dtype),
             "clamp" => kt::clamp_kernel_source(dtype),

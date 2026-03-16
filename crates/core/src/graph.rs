@@ -119,6 +119,15 @@ pub enum OpKind {
     BatchNormBackward { eps: f32 },
     // Comparison ops (output is always Bool)
     Lt, Gt, Le, Ge, Eq, Ne,
+    // Bitwise ops (integer + Bool)
+    BitwiseAnd, BitwiseOr, BitwiseXor, BitwiseNot,
+    Shl { shift: u32 }, Shr { shift: u32 },
+    // Modulo (integer only)
+    Mod,
+    // Element-wise min/max
+    ElemMin, ElemMax,
+    // Logical NOT (Bool only)
+    LogicalNot,
     // Type conversion
     Cast { target_dtype: DType },
 }
@@ -180,6 +189,16 @@ impl OpKind {
             OpKind::Ge => "ge",
             OpKind::Eq => "eq",
             OpKind::Ne => "ne",
+            OpKind::BitwiseAnd => "bitwise_and",
+            OpKind::BitwiseOr => "bitwise_or",
+            OpKind::BitwiseXor => "bitwise_xor",
+            OpKind::BitwiseNot => "bitwise_not",
+            OpKind::Shl { .. } => "shl",
+            OpKind::Shr { .. } => "shr",
+            OpKind::Mod => "mod",
+            OpKind::ElemMin => "elem_min",
+            OpKind::ElemMax => "elem_max",
+            OpKind::LogicalNot => "logical_not",
             OpKind::Cast { .. } => "cast",
         }
     }
@@ -189,7 +208,7 @@ impl OpKind {
     }
 
     pub fn is_unary(&self) -> bool {
-        matches!(self, OpKind::Neg | OpKind::Relu | OpKind::Exp | OpKind::Log | OpKind::Sqrt | OpKind::Tanh | OpKind::Gelu | OpKind::Abs | OpKind::Sign)
+        matches!(self, OpKind::Neg | OpKind::Relu | OpKind::Exp | OpKind::Log | OpKind::Sqrt | OpKind::Tanh | OpKind::Gelu | OpKind::Abs | OpKind::Sign | OpKind::BitwiseNot | OpKind::LogicalNot)
     }
 
     pub fn is_matmul(&self) -> bool {

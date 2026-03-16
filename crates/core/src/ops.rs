@@ -99,6 +99,51 @@ pub fn validate_op_dtype(op: &OpKind, dtype: DType) -> Result<()> {
             }
         }
 
+        // Bitwise binary + NOT: integer types + Bool
+        OpKind::BitwiseAnd | OpKind::BitwiseOr | OpKind::BitwiseXor | OpKind::BitwiseNot => {
+            if !matches!(dtype, DType::Int32 | DType::Int64 | DType::UInt8 | DType::UInt32 | DType::Bool) {
+                return Err(GpuError::UnsupportedDtype(format!(
+                    "{:?} requires an integer or Bool dtype, got {}", op, dtype.name()
+                )));
+            }
+        }
+
+        // Shift: integer types only (no Bool)
+        OpKind::Shl { .. } | OpKind::Shr { .. } => {
+            if !matches!(dtype, DType::Int32 | DType::Int64 | DType::UInt8 | DType::UInt32) {
+                return Err(GpuError::UnsupportedDtype(format!(
+                    "{:?} requires an integer dtype, got {}", op, dtype.name()
+                )));
+            }
+        }
+
+        // Modulo: integer types only (no Bool, no float)
+        OpKind::Mod => {
+            if !matches!(dtype, DType::Int32 | DType::Int64 | DType::UInt8 | DType::UInt32) {
+                return Err(GpuError::UnsupportedDtype(format!(
+                    "{:?} requires an integer dtype, got {}", op, dtype.name()
+                )));
+            }
+        }
+
+        // Element-wise min/max: float + integer (not Bool)
+        OpKind::ElemMin | OpKind::ElemMax => {
+            if !(dtype.is_float() || matches!(dtype, DType::Int32 | DType::Int64 | DType::UInt8 | DType::UInt32)) {
+                return Err(GpuError::UnsupportedDtype(format!(
+                    "{:?} does not support {}", op, dtype.name()
+                )));
+            }
+        }
+
+        // Logical NOT: Bool only
+        OpKind::LogicalNot => {
+            if !matches!(dtype, DType::Bool) {
+                return Err(GpuError::UnsupportedDtype(format!(
+                    "LogicalNot requires Bool dtype, got {}", dtype.name()
+                )));
+            }
+        }
+
         // FusedElementwise: validated at fusion time
         OpKind::FusedElementwise { .. } => {}
     }
@@ -195,6 +240,60 @@ pub fn le(rt: &mut LazyRuntime, a: u64, b: u64) -> Result<u64> { lazy_comparison
 pub fn ge(rt: &mut LazyRuntime, a: u64, b: u64) -> Result<u64> { lazy_comparison_op(rt, a, b, OpKind::Ge) }
 pub fn eq_op(rt: &mut LazyRuntime, a: u64, b: u64) -> Result<u64> { lazy_comparison_op(rt, a, b, OpKind::Eq) }
 pub fn ne_op(rt: &mut LazyRuntime, a: u64, b: u64) -> Result<u64> { lazy_comparison_op(rt, a, b, OpKind::Ne) }
+
+// Bitwise ops
+pub fn bitwise_and(rt: &mut LazyRuntime, a: u64, b: u64) -> Result<u64> { lazy_binary_op(rt, a, b, OpKind::BitwiseAnd) }
+pub fn bitwise_or(rt: &mut LazyRuntime, a: u64, b: u64) -> Result<u64> { lazy_binary_op(rt, a, b, OpKind::BitwiseOr) }
+pub fn bitwise_xor(rt: &mut LazyRuntime, a: u64, b: u64) -> Result<u64> { lazy_binary_op(rt, a, b, OpKind::BitwiseXor) }
+pub fn bitwise_not(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> { lazy_unary_op(rt, input_id, OpKind::BitwiseNot) }
+
+/// Shift left by constant amount.
+pub fn shl(rt: &mut LazyRuntime, input_id: u64, shift: u32) -> Result<u64> {
+    let dtype = rt.dtype(input_id)?;
+    let op = OpKind::Shl { shift };
+    validate_op_dtype(&op, dtype)?;
+    let shape = rt.shape(input_id)?;
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op,
+        inputs: vec![input_id],
+        out_shape: Shape::new(shape)?,
+        out_dtype: dtype,
+        container_id: ContainerId::DEFAULT,
+    });
+    Ok(out_id)
+}
+
+/// Shift right by constant amount.
+pub fn shr(rt: &mut LazyRuntime, input_id: u64, shift: u32) -> Result<u64> {
+    let dtype = rt.dtype(input_id)?;
+    let op = OpKind::Shr { shift };
+    validate_op_dtype(&op, dtype)?;
+    let shape = rt.shape(input_id)?;
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op,
+        inputs: vec![input_id],
+        out_shape: Shape::new(shape)?,
+        out_dtype: dtype,
+        container_id: ContainerId::DEFAULT,
+    });
+    Ok(out_id)
+}
+
+// Modulo
+pub fn mod_op(rt: &mut LazyRuntime, a: u64, b: u64) -> Result<u64> { lazy_binary_op(rt, a, b, OpKind::Mod) }
+
+// Element-wise min/max
+pub fn elem_min(rt: &mut LazyRuntime, a: u64, b: u64) -> Result<u64> { lazy_binary_op(rt, a, b, OpKind::ElemMin) }
+pub fn elem_max(rt: &mut LazyRuntime, a: u64, b: u64) -> Result<u64> { lazy_binary_op(rt, a, b, OpKind::ElemMax) }
+
+/// Logical NOT (Bool only).
+pub fn logical_not(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
+    lazy_unary_op(rt, input_id, OpKind::LogicalNot)
+}
 
 pub fn add(rt: &mut LazyRuntime, a_id: u64, b_id: u64) -> Result<u64> {
     lazy_binary_op(rt, a_id, b_id, OpKind::Add)

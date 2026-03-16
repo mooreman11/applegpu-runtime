@@ -108,6 +108,16 @@ fn op_to_discriminant(op: &OpKind) -> u32 {
         OpKind::Ge => 50,
         OpKind::Eq => 51,
         OpKind::Ne => 52,
+        OpKind::BitwiseAnd => 53,
+        OpKind::BitwiseOr => 54,
+        OpKind::BitwiseXor => 55,
+        OpKind::BitwiseNot => 56,
+        OpKind::Shl { .. } => 57,
+        OpKind::Shr { .. } => 58,
+        OpKind::Mod => 59,
+        OpKind::ElemMin => 60,
+        OpKind::ElemMax => 61,
+        OpKind::LogicalNot => 62,
     }
 }
 
@@ -278,6 +288,22 @@ fn discriminant_to_op(d: u32, r: &mut impl Read) -> io::Result<OpKind> {
         50 => Ok(OpKind::Ge),
         51 => Ok(OpKind::Eq),
         52 => Ok(OpKind::Ne),
+        53 => Ok(OpKind::BitwiseAnd),
+        54 => Ok(OpKind::BitwiseOr),
+        55 => Ok(OpKind::BitwiseXor),
+        56 => Ok(OpKind::BitwiseNot),
+        57 => {
+            let shift = read_u32(r)?;
+            Ok(OpKind::Shl { shift })
+        }
+        58 => {
+            let shift = read_u32(r)?;
+            Ok(OpKind::Shr { shift })
+        }
+        59 => Ok(OpKind::Mod),
+        60 => Ok(OpKind::ElemMin),
+        61 => Ok(OpKind::ElemMax),
+        62 => Ok(OpKind::LogicalNot),
         _ => Err(io::Error::new(io::ErrorKind::InvalidData, format!("Unknown op type: {}", d))),
     }
 }
@@ -408,6 +434,12 @@ impl EvalRequest {
             }
             if let OpKind::BatchNormBackward { eps } = node.op {
                 buf.write_all(&eps.to_le_bytes()).unwrap();
+            }
+            if let OpKind::Shl { shift } = node.op {
+                write_u32(&mut buf, shift).unwrap();
+            }
+            if let OpKind::Shr { shift } = node.op {
+                write_u32(&mut buf, shift).unwrap();
             }
         }
 
@@ -602,6 +634,10 @@ impl From<&OpKind> for WireOpKind {
             OpKind::BatchNormBackward { eps } => WireOpKind::BatchNormBackward { eps: *eps },
             OpKind::Lt | OpKind::Gt | OpKind::Le | OpKind::Ge | OpKind::Eq | OpKind::Ne =>
                 unimplemented!("Comparison ops not supported over wire"),
+            OpKind::BitwiseAnd | OpKind::BitwiseOr | OpKind::BitwiseXor | OpKind::BitwiseNot |
+            OpKind::Shl { .. } | OpKind::Shr { .. } | OpKind::Mod |
+            OpKind::ElemMin | OpKind::ElemMax | OpKind::LogicalNot =>
+                unimplemented!("New ops not supported over wire protocol"),
             OpKind::Cast { .. } => unimplemented!("Cast op is not supported over wire protocol"),
         }
     }

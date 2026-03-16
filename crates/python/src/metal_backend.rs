@@ -291,6 +291,54 @@ impl Backend for MetalBackend {
         map_err!(applegpu_core::ops::ne_op(&mut rt, a, b))
     }
 
+    // Bitwise ops
+    fn bitwise_and(&self, a: u64, b: u64) -> BackendResult<u64> {
+        let mut rt = self.runtime.lock().unwrap();
+        map_err!(applegpu_core::ops::bitwise_and(&mut rt, a, b))
+    }
+    fn bitwise_or(&self, a: u64, b: u64) -> BackendResult<u64> {
+        let mut rt = self.runtime.lock().unwrap();
+        map_err!(applegpu_core::ops::bitwise_or(&mut rt, a, b))
+    }
+    fn bitwise_xor(&self, a: u64, b: u64) -> BackendResult<u64> {
+        let mut rt = self.runtime.lock().unwrap();
+        map_err!(applegpu_core::ops::bitwise_xor(&mut rt, a, b))
+    }
+    fn bitwise_not(&self, a: u64) -> BackendResult<u64> {
+        let mut rt = self.runtime.lock().unwrap();
+        map_err!(applegpu_core::ops::bitwise_not(&mut rt, a))
+    }
+    fn shl(&self, a: u64, shift: u32) -> BackendResult<u64> {
+        let mut rt = self.runtime.lock().unwrap();
+        map_err!(applegpu_core::ops::shl(&mut rt, a, shift))
+    }
+    fn shr(&self, a: u64, shift: u32) -> BackendResult<u64> {
+        let mut rt = self.runtime.lock().unwrap();
+        map_err!(applegpu_core::ops::shr(&mut rt, a, shift))
+    }
+
+    // Modulo
+    fn mod_op(&self, a: u64, b: u64) -> BackendResult<u64> {
+        let mut rt = self.runtime.lock().unwrap();
+        map_err!(applegpu_core::ops::mod_op(&mut rt, a, b))
+    }
+
+    // Element-wise min/max
+    fn elem_min(&self, a: u64, b: u64) -> BackendResult<u64> {
+        let mut rt = self.runtime.lock().unwrap();
+        map_err!(applegpu_core::ops::elem_min(&mut rt, a, b))
+    }
+    fn elem_max(&self, a: u64, b: u64) -> BackendResult<u64> {
+        let mut rt = self.runtime.lock().unwrap();
+        map_err!(applegpu_core::ops::elem_max(&mut rt, a, b))
+    }
+
+    // Logical NOT
+    fn logical_not(&self, a: u64) -> BackendResult<u64> {
+        let mut rt = self.runtime.lock().unwrap();
+        map_err!(applegpu_core::ops::logical_not(&mut rt, a))
+    }
+
     fn cast(&self, a: u64, target_dtype: &str) -> BackendResult<u64> {
         let dt = applegpu_core::tensor::DType::from_name(target_dtype)
             .ok_or_else(|| format!("Unknown dtype: {}", target_dtype))?;
