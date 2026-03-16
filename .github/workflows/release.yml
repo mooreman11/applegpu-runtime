@@ -66,6 +66,7 @@ jobs:
   build-binaries:
     name: Build Swift + Rust Binaries
     runs-on: macos-14
+    continue-on-error: true  # Swift 6.1+ not available on macos-14; upload binaries via `make release-local` + `gh release upload`
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -87,7 +88,8 @@ jobs:
 
   release:
     name: Create Release
-    needs: [build-wheels-macos, build-wheels-linux, build-binaries]
+    needs: [build-wheels-macos, build-wheels-linux]
+    # build-binaries is optional (may fail on CI due to Swift version)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -99,7 +101,8 @@ jobs:
           mkdir -p dist
           cp artifacts/wheels-macos/*.whl dist/
           cp artifacts/wheels-linux/*.whl dist/
-          cp artifacts/binaries/* dist/
+          # Binaries may not exist if Swift build failed on CI
+          cp artifacts/binaries/* dist/ 2>/dev/null || echo "No binaries from CI — upload locally with: gh release upload v0.8.0 dist/gpu-*"
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:

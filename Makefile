@@ -1,4 +1,4 @@
-.PHONY: all build test clean setup check
+.PHONY: all build test clean setup check ci release
 
 all: build test
 
@@ -35,7 +35,32 @@ check:
 	cargo check --workspace
 	cd swift && swift build
 
+# Run CI workflow locally via act (full GPU + Swift support)
+ci:
+	act push -P macos-14=-self-hosted --workflows .github/workflows/ci.yml
+
+# Build release artifacts locally via act
+release:
+	act push -P macos-14=-self-hosted --workflows .github/workflows/release.yml \
+		--eventpath /dev/stdin <<< '{"ref":"refs/tags/v$(shell grep "^version" Cargo.toml | head -1 | cut -d\" -f2)"}'
+
+# Build release artifacts directly (without act)
+release-local:
+	@echo "Building wheels..."
+	uv run maturin build --release
+	uv run maturin build --release --target aarch64-unknown-linux-gnu --zig -i python3.10 python3.11 python3.12 python3.13
+	@echo "Building binaries..."
+	cargo build -p applegpu-service --release
+	cd swift/GPUContainer && swift build -c release
+	@echo "Collecting artifacts..."
+	mkdir -p dist
+	cp target/wheels/*.whl dist/
+	cp target/release/gpu-service dist/
+	cp swift/GPUContainer/.build/release/gpu-container dist/
+	cd dist && shasum -a 256 * > checksums.txt
+	@echo "Artifacts in dist/"
+
 clean:
 	cargo clean
 	cd swift && swift package clean
-	rm -rf target
+	rm -rf target dist
