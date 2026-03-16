@@ -29,8 +29,11 @@ struct Run: AsyncParsableCommand {
         print("Ensuring gpu-service is running...")
         try await ServiceManager.ensureRunning(socketPath: socketPath)
 
+        // Allow forcing TCP bridge for testing
+        let forceTCP = ProcessInfo.processInfo.environment["APPLEGPU_FORCE_TCP"] != nil
+
         // Try Containerization framework first (macOS 26+, direct socket mount)
-        if #available(macOS 26, *) {
+        if !forceTCP, #available(macOS 26, *) {
             do {
                 try await ContainerRunner.run(
                     image: image,
@@ -40,9 +43,15 @@ struct Run: AsyncParsableCommand {
                     command: command
                 )
                 return
+            } catch let error as GPUContainerError {
+                switch error {
+                case .containerExited:
+                    throw error  // Real error, don't fall back
+                default:
+                    print("ContainerRunner failed: \(error). Falling back to TCP bridge...")
+                }
             } catch {
-                print("Containerization framework unavailable, falling back to container CLI...")
-                print("  Error: \(error)")
+                print("ContainerRunner failed: \(error). Falling back to TCP bridge...")
             }
         }
 
@@ -52,14 +61,16 @@ struct Run: AsyncParsableCommand {
 
     /// Legacy fallback: uses Apple's `container` CLI with TCP bridge.
     private func runWithContainerCLI(socketPath: String) async throws {
+        let hostIP = ProcessInfo.processInfo.environment["APPLEGPU_BRIDGE_HOST"] ?? "192.168.64.1"
+
         print("Starting TCP bridge on port \(gpuPort)...")
-        let bridge = try TCPBridge(port: gpuPort, socketPath: socketPath)
+        let bridge = try TCPBridge(port: gpuPort, socketPath: socketPath, hostIP: hostIP)
         bridge.start()
 
         var args: [String] = ["run", "--rm"]
         args += ["--cpus", "\(cpus)"]
         args += ["--memory", "\(memory)M"]
-        args += ["--env", "APPLEGPU_HOST=192.168.64.1"]
+        args += ["--env", "APPLEGPU_HOST=\(hostIP)"]
         args += ["--env", "APPLEGPU_PORT=\(gpuPort)"]
         args += [image]
 
@@ -70,9 +81,9 @@ struct Run: AsyncParsableCommand {
 
         print("Starting container from \(image)...")
         print("  CPUs: \(cpus), Memory: \(memory)MB")
-        print("  GPU bridge: 192.168.64.1:\(gpuPort) → \(socketPath)")
+        print("  GPU bridge: \(hostIP):\(gpuPort) → \(socketPath)")
 
-        guard let containerBin = findContainerBinary() else {
+        guard let containerBin = ServiceManager.findContainerBinary() else {
             throw GPUContainerError.containerCliNotFound
         }
 
@@ -83,8 +94,14 @@ struct Run: AsyncParsableCommand {
         process.standardError = FileHandle.standardError
         process.standardInput = FileHandle.standardInput
 
-        try process.run()
-        process.waitUntilExit()
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            process.terminationHandler = { _ in continuation.resume() }
+            do {
+                try process.run()
+            } catch {
+                continuation.resume(throwing: error)
+            }
+        }
 
         bridge.stop()
 
@@ -93,11 +110,6 @@ struct Run: AsyncParsableCommand {
             throw ExitCode(exitCode)
         }
     }
-
-    private func findContainerBinary() -> String? {
-        ["/opt/homebrew/bin/container", "/usr/local/bin/container"]
-            .first { FileManager.default.isExecutableFile(atPath: $0) }
-    }
 }
 
 /// Bridges TCP connections to a Unix domain socket.
@@ -105,13 +117,15 @@ struct Run: AsyncParsableCommand {
 class TCPBridge {
     let port: Int
     let socketPath: String
+    let hostIP: String
     private var serverFd: Int32 = -1
     private var running = false
     private var thread: Thread?
 
-    init(port: Int, socketPath: String) throws {
+    init(port: Int, socketPath: String, hostIP: String = "192.168.64.1") throws {
         self.port = port
         self.socketPath = socketPath
+        self.hostIP = hostIP
     }
 
     func start() {
@@ -124,7 +138,7 @@ class TCPBridge {
         var addr = sockaddr_in()
         addr.sin_family = sa_family_t(AF_INET)
         addr.sin_port = UInt16(port).bigEndian
-        addr.sin_addr.s_addr = inet_addr("192.168.64.1")
+        addr.sin_addr.s_addr = inet_addr(hostIP)
 
         let bindResult = withUnsafePointer(to: &addr) { ptr in
             ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
