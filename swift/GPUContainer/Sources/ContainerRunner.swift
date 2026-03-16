@@ -29,10 +29,16 @@ enum ContainerRunner {
             network: (try? ContainerManager.VmnetNetwork())  // nil if vmnet unavailable (no entitlement)
         )
 
-        // Socket configuration for relaying gpu-service into the container
+        // Socket relay: mount the directory containing the host socket into the container.
+        // We relay to /run/applegpu/ directory — the socket will appear as /run/applegpu/runtime.sock
+        let socketDir = (socketPath as NSString).deletingLastPathComponent
+        let socketFilename = (socketPath as NSString).lastPathComponent
+        // Use /tmp/ — part of the rootfs (not a separate mount), exists in all images
+        let containerSocketPath = "/tmp/\(socketFilename)"
+
         let socketConfig = UnixSocketConfiguration(
             source: URL(fileURLWithPath: socketPath),
-            destination: URL(fileURLWithPath: "/tmp/applegpu.sock"),
+            destination: URL(fileURLWithPath: containerSocketPath),
             direction: .into
         )
 
@@ -51,8 +57,10 @@ enum ContainerRunner {
             ) { config in
                 config.cpus = cpuCount
                 config.memoryInBytes = UInt64(memoryMB) * 1024 * 1024
+                // Socket relay will be set up after container starts via vminitd
                 config.sockets = [socketConfig]
-                config.process.environmentVariables.append("APPLEGPU_SOCKET=/tmp/applegpu.sock")
+                config.process.environmentVariables.append("APPLEGPU_SOCKET=\(containerSocketPath)")
+                config.useInit = true  // Enable init wrapper for proper socket staging
                 if !cmd.isEmpty {
                     config.process.arguments = cmd
                 }
@@ -123,7 +131,7 @@ enum ContainerRunner {
             config.cpus = cpus
             config.memoryInBytes = UInt64(memory) * 1024 * 1024
             config.sockets = [socketConfig]
-            config.process.environmentVariables.append("APPLEGPU_SOCKET=/tmp/applegpu.sock")
+            config.process.environmentVariables.append("APPLEGPU_SOCKET=/tmp/runtime.sock")
             if !command.isEmpty {
                 config.process.arguments = command
             }
