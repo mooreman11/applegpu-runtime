@@ -176,6 +176,12 @@ _Three-tier fallback architecture. Partially implemented — blocked by framewor
 
 ## Further Backlog
 
+### Missing Ops (prerequisite for Whisper + general utility)
+- [ ] `sin`/`cos` — float unary ops, needed for sinusoidal positional encoding (Whisper, transformers)
+- [ ] `log_softmax` — fused log(softmax(x)) with numerical stability, needed for token probability (Whisper, all LM decoding)
+- [ ] Fix Conv1d bias CPU fallback — torch_backend falls back to CPU for bias add on 3D tensors, blocks Whisper encoder performance
+- [ ] Verify cross-attention shapes — test `gpu.attention(q, k, v)` when `q_len != kv_len` (Whisper decoder)
+
 ### Multi-Dtype Remaining
 - [ ] Reduction output dtype overrides — sum(Int32)→Int32, mean(Int32)→Float32, sum(Bool)→Int32 count
 - [ ] Quantized matmul — Int8 weights x Float16 activations with scale factors
