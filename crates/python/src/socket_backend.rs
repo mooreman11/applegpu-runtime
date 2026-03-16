@@ -167,8 +167,6 @@ impl SocketBackend {
         let mut visited = HashSet::new();
         let mut order = Vec::new();
         let mut input_tensors = HashSet::new();
-        let mut stack = VecDeque::new();
-        stack.push_back(target_id);
 
         // Iterative DFS (post-order)
         let mut visit_stack: Vec<(u64, bool)> = vec![(target_id, false)];
@@ -208,9 +206,6 @@ impl SocketBackend {
 
 impl Backend for SocketBackend {
     fn init(&self) -> BackendResult<HashMap<String, String>> {
-        let socket_path = std::env::var("APPLEGPU_SOCKET")
-            .unwrap_or_else(|_| "/var/run/applegpu.sock".to_string());
-
         let requested_memory: u64 = std::env::var("APPLEGPU_MEMORY_MB")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -218,12 +213,11 @@ impl Backend for SocketBackend {
             * 1024
             * 1024;
 
-        let client = GpuClient::connect_unix(&socket_path, requested_memory)
-            .map_err(|e| format!("Failed to connect to gpu-service at {}: {}", socket_path, e))?;
+        let client = GpuClient::connect_auto(requested_memory)
+            .map_err(|e| format!("Failed to connect to gpu-service: {}", e))?;
 
         let mut info = HashMap::new();
         info.insert("backend".to_string(), "socket".to_string());
-        info.insert("socket_path".to_string(), socket_path);
         info.insert(
             "container_id".to_string(),
             client.container_id.to_string(),

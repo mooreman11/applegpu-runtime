@@ -201,11 +201,16 @@ _Containerization: run GPU workloads inside OCI Linux containers on Apple Silico
 ### PRIORITY 1: Replace TCP bridge with Unix socket relay / vsock
 _The TCP bridge works but adds latency and complexity. Replace with direct socket forwarding for ~10x lower latency._
 
-- [ ] **Unix socket relay via Containerization framework** — use `UnixSocketConfiguration(source: host_socket, destination: container_socket, direction: .into)` to forward `~/.applegpu/runtime.sock` into the container as `/var/run/applegpu.sock`. Requires Apple Containerization framework (macOS 26+).
-- [ ] **Direct vsock transport** — alternative: `VZVirtioSocketListener` on host, container connects via vsock CID+port. The `crates/client` already supports vsock transport — wire it to the container VM.
-- [ ] **Remove TCP bridge** — once socket relay is working, delete `TCPBridge` class from `Run.swift`
-- [ ] **Update gpu-container CLI** — switch from `container` CLI wrapper to direct Containerization framework API (`LinuxContainer`, socket mounts, image injection)
+- [x] **Transport trait generalization** — `Box<dyn Transport>` in GpuClient, impls for UnixStream/TcpStream/VsockStream, `connect_auto()` auto-detection
+- [x] **ContainerRunner skeleton** — Containerization framework `#available(macOS 26, *)` guard, `UnixSocketConfiguration` socket relay (skeleton — needs macOS 26 SDK)
+- [x] **gpu-container CLI refactor** — try ContainerRunner first, fall back to container CLI + TCP bridge
+- [x] **TCPBridge double-close fix** — `shutdown()` + DispatchGroup + single close path
+- [x] **TCP bridge bind tightening** — bind to `192.168.64.1` container subnet instead of `INADDR_ANY`
+- [x] **SocketBackend connect_auto** — auto-detects vsock/unix/tcp transport, fixed VecDeque compile bug
+- [x] **Docker bind-mount documentation** — one-liner `docker run -v` example in README
+- [ ] **vsock relay** — (DEFERRED) VZVirtioSocketListener relay in Swift process, requires macOS 26 SDK + Virtualization framework
 - [ ] **End-to-end test** — `gpu-container run` with `import applegpu_runtime` inside container, verify GPU ops work over socket relay
+- [ ] **Remove TCP bridge** — once Containerization framework path is fully working, delete `TCPBridge` class
 
 ### PRIORITY 2: Packaging
 _Ship installable binaries and Python wheels._
@@ -248,9 +253,10 @@ _Graph-level fusion, eliminate Python dispatch overhead._
 - [x] **Backend trait abstraction** — MetalBackend (macOS) / SocketBackend (Linux) with conditional compilation, single Python package
 - [x] **gpu-container CLI** — Swift CLI with auto-start gpu-service, TCP bridge, container env injection
 - [x] **Wire protocol v2** — 46 op types, dtype-aware, ReadTensor, FusedElementwise rejection, shape inference
-- [ ] **Unix socket relay / vsock** — replace TCP bridge with direct socket forwarding (PRIORITY — see Up Next)
+- [x] **Transport generalization** — `Box<dyn Transport>` in GpuClient, connect_auto(), ContainerRunner skeleton
+- [ ] **Unix socket relay / vsock** — complete Containerization framework integration when macOS 26 SDK available
 - [ ] **AVF VM integration** — VZVirtualMachine lifecycle, virtio-vsock transport (Metal GPU can't pass through to guest VMs)
-- [ ] **Docker bind-mount documentation** — instructions for mounting the GPU service socket into Docker containers
+- [x] **Docker bind-mount documentation** — one-liner `docker run -v` example in README
 - [ ] **Phase C: Dynamic container lifecycle** — work stealing, auto-scaling based on queue pressure
 - [ ] **Multi-node / distributed graph** — network transport layer, graph partitioning across machines
 

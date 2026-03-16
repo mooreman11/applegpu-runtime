@@ -29,12 +29,33 @@ struct Run: AsyncParsableCommand {
         print("Ensuring gpu-service is running...")
         try await ServiceManager.ensureRunning(socketPath: socketPath)
 
-        // Start TCP bridge: forwards TCP connections on gpuPort to the Unix socket
+        // Try Containerization framework first (macOS 26+, direct socket mount)
+        if #available(macOS 26, *) {
+            do {
+                try await ContainerRunner.run(
+                    image: image,
+                    cpus: cpus,
+                    memory: memory,
+                    socketPath: socketPath,
+                    command: command
+                )
+                return
+            } catch {
+                print("Containerization framework unavailable, falling back to container CLI...")
+                print("  Error: \(error)")
+            }
+        }
+
+        // Fallback: container CLI + TCP bridge
+        try await runWithContainerCLI(socketPath: socketPath)
+    }
+
+    /// Legacy fallback: uses Apple's `container` CLI with TCP bridge.
+    private func runWithContainerCLI(socketPath: String) async throws {
         print("Starting TCP bridge on port \(gpuPort)...")
         let bridge = try TCPBridge(port: gpuPort, socketPath: socketPath)
         bridge.start()
 
-        // Build container run command via Apple's container CLI
         var args: [String] = ["run", "--rm"]
         args += ["--cpus", "\(cpus)"]
         args += ["--memory", "\(memory)M"]
@@ -103,7 +124,7 @@ class TCPBridge {
         var addr = sockaddr_in()
         addr.sin_family = sa_family_t(AF_INET)
         addr.sin_port = UInt16(port).bigEndian
-        addr.sin_addr.s_addr = INADDR_ANY
+        addr.sin_addr.s_addr = inet_addr("192.168.64.1")
 
         let bindResult = withUnsafePointer(to: &addr) { ptr in
             ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
@@ -150,9 +171,17 @@ class TCPBridge {
                 }
                 guard connectResult == 0 else { close(clientFd); close(unixFd); continue }
 
-                // Bidirectional relay in background threads
-                self.relay(from: clientFd, to: unixFd)
-                self.relay(from: unixFd, to: clientFd)
+                // Bidirectional relay with proper shutdown
+                let group = DispatchGroup()
+                self.relay(from: clientFd, to: unixFd, group: group)
+                self.relay(from: unixFd, to: clientFd, group: group)
+
+                // Close both fds after both relay threads complete
+                Thread.detachNewThread {
+                    group.wait()
+                    close(clientFd)
+                    close(unixFd)
+                }
             }
         }
         thread?.start()
@@ -163,23 +192,29 @@ class TCPBridge {
         if serverFd >= 0 { close(serverFd) }
     }
 
-    private func relay(from src: Int32, to dst: Int32) {
+    private func relay(from src: Int32, to dst: Int32, group: DispatchGroup) {
+        group.enter()
         Thread.detachNewThread {
+            defer { group.leave() }
             var buf = [UInt8](repeating: 0, count: 65536)
             while true {
                 let n = read(src, &buf, buf.count)
-                if n <= 0 { break }
+                if n <= 0 {
+                    Darwin.shutdown(dst, SHUT_WR)
+                    break
+                }
                 var written = 0
                 while written < n {
                     let w = buf.withUnsafeBufferPointer { ptr in
                         write(dst, ptr.baseAddress! + written, n - written)
                     }
-                    if w <= 0 { close(src); close(dst); return }
+                    if w <= 0 {
+                        Darwin.shutdown(src, SHUT_RD)
+                        return
+                    }
                     written += w
                 }
             }
-            close(src)
-            close(dst)
         }
     }
 }
