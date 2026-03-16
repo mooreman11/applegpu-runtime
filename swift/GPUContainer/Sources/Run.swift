@@ -171,9 +171,17 @@ class TCPBridge {
                 }
                 guard connectResult == 0 else { close(clientFd); close(unixFd); continue }
 
-                // Bidirectional relay in background threads
-                self.relay(from: clientFd, to: unixFd)
-                self.relay(from: unixFd, to: clientFd)
+                // Bidirectional relay with proper shutdown
+                let group = DispatchGroup()
+                self.relay(from: clientFd, to: unixFd, group: group)
+                self.relay(from: unixFd, to: clientFd, group: group)
+
+                // Close both fds after both relay threads complete
+                Thread.detachNewThread {
+                    group.wait()
+                    close(clientFd)
+                    close(unixFd)
+                }
             }
         }
         thread?.start()
@@ -184,23 +192,29 @@ class TCPBridge {
         if serverFd >= 0 { close(serverFd) }
     }
 
-    private func relay(from src: Int32, to dst: Int32) {
+    private func relay(from src: Int32, to dst: Int32, group: DispatchGroup) {
+        group.enter()
         Thread.detachNewThread {
+            defer { group.leave() }
             var buf = [UInt8](repeating: 0, count: 65536)
             while true {
                 let n = read(src, &buf, buf.count)
-                if n <= 0 { break }
+                if n <= 0 {
+                    Darwin.shutdown(dst, SHUT_WR)
+                    break
+                }
                 var written = 0
                 while written < n {
                     let w = buf.withUnsafeBufferPointer { ptr in
                         write(dst, ptr.baseAddress! + written, n - written)
                     }
-                    if w <= 0 { close(src); close(dst); return }
+                    if w <= 0 {
+                        Darwin.shutdown(src, SHUT_RD)
+                        return
+                    }
                     written += w
                 }
             }
-            close(src)
-            close(dst)
         }
     }
 }
