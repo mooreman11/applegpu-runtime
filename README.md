@@ -19,7 +19,10 @@ Swift Compat Layer ←  Metal, AVF (Apple Virtualization Framework)
 ## Install
 
 ```bash
-# Prerequisites: Rust, Swift (Xcode), uv
+# From GitHub Releases (prebuilt wheels)
+pip install applegpu_runtime --find-links https://github.com/mooreman11/applegpu-runtime/releases/latest
+
+# From source (requires Rust, Swift/Xcode, uv)
 make setup
 uv run maturin develop
 ```
@@ -99,18 +102,25 @@ out = gpu.attention_causal(q, k, v)  # batched causal attention
 
 ## Capabilities
 
-### 39 GPU Operations (all dtypes except Float64, all N-D)
+### 61 GPU Operations (all dtypes except Float64, all N-D)
 
 | Category | Ops |
 |----------|-----|
-| Element-wise | add, sub, mul, div, neg, relu, gelu, exp, log, sqrt, abs, sign, pow, clamp, tanh |
-| Reduction | softmax, softmax_causal, argmax, sum, mean |
-| Matrix | matmul (batched), layer_norm, embedding, attention, attention_causal |
-| Shape | reshape, slice, concat, add_bias, transpose, transpose_dims |
-| Conditional | where, masked_fill, triu, tril |
-| Indexing | gather, index_select |
-| CNN | conv1d, conv2d, batch_norm, max_pool2d, avg_pool2d |
-| Type | cast |
+| Element-wise (15) | add, sub, mul, div, neg, relu, gelu, exp, log, sqrt, abs, sign, pow, clamp, tanh |
+| Reduction (5) | softmax, softmax_causal, argmax, sum, mean |
+| Matrix/Transformer (5) | matmul (batched), layer_norm, embedding, attention, attention_causal |
+| Shape (6) | reshape, slice, concat, add_bias, transpose, transpose_dims |
+| Conditional (4) | where, masked_fill, triu, tril |
+| Indexing (2) | gather, index_select |
+| CNN (5) | conv1d, conv2d, batch_norm, max_pool2d, avg_pool2d |
+| Comparison (6) | lt, gt, le, ge, eq, ne |
+| Bitwise (6) | bitwise_and, bitwise_or, bitwise_xor, bitwise_not, shl, shr |
+| Utility (3) | mod, elem_min, elem_max |
+| Logical (1) | logical_not |
+| Quantize (2) | quantize, dequantize |
+| Type (1) | cast |
+
+Plus 5 backward ops on Metal: softmax_backward, layer_norm_backward, conv2d_backward_input, embedding_backward, batch_norm_backward.
 
 All ops support N-D tensors (up to 8 dimensions) with NumPy-style broadcasting and kernel fusion. Kernel sources are generated from templates — a single code path handles all 10 dtypes.
 
@@ -126,11 +136,12 @@ All ops support N-D tensors (up to 8 dimensions) with NumPy-style broadcasting a
 - **Command buffer batching** — non-blocking GPU dispatch, single wait per eval
 - **N-D tensors** — stride-based MSL kernels, NumPy-style broadcasting
 - **Multi-dtype** — 10 types (float16/32/64, int8/16/32/64, uint8/32, bool) with NumPy/PyTorch roundtrip, `gpu.cast()` for conversion
+- **Op-level dtype validation** — `validate_op_dtype()` encodes per-op coverage matrix, Int64 gated to Apple9+ GPUs
 - **Template kernel dispatch** — all MSL kernels generated from parameterized templates, unified code path for all dtypes
 - **Kernel fusion** — auto-detect element-wise chains, generate fused MSL at runtime
 - **Two backends** — MetalBackend (direct Metal, macOS) and SocketBackend (wire protocol, Linux containers)
 - **Container GPU access** — `gpu-container run` CLI, auto-start gpu-service, TCP bridge, multi-client with fair scheduling
-- **Wire protocol** — 46 op types, dtype-aware serialization, ReadTensor support, FusedElementwise rejection (security)
+- **Wire protocol** — 65 op types, dtype-aware serialization, ReadTensor support, FusedElementwise rejection (security)
 
 ## Container GPU Access
 
@@ -210,7 +221,7 @@ No TCP bridge, no port forwarding, no special networking required.
 
 ### Test Coverage
 
-~650 tests across all layers (327 Rust + 16 Swift + ~306 Python)
+~700 tests across all layers (351 Rust + 18 Swift + 334 Python)
 
 ## Examples
 
@@ -228,4 +239,5 @@ TDD across all three layers:
 make test-rust     # cargo test -p applegpu-core
 make test-swift    # cd swift && swift test
 make test-python   # uv run pytest -v
+make ci            # run full CI locally via act
 ```
