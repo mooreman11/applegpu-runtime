@@ -174,10 +174,49 @@ _Production training: backward kernels, Adam/AdamW, gradient clipping, 385x fast
 - [x] Adam/AdamW/SGD optimizers, gradient clipping
 - [x] Direct data_ptr() transfer (385x faster from_torch, 683x faster from_numpy)
 
+## v0.8.0 — SHIPPED
+_Containerization: run GPU workloads inside OCI Linux containers on Apple Silicon._
+
+### Containerization prerequisites (P1–P5):
+- [x] **FusedElementwise rejection** — security guard in gpu-service prevents arbitrary MSL injection over wire protocol
+- [x] **DType handling** — gpu-service maps all 10 wire dtypes correctly (was hardcoded to Float32)
+- [x] **ReadTensorRequest/Response** — wire protocol supports fetching previously-computed tensor data
+- [x] **Legacy ipc.rs deprecated** — marked with `#[deprecated]`, callers use `crates/client`
+- [x] **PID file + signal handling** — gpu-service writes PID file, handles SIGTERM gracefully, detects stale sockets
+
+### Backend trait abstraction:
+- [x] **Backend trait** — `crates/python/src/backend.rs` with ~107 methods covering all ops
+- [x] **MetalBackend** — `#[cfg(target_os = "macos")]`, wraps `Mutex<LazyRuntime>` + applegpu-core ops
+- [x] **SocketBackend** — `#[cfg(target_os = "linux")]`, wraps `GpuClient` + wire protocol, lazy graph tracking with client-side shape inference
+- [x] **Conditional compilation** — single `applegpu-runtime` package, platform-specific wheels
+
+### gpu-container CLI:
+- [x] **`gpu-container run`** — Swift CLI wrapping Apple's `container` tool
+- [x] **Auto-start gpu-service** — readiness probe, PID file check, binary discovery
+- [x] **TCP bridge** — forwards TCP port 7654 → Unix socket `~/.applegpu/runtime.sock`
+- [x] **Container env vars** — `APPLEGPU_HOST=192.168.64.1`, `APPLEGPU_PORT=7654`
+
 ## Up Next
 
-### v0.8.0: Working tree cleanup + polish
-_Commit any remaining changes, stabilize, expand model support._
+### PRIORITY 1: Replace TCP bridge with Unix socket relay / vsock
+_The TCP bridge works but adds latency and complexity. Replace with direct socket forwarding for ~10x lower latency._
+
+- [ ] **Unix socket relay via Containerization framework** — use `UnixSocketConfiguration(source: host_socket, destination: container_socket, direction: .into)` to forward `~/.applegpu/runtime.sock` into the container as `/var/run/applegpu.sock`. Requires Apple Containerization framework (macOS 26+).
+- [ ] **Direct vsock transport** — alternative: `VZVirtioSocketListener` on host, container connects via vsock CID+port. The `crates/client` already supports vsock transport — wire it to the container VM.
+- [ ] **Remove TCP bridge** — once socket relay is working, delete `TCPBridge` class from `Run.swift`
+- [ ] **Update gpu-container CLI** — switch from `container` CLI wrapper to direct Containerization framework API (`LinuxContainer`, socket mounts, image injection)
+- [ ] **End-to-end test** — `gpu-container run` with `import applegpu_runtime` inside container, verify GPU ops work over socket relay
+
+### PRIORITY 2: Packaging
+_Ship installable binaries and Python wheels._
+
+- [ ] **macOS wheel** — `maturin build` for `applegpu_runtime` (Metal backend)
+- [ ] **Linux aarch64 wheel** — cross-compile with `maturin build --target aarch64-unknown-linux-gnu` (socket backend)
+- [ ] **Container base image** — `ghcr.io/mooreman11/applegpu-runtime:latest` with pre-installed applegpu-runtime + PyTorch
+- [ ] **Install script** — `curl -fsSL .../install.sh | sh` for `gpu-container` and `gpu-service` binaries
+- [ ] **GitHub Release** — universal macOS binaries for gpu-container + gpu-service
+
+### PRIORITY 3: Model expansion + polish
 
 - [ ] **Whisper** — audio model with conv1d
 - [ ] **Stable Diffusion** — requires group_norm (new kernel)
@@ -188,7 +227,6 @@ _Commit any remaining changes, stabilize, expand model support._
 _Graph-level fusion, eliminate Python dispatch overhead._
 
 - [ ] **torch.compile() support** — register as compile backend for graph-level fusion
-- [ ] **Single command buffer** — encode all ops into one MTLCommandBuffer (Phase 2b)
 - [ ] **Concurrent queues** — dispatch independent subgraphs in parallel (Phase 2c)
 
 ## Further Backlog
@@ -207,10 +245,12 @@ _Graph-level fusion, eliminate Python dispatch overhead._
 
 ### Infrastructure
 - [x] **Phase 7b: Container GPU bridge** — multi-client GPU service (thread-per-connection, shared LazyRuntime), wire protocol crate, client crate with Unix socket + vsock transport, handshake protocol, per-container isolation and cleanup
+- [x] **Backend trait abstraction** — MetalBackend (macOS) / SocketBackend (Linux) with conditional compilation, single Python package
+- [x] **gpu-container CLI** — Swift CLI with auto-start gpu-service, TCP bridge, container env injection
+- [x] **Wire protocol v2** — 46 op types, dtype-aware, ReadTensor, FusedElementwise rejection, shape inference
+- [ ] **Unix socket relay / vsock** — replace TCP bridge with direct socket forwarding (PRIORITY — see Up Next)
 - [ ] **AVF VM integration** — VZVirtualMachine lifecycle, virtio-vsock transport (Metal GPU can't pass through to guest VMs)
-- [ ] **Apple Containerization Framework integration** — attach vsock listener to framework-managed VMs, Swift `VZVirtioSocketListener` FFI
 - [ ] **Docker bind-mount documentation** — instructions for mounting the GPU service socket into Docker containers
-- [ ] **Client Python bindings** — PyO3 wrapper around `crates/client` for use inside containers
 - [ ] **Phase C: Dynamic container lifecycle** — work stealing, auto-scaling based on queue pressure
 - [ ] **Multi-node / distributed graph** — network transport layer, graph partitioning across machines
 

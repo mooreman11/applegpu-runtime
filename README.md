@@ -124,31 +124,49 @@ All ops support N-D tensors (up to 8 dimensions) with NumPy-style broadcasting a
 - **N-D tensors** — stride-based MSL kernels, NumPy-style broadcasting
 - **Multi-dtype** — 10 types (float16/32/64, int8/16/32/64, uint8/32, bool) with NumPy/PyTorch roundtrip
 - **Kernel fusion** — auto-detect element-wise chains, generate fused MSL at runtime
-- **Two backends** — MLX-native (direct Metal) and VM (IPC to GPU service)
-- **Container GPU bridge** — multi-client GPU service for containers, thread-per-connection with fair scheduling, dual transport (Unix socket + vsock)
+- **Two backends** — MetalBackend (direct Metal, macOS) and SocketBackend (wire protocol, Linux containers)
+- **Container GPU access** — `gpu-container run` CLI, auto-start gpu-service, TCP bridge, multi-client with fair scheduling
+- **Wire protocol** — 46 op types, dtype-aware serialization, ReadTensor support, FusedElementwise rejection (security)
 
-## Container GPU Bridge
+## Container GPU Access
 
-Containers on macOS (Apple Containerization Framework, Docker) can't access Metal directly. The GPU service bridges this gap:
+Run GPU workloads inside OCI Linux containers on Apple Silicon — Metal GPU is transparently available.
 
 ```bash
-# Start the GPU service on the host
-cargo run -p applegpu-service
-# Listens on ~/.applegpu/runtime.sock (Unix socket)
-# Containers connect, handshake, and submit GPU workloads
+# Run any container with GPU access (auto-starts gpu-service)
+gpu-container run python:3.11-slim -- python -c "
+import applegpu_runtime as gpu
+gpu.init_backend()
+a = gpu.tensor([1.0, 2.0, 3.0])
+b = gpu.tensor([4.0, 5.0, 6.0])
+print((a + b).to_list())  # runs on host Metal GPU
+"
+
+# Options
+gpu-container run pytorch:latest --cpus 8 --memory 8192 -- python train.py
 ```
 
 ```
 Container (Linux)              Host (macOS)
 ┌──────────────────┐           ┌──────────────────┐
-│ applegpu-client  │──vsock──▶ │  gpu-service     │
-│ (crates/client)  │  or unix  │  ├─ Scheduler    │
-│                  │  socket   │  ├─ BufferPool   │
-└──────────────────┘           │  └─ Metal GPU    │
+│ Python code      │           │  gpu-container   │
+│  └─ applegpu     │──TCP───▶  │  ├─ TCP bridge   │
+│     (socket      │  :7654    │  ├─ gpu-service  │
+│      backend)    │           │  ├─ Scheduler    │
+└──────────────────┘           │  ├─ BufferPool   │
+                               │  └─ Metal GPU    │
                                └──────────────────┘
 ```
 
+The `gpu-container` CLI (Swift, `swift/GPUContainer/`) wraps Apple's `container` tool:
+1. Auto-starts `gpu-service` if not running (readiness probe, PID file)
+2. Starts a TCP bridge forwarding port 7654 → `~/.applegpu/runtime.sock`
+3. Launches the container with `APPLEGPU_HOST` and `APPLEGPU_PORT` env vars
+4. Container-side Python detects Linux → connects via socket backend
+
 Each connection gets a `ContainerId` with isolated resource quotas. The scheduler ensures fair GPU sharing across containers.
+
+**Next:** Replace TCP bridge with Unix socket relay via Apple Containerization framework (`UnixSocketConfiguration`) or direct vsock for lower latency. See [BACKLOG](docs/BACKLOG.md).
 
 ### Performance
 
