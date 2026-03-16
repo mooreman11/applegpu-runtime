@@ -1971,11 +1971,17 @@ impl KernelRegistry {
 
     pub fn dispatch_add_bias_typed(
         &self, device: &Device, dtype: DType, buf_input: &Buffer, buf_bias: &Buffer, buf_output: &Buffer,
-        rows: usize, cols: usize,
+        numel: usize, num_channels: usize, channel_stride: usize,
     ) -> Result<()> {
         let (source, func) = Self::resolve_kernel("add_bias", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
-        pipeline.dispatch_add_bias(buf_input, buf_bias, buf_output, rows, cols)
+        pipeline.dispatch_3d(
+            &[buf_input, buf_bias],
+            buf_output,
+            &[numel as u32, num_channels as u32, channel_stride as u32],
+            &[],
+            (numel as u32, 1, 1),
+        )
     }
 
     pub fn dispatch_softmax_causal_typed(
@@ -2055,11 +2061,19 @@ impl KernelRegistry {
 
     pub fn dispatch_add_bias_typed_nb(
         &self, device: &Device, dtype: DType, queue: *mut std::ffi::c_void,
-        buf_input: &Buffer, buf_bias: &Buffer, buf_output: &Buffer, rows: usize, cols: usize,
+        buf_input: &Buffer, buf_bias: &Buffer, buf_output: &Buffer,
+        numel: usize, num_channels: usize, channel_stride: usize,
     ) -> Result<*mut std::ffi::c_void> {
         let (source, func) = Self::resolve_kernel("add_bias", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
-        pipeline.dispatch_add_bias_nb(queue, buf_input, buf_bias, buf_output, rows, cols)
+        pipeline.dispatch_3d_nb(
+            queue,
+            &[buf_input, buf_bias],
+            buf_output,
+            &[numel as u32, num_channels as u32, channel_stride as u32],
+            &[],
+            (numel as u32, 1, 1),
+        )
     }
 
     pub fn dispatch_softmax_causal_typed_nb(

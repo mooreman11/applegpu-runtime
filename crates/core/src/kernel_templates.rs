@@ -495,7 +495,11 @@ kernel void mean{s}(
     )
 }
 
-/// Generate add_bias kernel source. 2D input + 1D bias broadcast.
+/// Generate N-D add_bias kernel source. Adds 1D bias along dim 1 (channels).
+/// Works for any N-D input (N >= 2):
+///   - 2D [rows, cols]: channel_stride=1, num_channels=cols -> bias[id % cols]
+///   - 3D [B, C, L]: channel_stride=L, num_channels=C -> bias[(id/L) % C]
+///   - 4D [B, C, H, W]: channel_stride=H*W, num_channels=C -> bias[(id/(H*W)) % C]
 pub fn add_bias_kernel_source(dtype: DType) -> String {
     let t = metal_type(dtype);
     let s = dtype_suffix(dtype);
@@ -503,10 +507,10 @@ pub fn add_bias_kernel_source(dtype: DType) -> String {
         r#"#include <metal_stdlib>
 using namespace metal;
 
-kernel void add_bias{s}(device const {t}* input [[buffer(0)]], device const {t}* bias [[buffer(1)]], device {t}* output [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint2 gid [[thread_position_in_grid]]) {{
-    uint row = gid.y; uint col = gid.x;
-    if (row >= rows || col >= cols) return;
-    output[row * cols + col] = input[row * cols + col] + bias[col];
+kernel void add_bias{s}(device const {t}* input [[buffer(0)]], device const {t}* bias [[buffer(1)]], device {t}* output [[buffer(2)]], constant uint& numel [[buffer(3)]], constant uint& num_channels [[buffer(4)]], constant uint& channel_stride [[buffer(5)]], uint id [[thread_position_in_grid]]) {{
+    if (id >= numel) return;
+    uint channel = (id / channel_stride) % num_channels;
+    output[id] = input[id] + bias[channel];
 }}
 "#,
         t = t, s = s,
@@ -2186,5 +2190,16 @@ mod tests {
         assert!(src.contains("dequantize_u8_to_f16"));
         assert!(src.contains("device const uchar*"));
         assert!(src.contains("device half* out"));
+    }
+
+    #[test]
+    fn add_bias_nd_kernel_structure() {
+        let src = add_bias_kernel_source(DType::Float32);
+        assert!(src.contains("add_bias_f32"));
+        assert!(src.contains("numel"));
+        assert!(src.contains("num_channels"));
+        assert!(src.contains("channel_stride"));
+        assert!(src.contains("(id / channel_stride) % num_channels"));
+        assert!(src.contains("uint id [[thread_position_in_grid]]"));
     }
 }

@@ -998,8 +998,10 @@ pub fn concat(rt: &mut LazyRuntime, a_id: u64, b_id: u64, dim: usize) -> Result<
     Ok(out_id)
 }
 
-/// AddBias: add a 1D bias to each row of a 2D tensor.
-/// input: [rows, cols], bias: [cols] -> output: [rows, cols]
+/// AddBias: add a 1D bias along dim 1 (channels) of an N-D tensor (N >= 2).
+/// For 2D [rows, cols]: bias[col] added per element (backward compatible).
+/// For 3D [B, C, L]: bias[c] broadcast over L.
+/// For 4D [B, C, H, W]: bias[c] broadcast over H*W.
 pub fn add_bias(rt: &mut LazyRuntime, input_id: u64, bias_id: u64) -> Result<u64> {
     let input_dtype = rt.dtype(input_id)?;
     validate_op_dtype(&OpKind::AddBias, input_dtype)?;
@@ -1013,9 +1015,9 @@ pub fn add_bias(rt: &mut LazyRuntime, input_id: u64, bias_id: u64) -> Result<u64
     let input_shape = rt.shape(input_id)?;
     let bias_shape = rt.shape(bias_id)?;
 
-    if input_shape.len() != 2 {
+    if input_shape.len() < 2 {
         return Err(GpuError::InvalidTensor(format!(
-            "add_bias requires 2D input, got {:?}", input_shape
+            "add_bias requires >= 2D input, got {:?}", input_shape
         )));
     }
     if bias_shape.len() != 1 {
@@ -1025,7 +1027,7 @@ pub fn add_bias(rt: &mut LazyRuntime, input_id: u64, bias_id: u64) -> Result<u64
     }
     if bias_shape[0] != input_shape[1] {
         return Err(GpuError::InvalidTensor(format!(
-            "add_bias bias length {} != input cols {}", bias_shape[0], input_shape[1]
+            "add_bias bias length {} != input dim 1 {}", bias_shape[0], input_shape[1]
         )));
     }
 
@@ -2534,6 +2536,62 @@ mod tests {
         rt.insert_tensor(bias).unwrap();
         // input is 1D, not 2D
         assert!(crate::ops::add_bias(&mut rt, i_id, b_id).is_err());
+    }
+
+    #[test]
+    fn test_add_bias_3d() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        // [B=2, C=3, L=2] input + [3] bias (along channels dim 1)
+        let input = Tensor::from_f32(&device, vec![2, 3, 2], &[
+            // batch 0
+            1.0, 2.0,   // channel 0
+            3.0, 4.0,   // channel 1
+            5.0, 6.0,   // channel 2
+            // batch 1
+            7.0, 8.0,   // channel 0
+            9.0, 10.0,  // channel 1
+            11.0, 12.0, // channel 2
+        ]).unwrap();
+        let bias = Tensor::from_f32(&device, vec![3], &[10.0, 20.0, 30.0]).unwrap();
+        let i_id = input.meta.id;
+        let b_id = bias.meta.id;
+        rt.insert_tensor(input).unwrap();
+        rt.insert_tensor(bias).unwrap();
+        let out_id = crate::ops::add_bias(&mut rt, i_id, b_id).unwrap();
+        rt.eval(&device, out_id).unwrap();
+        assert_eq!(rt.read_f32(out_id).unwrap(), &[
+            11.0, 12.0,  // +10
+            23.0, 24.0,  // +20
+            35.0, 36.0,  // +30
+            17.0, 18.0,  // +10
+            29.0, 30.0,  // +20
+            41.0, 42.0,  // +30
+        ]);
+    }
+
+    #[test]
+    fn test_add_bias_4d() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        // [B=1, C=2, H=2, W=2] input + [2] bias
+        let input = Tensor::from_f32(&device, vec![1, 2, 2, 2], &[
+            // channel 0: [[1,2],[3,4]]
+            1.0, 2.0, 3.0, 4.0,
+            // channel 1: [[5,6],[7,8]]
+            5.0, 6.0, 7.0, 8.0,
+        ]).unwrap();
+        let bias = Tensor::from_f32(&device, vec![2], &[100.0, 200.0]).unwrap();
+        let i_id = input.meta.id;
+        let b_id = bias.meta.id;
+        rt.insert_tensor(input).unwrap();
+        rt.insert_tensor(bias).unwrap();
+        let out_id = crate::ops::add_bias(&mut rt, i_id, b_id).unwrap();
+        rt.eval(&device, out_id).unwrap();
+        assert_eq!(rt.read_f32(out_id).unwrap(), &[
+            101.0, 102.0, 103.0, 104.0,  // +100
+            205.0, 206.0, 207.0, 208.0,  // +200
+        ]);
     }
 
     // ── SoftmaxCausal tests ──────────────────────────────────────────────────

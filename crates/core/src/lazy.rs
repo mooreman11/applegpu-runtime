@@ -920,8 +920,10 @@ impl LazyRuntime {
             let input = self.get_tensor(node.inputs[0])?;
             let bias = self.get_tensor(node.inputs[1])?;
             let dims = input.meta.layout.shape.dims();
-            let (rows, cols) = (dims[0], dims[1]);
-            REGISTRY.dispatch_add_bias_typed(device, dtype, &input.buffer, &bias.buffer, &out.buffer, rows, cols)?;
+            let numel: usize = dims.iter().product();
+            let num_channels = dims[1];
+            let channel_stride: usize = dims[2..].iter().product();
+            REGISTRY.dispatch_add_bias_typed(device, dtype, &input.buffer, &bias.buffer, &out.buffer, numel, num_channels, channel_stride)?;
             return Ok(out);
         }
 
@@ -1585,8 +1587,10 @@ impl LazyRuntime {
             let input = self.get_tensor(node.inputs[0])?;
             let bias = self.get_tensor(node.inputs[1])?;
             let dims = input.meta.layout.shape.dims();
-            let (rows, cols) = (dims[0], dims[1]);
-            return REGISTRY.dispatch_add_bias_typed_nb(device, dtype, queue, &input.buffer, &bias.buffer, &out.buffer, rows, cols);
+            let numel: usize = dims.iter().product();
+            let num_channels = dims[1];
+            let channel_stride: usize = dims[2..].iter().product();
+            return REGISTRY.dispatch_add_bias_typed_nb(device, dtype, queue, &input.buffer, &bias.buffer, &out.buffer, numel, num_channels, channel_stride);
         }
 
         if node.op.is_softmax_causal() {
