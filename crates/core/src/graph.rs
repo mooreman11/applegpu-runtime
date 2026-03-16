@@ -445,6 +445,35 @@ impl Graph {
         self.nodes.len()
     }
 
+    /// Partition a topo-sorted subgraph into parallel depth levels.
+    /// Nodes at the same level have no data dependencies on each other.
+    pub fn parallel_levels(&self, target_id: u64) -> crate::error::Result<Vec<Vec<u64>>> {
+        let order = self.topo_sort(target_id)?;
+        if order.is_empty() {
+            return Ok(vec![]);
+        }
+        let mut depth: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
+
+        for &id in &order {
+            let node = self.get_node(id).ok_or_else(|| {
+                crate::error::GpuError::GraphError(format!("Node {} not in graph", id))
+            })?;
+            let d = node.inputs.iter()
+                .filter_map(|&inp| depth.get(&inp))
+                .max()
+                .map(|m| m + 1)
+                .unwrap_or(0);
+            depth.insert(id, d);
+        }
+
+        let max_depth = depth.values().copied().max().unwrap_or(0);
+        let mut levels = vec![Vec::new(); max_depth + 1];
+        for &id in &order {
+            levels[depth[&id]].push(id);
+        }
+        Ok(levels)
+    }
+
     /// Remove all nodes belonging to a container. Returns their IDs.
     pub fn remove_nodes_for_container(&mut self, container_id: ContainerId) -> Vec<u64> {
         let ids: Vec<u64> = self.nodes.iter()
@@ -570,6 +599,53 @@ mod tests {
 
         let order = g.topo_sort(4).unwrap();
         assert_eq!(order, vec![4]); // only node 4, not node 3
+    }
+
+    #[test]
+    fn test_parallel_levels_diamond() {
+        // A -> B, A -> C, B -> D, C -> D
+        let mut g = Graph::new();
+        let a = OpNode { id: 1, inputs: vec![], out_shape: Shape::new(vec![2]).unwrap(), out_dtype: DType::Float32, op: OpKind::Relu, container_id: ContainerId::DEFAULT };
+        let b = OpNode { id: 2, inputs: vec![1], out_shape: Shape::new(vec![2]).unwrap(), out_dtype: DType::Float32, op: OpKind::Relu, container_id: ContainerId::DEFAULT };
+        let c = OpNode { id: 3, inputs: vec![1], out_shape: Shape::new(vec![2]).unwrap(), out_dtype: DType::Float32, op: OpKind::Relu, container_id: ContainerId::DEFAULT };
+        let d = OpNode { id: 4, inputs: vec![2, 3], out_shape: Shape::new(vec![2]).unwrap(), out_dtype: DType::Float32, op: OpKind::Add, container_id: ContainerId::DEFAULT };
+        g.add_node(a); g.add_node(b); g.add_node(c); g.add_node(d);
+
+        let levels = g.parallel_levels(4).unwrap();
+        assert_eq!(levels.len(), 3); // level 0: [A], level 1: [B, C], level 2: [D]
+        assert_eq!(levels[0].len(), 1);
+        assert_eq!(levels[1].len(), 2);
+        assert_eq!(levels[2].len(), 1);
+        assert!(levels[1].contains(&2) && levels[1].contains(&3));
+    }
+
+    #[test]
+    fn test_parallel_levels_linear() {
+        // A -> B -> C (all linear, each level has 1 node)
+        let mut g = Graph::new();
+        g.add_node(OpNode { id: 1, inputs: vec![], out_shape: Shape::new(vec![2]).unwrap(), out_dtype: DType::Float32, op: OpKind::Relu, container_id: ContainerId::DEFAULT });
+        g.add_node(OpNode { id: 2, inputs: vec![1], out_shape: Shape::new(vec![2]).unwrap(), out_dtype: DType::Float32, op: OpKind::Relu, container_id: ContainerId::DEFAULT });
+        g.add_node(OpNode { id: 3, inputs: vec![2], out_shape: Shape::new(vec![2]).unwrap(), out_dtype: DType::Float32, op: OpKind::Relu, container_id: ContainerId::DEFAULT });
+
+        let levels = g.parallel_levels(3).unwrap();
+        assert_eq!(levels.len(), 3);
+        assert!(levels.iter().all(|l| l.len() == 1)); // all linear
+    }
+
+    #[test]
+    fn test_parallel_levels_wide() {
+        // 4 independent nodes (no deps) -> all at level 0
+        let mut g = Graph::new();
+        for i in 1..=4 {
+            g.add_node(OpNode { id: i, inputs: vec![], out_shape: Shape::new(vec![2]).unwrap(), out_dtype: DType::Float32, op: OpKind::Relu, container_id: ContainerId::DEFAULT });
+        }
+        // Fan-in: node 5 depends on all four
+        g.add_node(OpNode { id: 5, inputs: vec![1, 2, 3, 4], out_shape: Shape::new(vec![2]).unwrap(), out_dtype: DType::Float32, op: OpKind::Add, container_id: ContainerId::DEFAULT });
+
+        let levels = g.parallel_levels(5).unwrap();
+        assert_eq!(levels.len(), 2);
+        assert_eq!(levels[0].len(), 4); // all independent at level 0
+        assert_eq!(levels[1].len(), 1); // fan-in at level 1
     }
 
     #[test]

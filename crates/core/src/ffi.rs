@@ -707,6 +707,20 @@ extern "C" {
         diagonal: i32,
     ) -> *mut std::ffi::c_void;
 
+    // ── Concurrent queue pool ──────────────────────────────────────────
+    pub fn gpu_bridge_get_queue(device: *const GPUDeviceHandle, index: u32) -> *mut std::ffi::c_void;
+
+    // ── Batch context system ─────────────────────────────────────────
+    pub fn gpu_bridge_set_batch_context(context_id: u32, queue: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
+    pub fn gpu_bridge_commit_batch_context(context_id: u32) -> *mut std::ffi::c_void;
+    pub fn gpu_bridge_set_active_context(context_id: u32);
+
+    // ── MTLEvent synchronization ─────────────────────────────────────
+    pub fn gpu_bridge_create_event(device: *const GPUDeviceHandle) -> *mut std::ffi::c_void;
+    pub fn gpu_bridge_encode_signal_event(cb: *mut std::ffi::c_void, event: *mut std::ffi::c_void, value: u64);
+    pub fn gpu_bridge_encode_wait_event(cb: *mut std::ffi::c_void, event: *mut std::ffi::c_void, value: u64);
+    pub fn gpu_bridge_destroy_event(event: *mut std::ffi::c_void);
+
     // Generic 3D dispatch for CNN ops
     pub fn gpu_bridge_compute_3d(
         compute: *mut GPUComputeHandle,
