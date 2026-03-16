@@ -29,12 +29,33 @@ struct Run: AsyncParsableCommand {
         print("Ensuring gpu-service is running...")
         try await ServiceManager.ensureRunning(socketPath: socketPath)
 
-        // Start TCP bridge: forwards TCP connections on gpuPort to the Unix socket
+        // Try Containerization framework first (macOS 26+, direct socket mount)
+        if #available(macOS 26, *) {
+            do {
+                try await ContainerRunner.run(
+                    image: image,
+                    cpus: cpus,
+                    memory: memory,
+                    socketPath: socketPath,
+                    command: command
+                )
+                return
+            } catch {
+                print("Containerization framework unavailable, falling back to container CLI...")
+                print("  Error: \(error)")
+            }
+        }
+
+        // Fallback: container CLI + TCP bridge
+        try await runWithContainerCLI(socketPath: socketPath)
+    }
+
+    /// Legacy fallback: uses Apple's `container` CLI with TCP bridge.
+    private func runWithContainerCLI(socketPath: String) async throws {
         print("Starting TCP bridge on port \(gpuPort)...")
         let bridge = try TCPBridge(port: gpuPort, socketPath: socketPath)
         bridge.start()
 
-        // Build container run command via Apple's container CLI
         var args: [String] = ["run", "--rm"]
         args += ["--cpus", "\(cpus)"]
         args += ["--memory", "\(memory)M"]
