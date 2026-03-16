@@ -5,11 +5,17 @@ mod metal_backend;
 mod socket_backend;
 
 use pyo3::prelude::*;
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyValueError, PyRuntimeError};
 use std::cell::Cell;
 use std::collections::HashMap;
 
 use backend::{Backend, BackendDType};
+
+use once_cell::sync::Lazy;
+
+static PAGE_SIZE: Lazy<usize> = Lazy::new(|| unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize });
+static ALIGNED_ARRAY_CLASS: once_cell::sync::OnceCell<PyObject> = once_cell::sync::OnceCell::new();
+fn system_page_size() -> usize { *PAGE_SIZE }
 
 #[cfg(target_os = "macos")]
 type ActiveBackend = metal_backend::MetalBackend;
@@ -491,6 +497,269 @@ fn from_bytes(_py: Python<'_>, data: &[u8], shape: Vec<usize>, dtype: &str) -> P
     wrap_tensor(BACKEND.tensor_from_data(data, shape, dtype))
 }
 
+/// Create a GpuTensor that shares memory with a numpy array (zero-copy).
+/// The array must be C-contiguous, page-aligned, and page-size-multiple in byte length.
+/// Mutations to the source array ARE visible to the GPU tensor (shared memory).
+/// The source array will not be garbage-collected while the tensor exists.
+#[pyfunction]
+#[pyo3(signature = (arr))]
+fn from_numpy_shared(_py: Python<'_>, arr: &Bound<'_, pyo3::types::PyAny>) -> PyResult<GpuTensor> {
+    let np_dtype_name: String = arr.getattr("dtype")?.getattr("name")?.extract()?;
+    let dtype = BackendDType::from_name(&np_dtype_name)
+        .ok_or_else(|| PyValueError::new_err(format!("Unsupported dtype: {}", np_dtype_name)))?;
+
+    let shape: Vec<usize> = arr.getattr("shape")?.extract()?;
+    let numel: usize = shape.iter().product();
+    let nbytes = numel * dtype.size_bytes();
+    let page_size = system_page_size();
+
+    // Validate C-contiguous
+    let is_c_contiguous: bool = arr.getattr("flags")?
+        .get_item("C_CONTIGUOUS")?.extract()?;
+    if !is_c_contiguous {
+        return Err(PyValueError::new_err("Array must be C-contiguous for shared transfer"));
+    }
+
+    let data_ptr: usize = arr.getattr("ctypes")?.getattr("data")?.extract()?;
+
+    // Validate page alignment
+    if data_ptr % page_size != 0 {
+        return Err(PyValueError::new_err(format!(
+            "Array data pointer {:#x} is not page-aligned (page size: {} bytes). \
+             Use gpu.aligned_numpy() or gpu.from_numpy() (copy) instead.",
+            data_ptr, page_size
+        )));
+    }
+    if nbytes % page_size != 0 {
+        return Err(PyValueError::new_err(format!(
+            "Array byte size {} is not a multiple of page size {} bytes. \
+             Use gpu.aligned_numpy() or gpu.from_numpy() (copy) instead.",
+            nbytes, page_size
+        )));
+    }
+
+    // Pin the numpy array: increment refcount so GC can't collect it
+    let py_obj_ptr = arr.as_ptr();
+    unsafe { pyo3::ffi::Py_IncRef(py_obj_ptr) };
+
+    // Create no-copy Metal buffer. On failure, release the ref we just added.
+    let id = BACKEND.tensor_from_ptr_no_copy(
+        data_ptr as *mut u8,
+        nbytes,
+        shape,
+        dtype,
+        py_obj_ptr as *mut std::ffi::c_void,
+    ).map_err(|e| {
+        unsafe { pyo3::ffi::Py_DecRef(py_obj_ptr) };
+        PyRuntimeError::new_err(e)
+    })?;
+
+    Ok(GpuTensor { id, destroyed: Cell::new(false) })
+}
+
+/// Create a GpuTensor that shares memory with a PyTorch tensor (zero-copy).
+/// The tensor must already be on CPU, contiguous, with storage_offset == 0.
+/// The tensor must be page-aligned and page-size-multiple in byte length.
+/// Unlike from_torch(), this does NOT call .detach().cpu().contiguous() — you must do that first.
+#[pyfunction]
+fn from_torch_shared(py: Python<'_>, tensor: &Bound<'_, pyo3::types::PyAny>) -> PyResult<GpuTensor> {
+    // Validate already on CPU (do NOT call .cpu() — that copies)
+    let device_type: String = tensor.getattr("device")?.getattr("type")?.extract()?;
+    if device_type != "cpu" {
+        return Err(PyValueError::new_err(
+            "Tensor must be on CPU for shared transfer. Use tensor.cpu() first, or gpu.from_torch() (copy)."
+        ));
+    }
+
+    // Validate already contiguous (do NOT call .contiguous() — that copies)
+    let is_contiguous: bool = tensor.call_method0("is_contiguous")?.extract()?;
+    if !is_contiguous {
+        return Err(PyValueError::new_err(
+            "Tensor must be contiguous for shared transfer. Use tensor.contiguous() first, or gpu.from_torch() (copy)."
+        ));
+    }
+
+    // Validate storage_offset == 0
+    let storage_offset: usize = tensor.call_method0("storage_offset")?.extract()?;
+    if storage_offset != 0 {
+        return Err(PyValueError::new_err(
+            "Tensor must not be a view with storage_offset != 0. Use tensor.clone() first, or gpu.from_torch() (copy)."
+        ));
+    }
+
+    // Map torch dtype
+    let torch = py.import_bound("torch")?;
+    let tensor_dtype = tensor.getattr("dtype")?;
+    let dtype_str = if tensor_dtype.eq(torch.getattr("float16")?)? { "float16" }
+        else if tensor_dtype.eq(torch.getattr("float32")?)? { "float32" }
+        else if tensor_dtype.eq(torch.getattr("float64")?)? { "float64" }
+        else if tensor_dtype.eq(torch.getattr("int8")?)? { "int8" }
+        else if tensor_dtype.eq(torch.getattr("int16")?)? { "int16" }
+        else if tensor_dtype.eq(torch.getattr("int32")?)? { "int32" }
+        else if tensor_dtype.eq(torch.getattr("int64")?)? { "int64" }
+        else if tensor_dtype.eq(torch.getattr("uint8")?)? { "uint8" }
+        else if tensor_dtype.eq(torch.getattr("bool")?)? { "bool" }
+        else {
+            return Err(PyValueError::new_err(format!(
+                "Unsupported torch dtype: {}", tensor_dtype
+            )));
+        };
+
+    let dtype = BackendDType::from_name(dtype_str)
+        .ok_or_else(|| PyValueError::new_err(format!("Unknown dtype: {}", dtype_str)))?;
+    let shape: Vec<usize> = tensor.getattr("shape")?.extract()?;
+    let numel: usize = tensor.call_method0("numel")?.extract()?;
+    let element_size: usize = tensor.call_method0("element_size")?.extract()?;
+    let nbytes = numel * element_size;
+    let page_size = system_page_size();
+
+    let data_ptr: usize = tensor.call_method0("data_ptr")?.extract()?;
+
+    // Validate page alignment
+    if data_ptr % page_size != 0 {
+        return Err(PyValueError::new_err(format!(
+            "Tensor data_ptr {:#x} is not page-aligned (page size: {} bytes). \
+             PyTorch uses 64-byte alignment by default. Use gpu.from_torch() (copy) instead.",
+            data_ptr, page_size
+        )));
+    }
+    if nbytes % page_size != 0 {
+        return Err(PyValueError::new_err(format!(
+            "Tensor byte size {} is not a multiple of page size {}. \
+             Use gpu.from_torch() (copy) instead.",
+            nbytes, page_size
+        )));
+    }
+
+    // Pin the torch tensor
+    let py_obj_ptr = tensor.as_ptr();
+    unsafe { pyo3::ffi::Py_IncRef(py_obj_ptr) };
+
+    let id = BACKEND.tensor_from_ptr_no_copy(
+        data_ptr as *mut u8, nbytes, shape, dtype,
+        py_obj_ptr as *mut std::ffi::c_void,
+    ).map_err(|e| {
+        unsafe { pyo3::ffi::Py_DecRef(py_obj_ptr) };
+        PyRuntimeError::new_err(e)
+    })?;
+
+    Ok(GpuTensor { id, destroyed: Cell::new(false) })
+}
+
+/// PyCapsule destructor — called when numpy array is GC'd, frees the aligned allocation.
+unsafe extern "C" fn aligned_buffer_destructor(capsule: *mut pyo3::ffi::PyObject) {
+    let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, std::ptr::null());
+    if !ptr.is_null() {
+        libc::free(ptr);
+    }
+}
+
+/// Allocate a page-aligned numpy array suitable for gpu.from_numpy_shared().
+/// The returned array's data pointer is page-aligned and its byte size is a page-size multiple.
+/// The array element count is padded so total byte size is a multiple of the page size.
+#[pyfunction]
+#[pyo3(signature = (shape, dtype=None))]
+fn aligned_numpy(py: Python<'_>, shape: Vec<usize>, dtype: Option<&str>) -> PyResult<PyObject> {
+    let page_size = system_page_size();
+    let dtype_str = dtype.unwrap_or("float32");
+    let dt = BackendDType::from_name(dtype_str)
+        .ok_or_else(|| PyValueError::new_err(format!("Unsupported dtype: {}", dtype_str)))?;
+    let numel: usize = shape.iter().product();
+    let nbytes = numel * dt.size_bytes();
+
+    if nbytes == 0 {
+        let np = py.import_bound("numpy")?;
+        return Ok(np.call_method1("empty", (shape, dtype_str))?.into());
+    }
+
+    if nbytes % page_size != 0 {
+        let elems_per_page = page_size / dt.size_bytes();
+        return Err(PyValueError::new_err(format!(
+            "Data size {} bytes is not a multiple of page size {} bytes. Choose a shape where numel * dtype_size is a page multiple (e.g., multiples of {} elements for float32).",
+            nbytes, page_size, elems_per_page
+        )));
+    }
+
+    // Round up to page boundary
+    let aligned_size = (nbytes + page_size - 1) & !(page_size - 1);
+
+    // Allocate page-aligned memory
+    let mut ptr: *mut libc::c_void = std::ptr::null_mut();
+    let ret = unsafe { libc::posix_memalign(&mut ptr, page_size, aligned_size) };
+    if ret != 0 {
+        return Err(PyValueError::new_err("Failed to allocate aligned memory"));
+    }
+
+    // Zero-initialize
+    unsafe { std::ptr::write_bytes(ptr as *mut u8, 0, aligned_size) };
+
+    // Wrap the pointer in a PyCapsule for correct lifetime management.
+    // The capsule destructor calls libc::free when the capsule is GC'd.
+    let capsule = unsafe {
+        let cap = pyo3::ffi::PyCapsule_New(
+            ptr,
+            std::ptr::null(),
+            Some(aligned_buffer_destructor),
+        );
+        if cap.is_null() {
+            libc::free(ptr);
+            return Err(PyRuntimeError::new_err("Failed to create PyCapsule"));
+        }
+        PyObject::from_owned_ptr(py, cap)
+    };
+
+    // Get or create the _AlignedArray subclass (cached across calls)
+    let aligned_cls = ALIGNED_ARRAY_CLASS.get_or_try_init(|| -> PyResult<PyObject> {
+        let locals = pyo3::types::PyDict::new_bound(py);
+        locals.set_item("np", py.import_bound("numpy")?)?;
+        py.run_bound(
+            r#"
+class _AlignedArray(np.ndarray):
+    """ndarray subclass that holds a reference to aligned memory capsule."""
+    pass
+"#,
+            None,
+            Some(&locals),
+        )?;
+        let cls = locals.get_item("_AlignedArray")?
+            .ok_or_else(|| PyRuntimeError::new_err("Failed to create _AlignedArray class"))?;
+        Ok(cls.into())
+    })?;
+
+    // Create the array using Python code. We use a numpy.ndarray subclass
+    // to store the capsule reference and prevent GC of the aligned memory.
+    let locals = pyo3::types::PyDict::new_bound(py);
+    locals.set_item("np", py.import_bound("numpy")?)?;
+    locals.set_item("ctypes", py.import_bound("ctypes")?)?;
+    locals.set_item("capsule", capsule)?;
+    locals.set_item("ptr_val", ptr as usize)?;
+    locals.set_item("aligned_size", aligned_size)?;
+    locals.set_item("numel", numel)?;
+    locals.set_item("target_shape", pyo3::types::PyTuple::new_bound(py, &shape))?;
+    locals.set_item("dtype_str", dtype_str)?;
+    locals.set_item("_AlignedArray", aligned_cls.bind(py))?;
+
+    py.run_bound(
+        r#"
+# Create ctypes pointer to aligned memory
+_c_ptr = ctypes.cast(ptr_val, ctypes.POINTER(ctypes.c_ubyte))
+# Create flat uint8 array viewing the entire aligned allocation
+_raw = np.ctypeslib.as_array(_c_ptr, shape=(aligned_size,))
+# View as requested dtype, slice to exact element count, reshape
+_typed = _raw.view(dtype_str)[:numel].reshape(target_shape)
+# Convert to subclass so we can store capsule reference
+result = _typed.view(_AlignedArray)
+result._mem_capsule = capsule
+"#,
+        None,
+        Some(&locals),
+    )?;
+
+    let result = locals.get_item("result")?
+        .ok_or_else(|| PyRuntimeError::new_err("Failed to create aligned array"))?;
+    Ok(result.into())
+}
+
 /// Create a tensor from data. Returns a GpuTensor object.
 /// Accepts lists of floats, ints, or bools depending on dtype.
 /// Supported dtypes: float16, float32, float64, int8, int16, int32, int64, uint8, uint32, bool.
@@ -821,8 +1090,11 @@ fn applegpu_runtime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(device_name, m)?)?;
     m.add_function(wrap_pyfunction!(dtype_size, m)?)?;
     m.add_function(wrap_pyfunction!(from_numpy, m)?)?;
+    m.add_function(wrap_pyfunction!(from_numpy_shared, m)?)?;
     m.add_function(wrap_pyfunction!(from_torch, m)?)?;
+    m.add_function(wrap_pyfunction!(from_torch_shared, m)?)?;
     m.add_function(wrap_pyfunction!(from_bytes, m)?)?;
+    m.add_function(wrap_pyfunction!(aligned_numpy, m)?)?;
     m.add_function(wrap_pyfunction!(tensor, m)?)?;
     m.add_function(wrap_pyfunction!(eval, m)?)?;
     m.add_function(wrap_pyfunction!(to_list, m)?)?;

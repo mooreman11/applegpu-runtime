@@ -28,6 +28,7 @@ dependencies = [
  "applegpu-core",
  "applegpu-wire",
  "half",
+ "libc",
  "numpy",
  "once_cell",
  "pyo3",

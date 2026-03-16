@@ -21,6 +21,27 @@ pub trait Backend: Send + Sync {
 
     // Tensor creation
     fn tensor_from_data(&self, data: &[u8], shape: Vec<usize>, dtype: BackendDType) -> BackendResult<u64>;
+
+    /// Create a zero-copy tensor from an external pointer (e.g., numpy/torch memory).
+    /// The caller has already called Py_IncRef on release_context.
+    /// If the implementation falls back to copy, it MUST call Py_DecRef to release the extra reference.
+    fn tensor_from_ptr_no_copy(
+        &self, ptr: *mut u8, len: usize, shape: Vec<usize>,
+        dtype: BackendDType, release_context: *mut std::ffi::c_void,
+    ) -> BackendResult<u64> {
+        // Default: fall back to copy, release the pinned reference
+        let data = unsafe { std::slice::from_raw_parts(ptr, len) };
+        let result = self.tensor_from_data(data, shape, dtype);
+        // Release the Py_IncRef that the caller added (we didn't use it)
+        if !release_context.is_null() {
+            unsafe {
+                pyo3::Python::with_gil(|_py| {
+                    pyo3::ffi::Py_DecRef(release_context as *mut pyo3::ffi::PyObject);
+                });
+            }
+        }
+        result
+    }
     fn insert_tensor_from_raw(&self, data: &[u8], shape: Vec<usize>, dtype: BackendDType) -> BackendResult<u64>;
     fn destroy(&self, id: u64) -> BackendResult<()>;
     fn try_destroy(&self, id: u64);

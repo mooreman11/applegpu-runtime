@@ -251,6 +251,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static TENSOR_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
+/// Allocate a unique tensor ID (thread-safe).
+pub fn next_tensor_id() -> u64 {
+    TENSOR_ID_COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
 /// A tensor backed by a Metal GPU buffer.
 pub struct Tensor {
     pub meta: TensorMeta,
