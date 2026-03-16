@@ -117,6 +117,8 @@ pub enum OpKind {
     Conv2dBackwardInput { stride: (usize, usize), padding: (usize, usize) },
     EmbeddingBackward,
     BatchNormBackward { eps: f32 },
+    // Comparison ops (output is always Bool)
+    Lt, Gt, Le, Ge, Eq, Ne,
     // Type conversion
     Cast { target_dtype: DType },
 }
@@ -172,8 +174,18 @@ impl OpKind {
             OpKind::Conv2dBackwardInput { .. } => "conv2d_backward_input",
             OpKind::EmbeddingBackward => "embedding_backward",
             OpKind::BatchNormBackward { .. } => "batch_norm_backward",
+            OpKind::Lt => "lt",
+            OpKind::Gt => "gt",
+            OpKind::Le => "le",
+            OpKind::Ge => "ge",
+            OpKind::Eq => "eq",
+            OpKind::Ne => "ne",
             OpKind::Cast { .. } => "cast",
         }
+    }
+
+    pub fn is_comparison(&self) -> bool {
+        matches!(self, OpKind::Lt | OpKind::Gt | OpKind::Le | OpKind::Ge | OpKind::Eq | OpKind::Ne)
     }
 
     pub fn is_unary(&self) -> bool {

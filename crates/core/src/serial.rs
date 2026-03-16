@@ -102,6 +102,12 @@ fn op_to_discriminant(op: &OpKind) -> u32 {
         OpKind::EmbeddingBackward => 44,
         OpKind::BatchNormBackward { .. } => 45,
         OpKind::Cast { .. } => 46,
+        OpKind::Lt => 47,
+        OpKind::Gt => 48,
+        OpKind::Le => 49,
+        OpKind::Ge => 50,
+        OpKind::Eq => 51,
+        OpKind::Ne => 52,
     }
 }
 
@@ -266,6 +272,12 @@ fn discriminant_to_op(d: u32, r: &mut impl Read) -> io::Result<OpKind> {
             r.read_exact(&mut eps_bytes)?;
             Ok(OpKind::BatchNormBackward { eps: f32::from_le_bytes(eps_bytes) })
         }
+        47 => Ok(OpKind::Lt),
+        48 => Ok(OpKind::Gt),
+        49 => Ok(OpKind::Le),
+        50 => Ok(OpKind::Ge),
+        51 => Ok(OpKind::Eq),
+        52 => Ok(OpKind::Ne),
         _ => Err(io::Error::new(io::ErrorKind::InvalidData, format!("Unknown op type: {}", d))),
     }
 }
@@ -588,6 +600,8 @@ impl From<&OpKind> for WireOpKind {
             OpKind::Conv2dBackwardInput { stride, padding } => WireOpKind::Conv2dBackwardInput { stride: *stride, padding: *padding },
             OpKind::EmbeddingBackward => WireOpKind::EmbeddingBackward,
             OpKind::BatchNormBackward { eps } => WireOpKind::BatchNormBackward { eps: *eps },
+            OpKind::Lt | OpKind::Gt | OpKind::Le | OpKind::Ge | OpKind::Eq | OpKind::Ne =>
+                unimplemented!("Comparison ops not supported over wire"),
             OpKind::Cast { .. } => unimplemented!("Cast op is not supported over wire protocol"),
         }
     }

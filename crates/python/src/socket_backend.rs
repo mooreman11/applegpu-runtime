@@ -823,6 +823,14 @@ impl Backend for SocketBackend {
     // Indexing
     // -----------------------------------------------------------------------
 
+    // Comparison ops
+    fn lt(&self, _a: u64, _b: u64) -> BackendResult<u64> { Err("Comparison ops not supported over socket".to_string()) }
+    fn gt(&self, _a: u64, _b: u64) -> BackendResult<u64> { Err("Comparison ops not supported over socket".to_string()) }
+    fn le(&self, _a: u64, _b: u64) -> BackendResult<u64> { Err("Comparison ops not supported over socket".to_string()) }
+    fn ge(&self, _a: u64, _b: u64) -> BackendResult<u64> { Err("Comparison ops not supported over socket".to_string()) }
+    fn eq_op(&self, _a: u64, _b: u64) -> BackendResult<u64> { Err("Comparison ops not supported over socket".to_string()) }
+    fn ne_op(&self, _a: u64, _b: u64) -> BackendResult<u64> { Err("Comparison ops not supported over socket".to_string()) }
+
     fn cast(&self, _a: u64, _target_dtype: &str) -> BackendResult<u64> {
         Err("Cast not supported over socket backend".to_string())
     }

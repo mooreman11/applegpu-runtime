@@ -265,6 +265,32 @@ impl Backend for MetalBackend {
         map_err!(applegpu_core::ops::mean(&mut rt, a))
     }
 
+    // Comparison ops
+    fn lt(&self, a: u64, b: u64) -> BackendResult<u64> {
+        let mut rt = self.runtime.lock().unwrap();
+        map_err!(applegpu_core::ops::lt(&mut rt, a, b))
+    }
+    fn gt(&self, a: u64, b: u64) -> BackendResult<u64> {
+        let mut rt = self.runtime.lock().unwrap();
+        map_err!(applegpu_core::ops::gt(&mut rt, a, b))
+    }
+    fn le(&self, a: u64, b: u64) -> BackendResult<u64> {
+        let mut rt = self.runtime.lock().unwrap();
+        map_err!(applegpu_core::ops::le(&mut rt, a, b))
+    }
+    fn ge(&self, a: u64, b: u64) -> BackendResult<u64> {
+        let mut rt = self.runtime.lock().unwrap();
+        map_err!(applegpu_core::ops::ge(&mut rt, a, b))
+    }
+    fn eq_op(&self, a: u64, b: u64) -> BackendResult<u64> {
+        let mut rt = self.runtime.lock().unwrap();
+        map_err!(applegpu_core::ops::eq_op(&mut rt, a, b))
+    }
+    fn ne_op(&self, a: u64, b: u64) -> BackendResult<u64> {
+        let mut rt = self.runtime.lock().unwrap();
+        map_err!(applegpu_core::ops::ne_op(&mut rt, a, b))
+    }
+
     fn cast(&self, a: u64, target_dtype: &str) -> BackendResult<u64> {
         let dt = applegpu_core::tensor::DType::from_name(target_dtype)
             .ok_or_else(|| format!("Unknown dtype: {}", target_dtype))?;

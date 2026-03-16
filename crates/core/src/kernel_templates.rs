@@ -1515,9 +1515,84 @@ kernel void concat_dim1_bytes{es}(device const {t}* a [[buffer(0)]], device cons
     )
 }
 
+/// Generate comparison kernel source (lt, gt, le, ge, eq, ne) for a given dtype.
+/// Input buffers use the input dtype; output buffer is always `uchar` (Bool).
+pub fn comparison_kernel_source(dtype: DType) -> String {
+    let t = metal_type(dtype);
+    let s = dtype_suffix(dtype);
+    format!(
+        r#"#include <metal_stdlib>
+using namespace metal;
+{nd}
+kernel void lt{s}(device const {t}* a [[buffer(0)]], device const {t}* b [[buffer(1)]], device uchar* out [[buffer(2)]], constant uint* a_strides [[buffer(3)]], constant uint* b_strides [[buffer(4)]], constant uint* out_shape [[buffer(5)]], constant uint& ndim [[buffer(6)]], constant uint& numel [[buffer(7)]], uint id [[thread_position_in_grid]]) {{
+    if (id >= numel) return;
+    uint a_off = nd_index_to_offset(id, out_shape, a_strides, ndim);
+    uint b_off = nd_index_to_offset(id, out_shape, b_strides, ndim);
+    out[id] = (a[a_off] < b[b_off]) ? 1 : 0;
+}}
+kernel void gt{s}(device const {t}* a [[buffer(0)]], device const {t}* b [[buffer(1)]], device uchar* out [[buffer(2)]], constant uint* a_strides [[buffer(3)]], constant uint* b_strides [[buffer(4)]], constant uint* out_shape [[buffer(5)]], constant uint& ndim [[buffer(6)]], constant uint& numel [[buffer(7)]], uint id [[thread_position_in_grid]]) {{
+    if (id >= numel) return;
+    uint a_off = nd_index_to_offset(id, out_shape, a_strides, ndim);
+    uint b_off = nd_index_to_offset(id, out_shape, b_strides, ndim);
+    out[id] = (a[a_off] > b[b_off]) ? 1 : 0;
+}}
+kernel void le{s}(device const {t}* a [[buffer(0)]], device const {t}* b [[buffer(1)]], device uchar* out [[buffer(2)]], constant uint* a_strides [[buffer(3)]], constant uint* b_strides [[buffer(4)]], constant uint* out_shape [[buffer(5)]], constant uint& ndim [[buffer(6)]], constant uint& numel [[buffer(7)]], uint id [[thread_position_in_grid]]) {{
+    if (id >= numel) return;
+    uint a_off = nd_index_to_offset(id, out_shape, a_strides, ndim);
+    uint b_off = nd_index_to_offset(id, out_shape, b_strides, ndim);
+    out[id] = (a[a_off] <= b[b_off]) ? 1 : 0;
+}}
+kernel void ge{s}(device const {t}* a [[buffer(0)]], device const {t}* b [[buffer(1)]], device uchar* out [[buffer(2)]], constant uint* a_strides [[buffer(3)]], constant uint* b_strides [[buffer(4)]], constant uint* out_shape [[buffer(5)]], constant uint& ndim [[buffer(6)]], constant uint& numel [[buffer(7)]], uint id [[thread_position_in_grid]]) {{
+    if (id >= numel) return;
+    uint a_off = nd_index_to_offset(id, out_shape, a_strides, ndim);
+    uint b_off = nd_index_to_offset(id, out_shape, b_strides, ndim);
+    out[id] = (a[a_off] >= b[b_off]) ? 1 : 0;
+}}
+kernel void eq{s}(device const {t}* a [[buffer(0)]], device const {t}* b [[buffer(1)]], device uchar* out [[buffer(2)]], constant uint* a_strides [[buffer(3)]], constant uint* b_strides [[buffer(4)]], constant uint* out_shape [[buffer(5)]], constant uint& ndim [[buffer(6)]], constant uint& numel [[buffer(7)]], uint id [[thread_position_in_grid]]) {{
+    if (id >= numel) return;
+    uint a_off = nd_index_to_offset(id, out_shape, a_strides, ndim);
+    uint b_off = nd_index_to_offset(id, out_shape, b_strides, ndim);
+    out[id] = (a[a_off] == b[b_off]) ? 1 : 0;
+}}
+kernel void ne{s}(device const {t}* a [[buffer(0)]], device const {t}* b [[buffer(1)]], device uchar* out [[buffer(2)]], constant uint* a_strides [[buffer(3)]], constant uint* b_strides [[buffer(4)]], constant uint* out_shape [[buffer(5)]], constant uint& ndim [[buffer(6)]], constant uint& numel [[buffer(7)]], uint id [[thread_position_in_grid]]) {{
+    if (id >= numel) return;
+    uint a_off = nd_index_to_offset(id, out_shape, a_strides, ndim);
+    uint b_off = nd_index_to_offset(id, out_shape, b_strides, ndim);
+    out[id] = (a[a_off] != b[b_off]) ? 1 : 0;
+}}
+"#,
+        nd = ND_INDEX_HELPER, t = t, s = s,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn comparison_kernel_has_bool_output() {
+        let src = comparison_kernel_source(DType::Float32);
+        // Input buffers use the input dtype
+        assert!(src.contains("device const float*"));
+        // Output buffer is always uchar (Bool)
+        assert!(src.contains("device uchar* out"));
+        // Contains all 6 comparison functions
+        assert!(src.contains("lt_f32"));
+        assert!(src.contains("gt_f32"));
+        assert!(src.contains("le_f32"));
+        assert!(src.contains("ge_f32"));
+        assert!(src.contains("eq_f32"));
+        assert!(src.contains("ne_f32"));
+    }
+
+    #[test]
+    fn comparison_kernel_typed() {
+        let src = comparison_kernel_source(DType::Int32);
+        assert!(src.contains("device const int*"));
+        assert!(src.contains("device uchar* out"));
+        assert!(src.contains("lt_i32"));
+        assert!(src.contains("ne_i32"));
+    }
 
     #[test]
     fn metal_type_mapping() {

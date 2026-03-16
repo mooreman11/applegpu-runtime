@@ -1462,6 +1462,7 @@ impl KernelRegistry {
                     kt::unary_kernel_source(dtype)
                 }
             }
+            "lt" | "gt" | "le" | "ge" | "eq" | "ne" => kt::comparison_kernel_source(dtype),
             "scalar_mul" => kt::scalar_mul_kernel_source(dtype),
             "pow" => kt::pow_kernel_source(dtype),
             "clamp" => kt::clamp_kernel_source(dtype),

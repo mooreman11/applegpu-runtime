@@ -328,6 +328,30 @@ impl LazyRuntime {
             return Ok(out);
         }
 
+        // Comparison ops: output is Bool but kernel is resolved by INPUT dtype
+        if node.op.is_comparison() {
+            let (a_strides, b_strides, out_shape_u32, ndim, numel) = self.binary_nd_params(node)?;
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+            let a = self.get_tensor(node.inputs[0])?;
+            let b = self.get_tensor(node.inputs[1])?;
+            let input_dtype = a.meta.dtype;
+            REGISTRY.dispatch_binary_nd_typed(
+                device,
+                node.op.kernel_name(),
+                input_dtype,
+                &a.buffer,
+                &a_strides,
+                &b.buffer,
+                &b_strides,
+                &out.buffer,
+                &out_shape_u32,
+                ndim,
+                numel,
+            )?;
+            return Ok(out);
+        }
+
         let dtype = node.out_dtype;
 
         if node.op.is_softmax() {
@@ -1039,6 +1063,28 @@ impl LazyRuntime {
                 &input_buffers,
                 &out.buffer,
                 &stride_refs,
+                &out_shape_u32,
+                ndim,
+                numel,
+            );
+        }
+
+        // Comparison ops: output is Bool but kernel is resolved by INPUT dtype
+        if node.op.is_comparison() {
+            let (a_strides, b_strides, out_shape_u32, ndim, numel) = self.binary_nd_params(node)?;
+            let a = self.get_tensor(node.inputs[0])?;
+            let b = self.get_tensor(node.inputs[1])?;
+            let input_dtype = a.meta.dtype;
+            return REGISTRY.dispatch_binary_nd_typed_nb(
+                device,
+                node.op.kernel_name(),
+                input_dtype,
+                queue,
+                &a.buffer,
+                &a_strides,
+                &b.buffer,
+                &b_strides,
+                &out.buffer,
                 &out_shape_u32,
                 ndim,
                 numel,

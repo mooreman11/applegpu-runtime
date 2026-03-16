@@ -97,6 +97,14 @@ pub trait Backend: Send + Sync {
     fn triu(&self, a: u64, diagonal: i32) -> BackendResult<u64>;
     fn tril(&self, a: u64, diagonal: i32) -> BackendResult<u64>;
 
+    // Comparison ops
+    fn lt(&self, a: u64, b: u64) -> BackendResult<u64>;
+    fn gt(&self, a: u64, b: u64) -> BackendResult<u64>;
+    fn le(&self, a: u64, b: u64) -> BackendResult<u64>;
+    fn ge(&self, a: u64, b: u64) -> BackendResult<u64>;
+    fn eq_op(&self, a: u64, b: u64) -> BackendResult<u64>;
+    fn ne_op(&self, a: u64, b: u64) -> BackendResult<u64>;
+
     // Type conversion
     fn cast(&self, a: u64, target_dtype: &str) -> BackendResult<u64>;
 

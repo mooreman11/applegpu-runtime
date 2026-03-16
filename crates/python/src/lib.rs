@@ -936,6 +936,19 @@ fn mean(t: &GpuTensor) -> PyResult<GpuTensor> {
 }
 
 #[pyfunction]
+fn lt(a: &GpuTensor, b: &GpuTensor) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.lt(a.id, b.id)) }
+#[pyfunction]
+fn gt(a: &GpuTensor, b: &GpuTensor) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.gt(a.id, b.id)) }
+#[pyfunction]
+fn le(a: &GpuTensor, b: &GpuTensor) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.le(a.id, b.id)) }
+#[pyfunction]
+fn ge(a: &GpuTensor, b: &GpuTensor) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.ge(a.id, b.id)) }
+#[pyfunction]
+fn eq_(a: &GpuTensor, b: &GpuTensor) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.eq_op(a.id, b.id)) }
+#[pyfunction]
+fn ne_(a: &GpuTensor, b: &GpuTensor) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.ne_op(a.id, b.id)) }
+
+#[pyfunction]
 fn cast(t: &GpuTensor, dtype: &str) -> PyResult<GpuTensor> {
     wrap_tensor(BACKEND.cast(t.id, dtype))
 }
@@ -1139,6 +1152,12 @@ fn applegpu_runtime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(softmax_causal, m)?)?;
     m.add_function(wrap_pyfunction!(argmax, m)?)?;
     m.add_function(wrap_pyfunction!(cast, m)?)?;
+    m.add_function(wrap_pyfunction!(lt, m)?)?;
+    m.add_function(wrap_pyfunction!(gt, m)?)?;
+    m.add_function(wrap_pyfunction!(le, m)?)?;
+    m.add_function(wrap_pyfunction!(ge, m)?)?;
+    m.add_function(wrap_pyfunction!(eq_, m)?)?;
+    m.add_function(wrap_pyfunction!(ne_, m)?)?;
     m.add_function(wrap_pyfunction!(sum, m)?)?;
     m.add_function(wrap_pyfunction!(mean, m)?)?;
     m.add_function(wrap_pyfunction!(attention_causal, m)?)?;

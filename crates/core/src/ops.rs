@@ -81,6 +81,24 @@ pub fn validate_op_dtype(op: &OpKind, dtype: DType) -> Result<()> {
             }
         }
 
+        // Comparison: ordered comparisons need numeric types (not Bool)
+        OpKind::Lt | OpKind::Gt | OpKind::Le | OpKind::Ge => {
+            if !(dtype.is_float() || matches!(dtype, DType::Int32 | DType::Int64 | DType::UInt8 | DType::UInt32)) {
+                return Err(GpuError::UnsupportedDtype(format!(
+                    "{:?} does not support {}", op, dtype.name()
+                )));
+            }
+        }
+
+        // Equality: works for all numeric types + Bool
+        OpKind::Eq | OpKind::Ne => {
+            if !(dtype.is_float() || matches!(dtype, DType::Int32 | DType::Int64 | DType::UInt8 | DType::UInt32 | DType::Bool)) {
+                return Err(GpuError::UnsupportedDtype(format!(
+                    "{:?} does not support {}", op, dtype.name()
+                )));
+            }
+        }
+
         // FusedElementwise: validated at fusion time
         OpKind::FusedElementwise { .. } => {}
     }
@@ -143,6 +161,40 @@ fn lazy_unary_op(rt: &mut LazyRuntime, input_id: u64, op: OpKind) -> Result<u64>
     });
     Ok(out_id)
 }
+
+/// Record a comparison op in the graph. Output dtype is always Bool.
+fn lazy_comparison_op(rt: &mut LazyRuntime, a_id: u64, b_id: u64, op: OpKind) -> Result<u64> {
+    let a_dtype = rt.dtype(a_id)?;
+    validate_compute_dtype(a_dtype)?;
+    let b_dtype = rt.dtype(b_id)?;
+    if a_dtype != b_dtype {
+        return Err(GpuError::InvalidTensor(format!(
+            "Dtype mismatch: {:?} vs {:?}",
+            a_dtype, b_dtype
+        )));
+    }
+    validate_op_dtype(&op, a_dtype)?;
+    let a_shape_obj = Shape::new(rt.shape(a_id)?)?;
+    let b_shape_obj = Shape::new(rt.shape(b_id)?)?;
+    let out_shape = a_shape_obj.broadcast_with(&b_shape_obj)?;
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op,
+        inputs: vec![a_id, b_id],
+        out_shape,
+        out_dtype: DType::Bool,
+        container_id: ContainerId::DEFAULT,
+    });
+    Ok(out_id)
+}
+
+pub fn lt(rt: &mut LazyRuntime, a: u64, b: u64) -> Result<u64> { lazy_comparison_op(rt, a, b, OpKind::Lt) }
+pub fn gt(rt: &mut LazyRuntime, a: u64, b: u64) -> Result<u64> { lazy_comparison_op(rt, a, b, OpKind::Gt) }
+pub fn le(rt: &mut LazyRuntime, a: u64, b: u64) -> Result<u64> { lazy_comparison_op(rt, a, b, OpKind::Le) }
+pub fn ge(rt: &mut LazyRuntime, a: u64, b: u64) -> Result<u64> { lazy_comparison_op(rt, a, b, OpKind::Ge) }
+pub fn eq_op(rt: &mut LazyRuntime, a: u64, b: u64) -> Result<u64> { lazy_comparison_op(rt, a, b, OpKind::Eq) }
+pub fn ne_op(rt: &mut LazyRuntime, a: u64, b: u64) -> Result<u64> { lazy_comparison_op(rt, a, b, OpKind::Ne) }
 
 pub fn add(rt: &mut LazyRuntime, a_id: u64, b_id: u64) -> Result<u64> {
     lazy_binary_op(rt, a_id, b_id, OpKind::Add)
