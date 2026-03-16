@@ -60,13 +60,17 @@ _Eliminate GPU idle time between ops, then enable true parallel execution._
 - [x] **begin_batch/end_batch/abort_batch FFI** — new Swift/Rust API for batch encoding
 - [x] **Spec:** `docs/superpowers/specs/2026-03-15-single-command-buffer-design.md`
 
-**Phase 2c: Concurrent queues** _(future)_
-- [ ] **Dependency analysis** — identify independent subgraphs in the topo-sorted order
-- [ ] **Concurrent command queue dispatch** — dispatch independent subgraphs to separate Metal queues
+**Phase 2c: Concurrent queues** _(DONE — PR #4)_
+- [x] **parallel_levels() graph analysis** — partition topo-sorted subgraph into depth levels for concurrent dispatch
+- [x] **Queue pool (4 MTLCommandQueues)** — lazy queue creation with NSLock synchronization
+- [x] **Batch context system** — per-context command buffers replacing global activeBatchCommandBuffer
+- [x] **MTLEvent synchronization** — cross-queue dependency signaling
+- [x] **Multi-queue eval** — fusion → parallel_levels → per-level commit-and-wait with one CB per queue per level
+- [x] **Linear fast path** — zero overhead for sequential graphs (single CB, no events)
 
 **Phase 2d: Async eval + fine-grained locking** _(future)_
-- [ ] **Async eval** — `gpu.eval_async(tensor)` returns a future/handle, non-blocking Python
 - [ ] **Fine-grained locking** — split `Mutex<LazyRuntime>` into per-component locks (graph, tensor store, scheduler, pool)
+- [ ] **Async eval** — `gpu.eval_async(tensor)` returns a GpuFuture, non-blocking Python
 
 ### ~~3. New ops for transformer inference~~ PARTIALLY DONE
 - [x] **LayerNorm** — f32 + f16 kernels, blocking + non-blocking dispatch
@@ -237,16 +241,24 @@ _Graph-level fusion, eliminate Python dispatch overhead._
 ## Further Backlog
 
 ### Framework Improvements
-- [ ] **Zero-copy from_numpy** — Metal `makeBuffer(bytesNoCopy:)` Swift FFI, page alignment, GC pinning, three-layer work
-- [ ] **Direct from_torch via data_ptr()** — bypass NumPy bridge when Metal bytesNoCopy is available
+- [x] **Zero-copy from_numpy** — `from_numpy_shared`, `from_torch_shared`, `aligned_numpy` with page-aligned allocation, GPUBufferBase/GPUBufferNoCopy hierarchy, BufferKind enum (PR #5)
+- [x] **Direct from_torch via data_ptr()** — already done (385x faster transfer via data_ptr)
 
-### Multi-dtype Support (partially done)
-- [x] **Multi-dtype adapters** — all 10 dtypes (float16/32/64, int8/16/32/64, uint8/32, bool) supported in tensor(), from_numpy, to_numpy, to_list, dtype getter
-- [x] **Float16 compute kernels** — all 14 ops have f16 MSL kernels with f32 accumulation
-- [x] **Comprehensive multi-dtype tests** — 26 parametrized Python tests covering creation, NumPy roundtrip, to_list type fidelity, compute validation, and backward compat
-- [ ] **Float64 compute kernels** — MSL kernel variants for f64 (Apple Silicon emulates f64, slower than f32 — low priority)
-- [ ] **Integer compute kernels** — MSL kernel variants for int32/int64 arithmetic (add, mul, etc. — useful for index manipulation)
-- [ ] **Bool compute kernels** — logical ops (and, or, not) on bool tensors
+### Multi-dtype Support
+- [x] **Multi-dtype adapters** — all 10 dtypes supported in tensor(), from_numpy, to_numpy, to_list, dtype getter
+- [x] **Float16 compute kernels** — all ops have f16 MSL kernels with f32 accumulation
+- [x] **Template-based kernel dispatch** — all ~25 op categories templated in kernel_templates.rs, unified resolve_kernel for all dtypes (Plan 2, PR #7)
+- [x] **Cast op** — `gpu.cast(tensor, "int32")` for dtype conversion (Plan 2)
+- [x] **Byte-copy shape ops** — slice/concat parameterized by element size (Plan 2)
+- [x] **is_compute_supported expansion** — all dtypes except Float64 (Plan 2)
+- [ ] **Op-level dtype validation** — prevent nonsensical combos (exp(Int32), softmax(Bool))
+- [ ] **Int64 Apple9+ gating** — runtime device family check
+- [ ] **Comparison ops** — lt, gt, le, ge, eq, ne with Bool output
+- [ ] **Bitwise ops** — and, or, xor, not, shl, shr for integer types
+- [ ] **Element-wise min/max, modulo** — binary utility ops
+- [ ] **Bool logical ops** — logical_not
+- [ ] **Quantize/dequantize** — int8/uint8 ↔ f16/f32 conversion
+- [ ] **Float64 compute kernels** — MSL does not support double. Deferred until Apple hardware adds support.
 
 ### Infrastructure
 - [x] **Phase 7b: Container GPU bridge** — multi-client GPU service (thread-per-connection, shared LazyRuntime), wire protocol crate, client crate with Unix socket + vsock transport, handshake protocol, per-container isolation and cleanup
@@ -261,9 +273,9 @@ _Graph-level fusion, eliminate Python dispatch overhead._
 - [ ] **Multi-node / distributed graph** — network transport layer, graph partitioning across machines
 
 ### Concurrency
-- [ ] **Multiple Metal command queues** — dispatch independent graph branches in parallel on the same GPU. Apple Silicon supports concurrent queues natively. Biggest throughput win for workloads with independent subgraphs.
-- [ ] **Async eval** — `gpu.eval_async(tensor)` returns a future/handle, doesn't block Python. Submit multiple evals and wait on results. Integrates with the scheduler's job queue.
-- [ ] **Fine-grained locking** — split single `Mutex<LazyRuntime>` into per-component locks (graph, tensor store, scheduler, pool). Allows concurrent reads while one eval runs. Requires careful lock ordering to avoid deadlocks.
+- [x] **Multiple Metal command queues** — parallel_levels graph analysis, 4-queue pool, MTLEvent sync (Phase 2c, PR #4)
+- [ ] **Fine-grained locking** — split single `Mutex<LazyRuntime>` into per-component locks (graph, tensor store, scheduler, pool)
+- [ ] **Async eval** — `gpu.eval_async(tensor)` returns a GpuFuture, non-blocking Python
 - [ ] **Read timeout / keepalive** — `SO_RCVTIMEO` on GPU service connections to reclaim threads from hung clients
 - [ ] **Connection limits** — max concurrent GPU service connections to prevent thread exhaustion (e.g., 64 max)
 - [ ] **Health check endpoint** — GPU service status query for monitoring
