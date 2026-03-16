@@ -578,6 +578,12 @@ impl Backend for SocketBackend {
     fn tanh(&self, a: u64) -> BackendResult<u64> {
         self.record_unary(a, WireOpKind::Tanh)
     }
+    fn sin(&self, a: u64) -> BackendResult<u64> {
+        self.record_unary(a, WireOpKind::Sin)
+    }
+    fn cos(&self, a: u64) -> BackendResult<u64> {
+        self.record_unary(a, WireOpKind::Cos)
+    }
 
     // -----------------------------------------------------------------------
     // Parameterized ops

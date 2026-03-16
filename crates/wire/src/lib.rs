@@ -232,6 +232,10 @@ pub enum WireOpKind {
     // 63–64: quantization
     Quantize { scale: f32, zero_point: i32, target_dtype: u8 },
     Dequantize { scale: f32, zero_point: i32, target_dtype: u8 },
+    // 65–67: new ops
+    Sin,
+    Cos,
+    LogSoftmax,
 }
 
 impl WireOpKind {
@@ -302,6 +306,9 @@ impl WireOpKind {
             WireOpKind::LogicalNot => 62,
             WireOpKind::Quantize { .. } => 63,
             WireOpKind::Dequantize { .. } => 64,
+            WireOpKind::Sin => 65,
+            WireOpKind::Cos => 66,
+            WireOpKind::LogSoftmax => 67,
         }
     }
 
@@ -315,8 +322,10 @@ impl WireOpKind {
             | WireOpKind::Gelu | WireOpKind::Embedding | WireOpKind::AddBias
             | WireOpKind::SoftmaxCausal | WireOpKind::Argmax | WireOpKind::Sum
             | WireOpKind::Mean | WireOpKind::Abs | WireOpKind::Sign | WireOpKind::Where
-            | WireOpKind::Tanh | WireOpKind::SoftmaxBackward
+            | WireOpKind::Tanh | WireOpKind::Sin | WireOpKind::Cos
+            | WireOpKind::SoftmaxBackward
             | WireOpKind::EmbeddingBackward
+            | WireOpKind::LogSoftmax
             | WireOpKind::Lt | WireOpKind::Gt | WireOpKind::Le | WireOpKind::Ge
             | WireOpKind::Eq | WireOpKind::Ne
             | WireOpKind::BitwiseAnd | WireOpKind::BitwiseOr | WireOpKind::BitwiseXor
@@ -562,6 +571,9 @@ impl WireOpKind {
                 r.read_exact(&mut b)?;
                 Ok(WireOpKind::Dequantize { scale, zero_point, target_dtype: b[0] })
             }
+            65 => Ok(WireOpKind::Sin),
+            66 => Ok(WireOpKind::Cos),
+            67 => Ok(WireOpKind::LogSoftmax),
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("Unknown op discriminant: {}", disc),

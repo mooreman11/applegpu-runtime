@@ -152,6 +152,16 @@ kernel void elementwise_tanh{s}(device const {t}* input [[buffer(0)]], device {t
     uint in_off = nd_index_to_offset(id, out_shape, in_strides, ndim);
     out[id] = tanh(input[in_off]);
 }}
+kernel void elementwise_sin{s}(device const {t}* input [[buffer(0)]], device {t}* out [[buffer(1)]], constant uint* in_strides [[buffer(2)]], constant uint* out_shape [[buffer(3)]], constant uint& ndim [[buffer(4)]], constant uint& numel [[buffer(5)]], uint id [[thread_position_in_grid]]) {{
+    if (id >= numel) return;
+    uint in_off = nd_index_to_offset(id, out_shape, in_strides, ndim);
+    out[id] = sin(input[in_off]);
+}}
+kernel void elementwise_cos{s}(device const {t}* input [[buffer(0)]], device {t}* out [[buffer(1)]], constant uint* in_strides [[buffer(2)]], constant uint* out_shape [[buffer(3)]], constant uint& ndim [[buffer(4)]], constant uint& numel [[buffer(5)]], uint id [[thread_position_in_grid]]) {{
+    if (id >= numel) return;
+    uint in_off = nd_index_to_offset(id, out_shape, in_strides, ndim);
+    out[id] = cos(input[in_off]);
+}}
 "#,
         nd = ND_INDEX_HELPER, t = t, s = s, zero = zero,
     )
@@ -1849,6 +1859,13 @@ mod tests {
         assert!(src.contains("elementwise_exp_f32"));
         assert!(src.contains("elementwise_relu_f32"));
         assert!(src.contains("elementwise_tanh_f32"));
+    }
+
+    #[test]
+    fn float_unary_kernel_has_sincos() {
+        let src = float_unary_kernel_source(DType::Float32);
+        assert!(src.contains("elementwise_sin_f32"));
+        assert!(src.contains("elementwise_cos_f32"));
     }
 
     // Task 8a tests

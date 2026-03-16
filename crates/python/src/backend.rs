@@ -71,6 +71,8 @@ pub trait Backend: Send + Sync {
     fn abs(&self, a: u64) -> BackendResult<u64>;
     fn sign(&self, a: u64) -> BackendResult<u64>;
     fn tanh(&self, a: u64) -> BackendResult<u64>;
+    fn sin(&self, a: u64) -> BackendResult<u64>;
+    fn cos(&self, a: u64) -> BackendResult<u64>;
 
     // Parameterized ops
     fn scalar_mul(&self, a: u64, scale: f32) -> BackendResult<u64>;

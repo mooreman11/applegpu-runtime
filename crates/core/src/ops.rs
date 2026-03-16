@@ -33,8 +33,9 @@ pub fn validate_op_dtype(op: &OpKind, dtype: DType) -> Result<()> {
     match op {
         // Float-only ops
         OpKind::Exp | OpKind::Log | OpKind::Sqrt | OpKind::Tanh |
+        OpKind::Sin | OpKind::Cos |
         OpKind::Relu | OpKind::Gelu |
-        OpKind::Softmax | OpKind::SoftmaxCausal |
+        OpKind::Softmax | OpKind::LogSoftmax | OpKind::SoftmaxCausal |
         OpKind::Matmul |
         OpKind::LayerNorm { .. } | OpKind::BatchNorm { .. } |
         OpKind::Conv1d { .. } | OpKind::Conv2d { .. } |
@@ -562,6 +563,14 @@ pub fn reshape(rt: &mut LazyRuntime, input_id: u64, new_shape: Vec<usize>) -> Re
 
 pub fn tanh(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
     lazy_unary_op(rt, input_id, OpKind::Tanh)
+}
+
+pub fn sin(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
+    lazy_unary_op(rt, input_id, OpKind::Sin)
+}
+
+pub fn cos(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
+    lazy_unary_op(rt, input_id, OpKind::Cos)
 }
 
 pub fn gelu(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {

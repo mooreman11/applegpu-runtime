@@ -60,12 +60,15 @@ pub enum OpKind {
     },
     // Reduction ops
     Softmax,
+    LogSoftmax,
     // Shape ops — general transpose swapping two dimensions
     Transpose { dim0: usize, dim1: usize },
     // Scalar multiply (carries the scalar value)
     ScalarMul(ScalarValue),
     // Transformer ops
     Tanh,
+    Sin,
+    Cos,
     Gelu,
     LayerNorm { eps: f32 },
     Embedding,
@@ -153,9 +156,12 @@ impl OpKind {
             OpKind::Matmul => "matmul",
             OpKind::FusedElementwise { ref function_name, .. } => function_name.as_str(),
             OpKind::Softmax => "softmax",
+            OpKind::LogSoftmax => "log_softmax",
             OpKind::Transpose { .. } => "transpose",
             OpKind::ScalarMul(_) => "scalar_mul",
             OpKind::Tanh => "elementwise_tanh",
+            OpKind::Sin => "elementwise_sin",
+            OpKind::Cos => "elementwise_cos",
             OpKind::Gelu => "gelu",
             OpKind::LayerNorm { .. } => "layer_norm",
             OpKind::Embedding => "embedding",
@@ -214,7 +220,7 @@ impl OpKind {
     }
 
     pub fn is_unary(&self) -> bool {
-        matches!(self, OpKind::Neg | OpKind::Relu | OpKind::Exp | OpKind::Log | OpKind::Sqrt | OpKind::Tanh | OpKind::Gelu | OpKind::Abs | OpKind::Sign | OpKind::BitwiseNot | OpKind::LogicalNot)
+        matches!(self, OpKind::Neg | OpKind::Relu | OpKind::Exp | OpKind::Log | OpKind::Sqrt | OpKind::Tanh | OpKind::Sin | OpKind::Cos | OpKind::Gelu | OpKind::Abs | OpKind::Sign | OpKind::BitwiseNot | OpKind::LogicalNot)
     }
 
     pub fn is_matmul(&self) -> bool {
@@ -227,12 +233,16 @@ impl OpKind {
 
     pub fn is_elementwise(&self) -> bool {
         matches!(self, OpKind::Add | OpKind::Sub | OpKind::Mul | OpKind::Div |
-                       OpKind::Neg | OpKind::Relu | OpKind::Exp | OpKind::Log | OpKind::Sqrt | OpKind::Tanh | OpKind::Gelu |
+                       OpKind::Neg | OpKind::Relu | OpKind::Exp | OpKind::Log | OpKind::Sqrt | OpKind::Tanh | OpKind::Sin | OpKind::Cos | OpKind::Gelu |
                        OpKind::Abs | OpKind::Sign)
     }
 
     pub fn is_softmax(&self) -> bool {
         matches!(self, OpKind::Softmax)
+    }
+
+    pub fn is_log_softmax(&self) -> bool {
+        matches!(self, OpKind::LogSoftmax)
     }
 
     pub fn is_transpose(&self) -> bool {

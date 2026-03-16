@@ -120,6 +120,9 @@ fn op_to_discriminant(op: &OpKind) -> u32 {
         OpKind::LogicalNot => 62,
         OpKind::Quantize { .. } => 63,
         OpKind::Dequantize { .. } => 64,
+        OpKind::Sin => 65,
+        OpKind::Cos => 66,
+        OpKind::LogSoftmax => 67,
     }
 }
 
@@ -347,6 +350,9 @@ fn discriminant_to_op(d: u32, r: &mut impl Read) -> io::Result<OpKind> {
                 target_dtype,
             })
         }
+        65 => Ok(OpKind::Sin),
+        66 => Ok(OpKind::Cos),
+        67 => Ok(OpKind::LogSoftmax),
         _ => Err(io::Error::new(io::ErrorKind::InvalidData, format!("Unknown op type: {}", d))),
     }
 }
@@ -698,6 +704,9 @@ impl From<&OpKind> for WireOpKind {
                 WireOpKind::AvgPool2d { kernel_size: *kernel_size, stride: *stride, padding: *padding }
             }
             OpKind::Tanh => WireOpKind::Tanh,
+            OpKind::Sin => WireOpKind::Sin,
+            OpKind::Cos => WireOpKind::Cos,
+            OpKind::LogSoftmax => WireOpKind::LogSoftmax,
             OpKind::SoftmaxBackward => WireOpKind::SoftmaxBackward,
             OpKind::LayerNormBackward { eps } => WireOpKind::LayerNormBackward { eps: *eps },
             OpKind::Conv2dBackwardInput { stride, padding } => WireOpKind::Conv2dBackwardInput { stride: *stride, padding: *padding },
@@ -794,6 +803,9 @@ pub fn wire_op_to_core(wire: &WireOpKind) -> OpKind {
             OpKind::AvgPool2d { kernel_size: *kernel_size, stride: *stride, padding: *padding }
         }
         WireOpKind::Tanh => OpKind::Tanh,
+        WireOpKind::Sin => OpKind::Sin,
+        WireOpKind::Cos => OpKind::Cos,
+        WireOpKind::LogSoftmax => OpKind::LogSoftmax,
         WireOpKind::SoftmaxBackward => OpKind::SoftmaxBackward,
         WireOpKind::LayerNormBackward { eps } => OpKind::LayerNormBackward { eps: *eps },
         WireOpKind::Conv2dBackwardInput { stride, padding } => OpKind::Conv2dBackwardInput { stride: *stride, padding: *padding },

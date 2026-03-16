@@ -223,6 +223,16 @@ impl Backend for MetalBackend {
         map_err!(applegpu_core::ops::tanh(&mut rt, a))
     }
 
+    fn sin(&self, a: u64) -> BackendResult<u64> {
+        let mut rt = self.runtime.lock().unwrap();
+        map_err!(applegpu_core::ops::sin(&mut rt, a))
+    }
+
+    fn cos(&self, a: u64) -> BackendResult<u64> {
+        let mut rt = self.runtime.lock().unwrap();
+        map_err!(applegpu_core::ops::cos(&mut rt, a))
+    }
+
     // Parameterized ops
     fn scalar_mul(&self, a: u64, scale: f32) -> BackendResult<u64> {
         let mut rt = self.runtime.lock().unwrap();

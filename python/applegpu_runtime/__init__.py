@@ -35,6 +35,8 @@ from applegpu_runtime.applegpu_runtime import (
     transpose,
     transpose_dims,
     tanh,
+    sin,
+    cos,
     gelu,
     layer_norm,
     embedding,
