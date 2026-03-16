@@ -140,9 +140,18 @@ _Containerization, multi-dtype completion, wire protocol v3, CI/packaging._
 - [ ] Binary signing/notarization — Apple Developer ID signing for gpu-container/gpu-service
 
 ### PRIORITY 2: Replace TCP Bridge with Unix Socket Relay / vsock
-_macOS 26 SDK available — ready to implement._
-- [ ] vsock relay — VZVirtioSocketListener relay in Swift process
-- [ ] Remove TCP bridge — once Containerization framework path is fully working
+_macOS 26 SDK available — ready to implement. Three-tier fallback architecture._
+- [ ] Tier 1: Full programmatic — Containerization framework for image pull + container lifecycle + `UnixSocketConfiguration` socket relay
+- [ ] Tier 2: Hybrid — `container pull` CLI for images + Containerization API for lifecycle + socket relay
+- [ ] Tier 3 (existing): CLI + TCP bridge — backward compat for pre-macOS 26
+- [ ] Extract shared `UnixSocketHelper` — deduplicate relay + connect code across TCPBridge, VsockRelay, ServiceManager
+- [ ] Fix `waitUntilExit()` blocking async context — wrap in continuation
+- [ ] Make TCPBridge IP configurable — currently hardcoded to 192.168.64.1
+
+**Post-vsock cleanup (after validation):**
+- [ ] Remove TCP bridge — once Containerization framework path is proven stable across multiple releases
+- [ ] Delete VsockRelay.swift — currently kept with deprecation notice; remove once AVF VM backend is confirmed unnecessary
+- [ ] Socket helper unit tests — test UnixSocketHelper connect/relay with temporary Unix sockets (no GPU needed for socket tests)
 
 ### PRIORITY 3: Model Expansion + Polish
 - [ ] Whisper — audio model with conv1d
