@@ -17,7 +17,7 @@ concurrency:
 jobs:
   build-wheels-macos:
     name: Build macOS Wheels
-    runs-on: macos-15-xlarge
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -40,7 +40,7 @@ jobs:
 
   build-wheels-linux:
     name: Build Linux aarch64 Wheels
-    runs-on: macos-15-xlarge
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -65,7 +65,7 @@ jobs:
 
   build-binaries:
     name: Build Swift + Rust Binaries
-    runs-on: macos-15-xlarge
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
