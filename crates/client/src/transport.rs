@@ -2,9 +2,16 @@ use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
 
 /// Trait for a bidirectional byte stream transport.
-pub trait Transport: Read + Write + Send {}
+pub trait Transport: Read + Write + Send {
+    /// Shut down the transport (both read and write halves).
+    fn shutdown(&self) -> io::Result<()>;
+}
 
-impl Transport for UnixStream {}
+impl Transport for UnixStream {
+    fn shutdown(&self) -> io::Result<()> {
+        UnixStream::shutdown(self, std::net::Shutdown::Both)
+    }
+}
 
 /// Connect via Unix domain socket.
 pub fn connect_unix(path: &str) -> io::Result<UnixStream> {
@@ -61,4 +68,17 @@ pub fn connect_vsock(_cid: u32, _port: u32) -> io::Result<UnixStream> {
         io::ErrorKind::Unsupported,
         "vsock is only available on Linux guests",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::net::UnixStream as StdUnixStream;
+
+    #[test]
+    fn unix_transport_shutdown() {
+        let (a, _b) = StdUnixStream::pair().unwrap();
+        let transport: Box<dyn Transport> = Box::new(a);
+        assert!(transport.shutdown().is_ok());
+    }
 }
