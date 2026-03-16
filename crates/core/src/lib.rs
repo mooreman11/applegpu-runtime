@@ -7,6 +7,7 @@ pub mod ffi;
 pub mod fusion;
 pub mod graph;
 pub mod ipc;
+pub mod kernel_templates;
 pub mod limits;
 pub mod lazy;
 pub mod ops;

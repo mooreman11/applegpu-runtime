@@ -25,6 +25,8 @@ pub enum GpuError {
     JobNotFound(String),
     /// Job submission rejected (queue full)
     AdmissionRejected(String),
+    /// Operation not supported for the given dtype
+    UnsupportedDtype(String),
 }
 
 impl std::fmt::Display for GpuError {
@@ -42,6 +44,7 @@ impl std::fmt::Display for GpuError {
             GpuError::ContainerQuotaExceeded(msg) => write!(f, "Container quota exceeded: {}", msg),
             GpuError::JobNotFound(msg) => write!(f, "Job not found: {}", msg),
             GpuError::AdmissionRejected(msg) => write!(f, "Admission rejected: {}", msg),
+            GpuError::UnsupportedDtype(msg) => write!(f, "Unsupported dtype: {}", msg),
         }
     }
 }
@@ -82,5 +85,12 @@ mod tests {
 
         let e = GpuError::AdmissionRejected("container 2: queue full".to_string());
         assert!(e.to_string().contains("queue full"));
+    }
+
+    #[test]
+    fn unsupported_dtype_display() {
+        let e = GpuError::UnsupportedDtype("Float64 not supported in Metal".to_string());
+        assert!(e.to_string().contains("Float64"));
+        assert!(e.to_string().contains("not supported"));
     }
 }

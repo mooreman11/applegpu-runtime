@@ -1,5 +1,5 @@
 use crate::error::{GpuError, Result};
-use crate::graph::{OpKind, OpNode};
+use crate::graph::{OpKind, OpNode, ScalarValue};
 use crate::lazy::LazyRuntime;
 use crate::scheduler::ContainerId;
 use crate::tensor::{DType, Shape};
@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 fn validate_compute_dtype(dtype: DType) -> Result<()> {
     if !dtype.is_compute_supported() {
-        return Err(GpuError::InvalidTensor(format!(
-            "No compute kernel for {:?}. Supported: Float32, Float16.", dtype
+        return Err(GpuError::UnsupportedDtype(format!(
+            "{} is not supported for GPU compute", dtype.name()
         )));
     }
     Ok(())
@@ -123,7 +123,7 @@ pub fn pow(rt: &mut LazyRuntime, input_id: u64, exponent: f32) -> Result<u64> {
     let out_id = next_id();
     rt.record_op(OpNode {
         id: out_id,
-        op: OpKind::Pow { exponent },
+        op: OpKind::Pow { exponent: ScalarValue::from_f32(exponent) },
         inputs: vec![input_id],
         out_shape: Shape::new(shape)?,
         out_dtype: dtype,
@@ -140,7 +140,7 @@ pub fn clamp(rt: &mut LazyRuntime, input_id: u64, min_val: f32, max_val: f32) ->
     let out_id = next_id();
     rt.record_op(OpNode {
         id: out_id,
-        op: OpKind::Clamp { min_val, max_val },
+        op: OpKind::Clamp { min_val: ScalarValue::from_f32(min_val), max_val: ScalarValue::from_f32(max_val) },
         inputs: vec![input_id],
         out_shape: Shape::new(shape)?,
         out_dtype: dtype,
@@ -297,7 +297,7 @@ pub fn scalar_mul(rt: &mut LazyRuntime, input_id: u64, scale: f32) -> Result<u64
     let out_id = next_id();
     rt.record_op(OpNode {
         id: out_id,
-        op: OpKind::ScalarMul(scale),
+        op: OpKind::ScalarMul(ScalarValue::from_f32(scale)),
         inputs: vec![input_id],
         out_shape: Shape::new(shape)?,
         out_dtype: dtype,
@@ -1022,7 +1022,7 @@ pub fn masked_fill(rt: &mut LazyRuntime, input_id: u64, mask_id: u64, value: f32
     let out_id = next_id();
     rt.record_op(OpNode {
         id: out_id,
-        op: OpKind::MaskedFill { value },
+        op: OpKind::MaskedFill { value: ScalarValue::from_f32(value) },
         inputs: vec![input_id, mask_id],
         out_shape,
         out_dtype: in_dtype,
@@ -1406,6 +1406,30 @@ pub fn avg_pool2d(rt: &mut LazyRuntime, input_id: u64, kernel_size: (usize, usiz
         inputs: vec![input_id],
         out_shape: Shape::new(vec![in_shape[0], in_shape[1], out_h, out_w])?,
         out_dtype: dtype,
+        container_id: ContainerId::DEFAULT,
+    });
+    Ok(out_id)
+}
+
+/// Cast tensor to a different dtype.
+pub fn cast(rt: &mut LazyRuntime, input_id: u64, target_dtype: DType) -> Result<u64> {
+    let src_dtype = rt.dtype(input_id)?;
+    validate_compute_dtype(src_dtype)?;
+    validate_compute_dtype(target_dtype)?;
+
+    // No-op if already the target dtype
+    if src_dtype == target_dtype {
+        return Ok(input_id);
+    }
+
+    let shape = rt.shape(input_id)?;
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op: OpKind::Cast { target_dtype },
+        inputs: vec![input_id],
+        out_shape: Shape::new(shape.to_vec())?,
+        out_dtype: target_dtype,
         container_id: ContainerId::DEFAULT,
     });
     Ok(out_id)

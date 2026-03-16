@@ -667,6 +667,11 @@ fn mean(t: &GpuTensor) -> PyResult<GpuTensor> {
 }
 
 #[pyfunction]
+fn cast(t: &GpuTensor, dtype: &str) -> PyResult<GpuTensor> {
+    wrap_tensor(BACKEND.cast(t.id, dtype))
+}
+
+#[pyfunction]
 fn attention_causal(q: &GpuTensor, k: &GpuTensor, v: &GpuTensor) -> PyResult<GpuTensor> {
     wrap_tensor(BACKEND.attention_causal(q.id, k.id, v.id))
 }
@@ -861,6 +866,7 @@ fn applegpu_runtime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(add_bias, m)?)?;
     m.add_function(wrap_pyfunction!(softmax_causal, m)?)?;
     m.add_function(wrap_pyfunction!(argmax, m)?)?;
+    m.add_function(wrap_pyfunction!(cast, m)?)?;
     m.add_function(wrap_pyfunction!(sum, m)?)?;
     m.add_function(wrap_pyfunction!(mean, m)?)?;
     m.add_function(wrap_pyfunction!(attention_causal, m)?)?;

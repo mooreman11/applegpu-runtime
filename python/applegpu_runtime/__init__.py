@@ -44,6 +44,7 @@ from applegpu_runtime.applegpu_runtime import (
     add_bias,
     softmax_causal,
     argmax,
+    cast,
     sum,
     mean,
     attention_causal,

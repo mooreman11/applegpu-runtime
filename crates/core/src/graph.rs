@@ -3,6 +3,40 @@ use std::collections::HashMap;
 use crate::scheduler::ContainerId;
 use crate::tensor::{DType, Shape};
 
+/// A scalar value that can represent any dtype's scalar.
+/// Used by ops that carry scalar parameters (Pow, ScalarMul, Clamp, MaskedFill).
+#[derive(Debug, Clone, Copy)]
+pub enum ScalarValue {
+    Float(f64),
+    Int(i64),
+    UInt(u64),
+    Bool(bool),
+}
+
+impl ScalarValue {
+    pub fn as_f64(&self) -> f64 {
+        match self {
+            ScalarValue::Float(v) => *v,
+            ScalarValue::Int(v) => *v as f64,
+            ScalarValue::UInt(v) => *v as f64,
+            ScalarValue::Bool(v) => if *v { 1.0 } else { 0.0 },
+        }
+    }
+
+    pub fn to_msl_literal(&self) -> String {
+        match self {
+            ScalarValue::Float(v) => format!("{}", v),
+            ScalarValue::Int(v) => format!("{}", v),
+            ScalarValue::UInt(v) => format!("{}u", v),
+            ScalarValue::Bool(v) => if *v { "true".to_string() } else { "false".to_string() },
+        }
+    }
+
+    pub fn from_f32(v: f32) -> Self {
+        ScalarValue::Float(v as f64)
+    }
+}
+
 /// The kind of operation a graph node represents.
 #[derive(Debug, Clone)]
 pub enum OpKind {
@@ -29,7 +63,7 @@ pub enum OpKind {
     // Shape ops — general transpose swapping two dimensions
     Transpose { dim0: usize, dim1: usize },
     // Scalar multiply (carries the scalar value)
-    ScalarMul(f32),
+    ScalarMul(ScalarValue),
     // Transformer ops
     Tanh,
     Gelu,
@@ -56,13 +90,13 @@ pub enum OpKind {
     // Element-wise sign (-1, 0, 1)
     Sign,
     // Element-wise power by scalar exponent
-    Pow { exponent: f32 },
+    Pow { exponent: ScalarValue },
     // Element-wise clamp to [min, max]
-    Clamp { min_val: f32, max_val: f32 },
+    Clamp { min_val: ScalarValue, max_val: ScalarValue },
     // Ternary conditional: where(cond, x, y) — select x where cond != 0, else y
     Where,
     // Masked fill: set elements to value where mask is true
-    MaskedFill { value: f32 },
+    MaskedFill { value: ScalarValue },
     // Upper triangular: zero below diagonal
     Triu { diagonal: i32 },
     // Lower triangular: zero above diagonal
@@ -83,10 +117,13 @@ pub enum OpKind {
     Conv2dBackwardInput { stride: (usize, usize), padding: (usize, usize) },
     EmbeddingBackward,
     BatchNormBackward { eps: f32 },
+    // Type conversion
+    Cast { target_dtype: DType },
 }
 
 impl OpKind {
-    /// Map to the MSL kernel function name.
+    /// Map to the MSL kernel base name (without dtype suffix).
+    /// The dtype suffix is appended by resolve_kernel at dispatch time.
     pub fn kernel_name(&self) -> &str {
         match self {
             OpKind::Add => "elementwise_add",
@@ -98,43 +135,44 @@ impl OpKind {
             OpKind::Exp => "elementwise_exp",
             OpKind::Log => "elementwise_log",
             OpKind::Sqrt => "elementwise_sqrt",
-            OpKind::Matmul => "matmul_f32",
+            OpKind::Matmul => "matmul",
             OpKind::FusedElementwise { ref function_name, .. } => function_name.as_str(),
-            OpKind::Softmax => "softmax_f32",
-            OpKind::Transpose { .. } => "transpose_f32",
-            OpKind::ScalarMul(_) => "scalar_mul_f32",
+            OpKind::Softmax => "softmax",
+            OpKind::Transpose { .. } => "transpose",
+            OpKind::ScalarMul(_) => "scalar_mul",
             OpKind::Tanh => "elementwise_tanh",
-            OpKind::Gelu => "gelu_f32",
-            OpKind::LayerNorm { .. } => "layer_norm_f32",
-            OpKind::Embedding => "embedding_f32",
+            OpKind::Gelu => "gelu",
+            OpKind::LayerNorm { .. } => "layer_norm",
+            OpKind::Embedding => "embedding",
             OpKind::Reshape { .. } => "reshape",
-            OpKind::Slice { dim, .. } => if *dim == 0 { "slice_dim0_f32" } else { "slice_dim1_f32" },
-            OpKind::Concat { dim } => if *dim == 0 { "concat_dim0_f32" } else { "concat_dim1_f32" },
-            OpKind::AddBias => "add_bias_f32",
-            OpKind::SoftmaxCausal => "softmax_causal_f32",
-            OpKind::Argmax => "argmax_f32",
-            OpKind::Sum => "sum_f32",
-            OpKind::Mean => "mean_f32",
+            OpKind::Slice { dim, .. } => if *dim == 0 { "slice_dim0" } else { "slice_dim1" },
+            OpKind::Concat { dim } => if *dim == 0 { "concat_dim0" } else { "concat_dim1" },
+            OpKind::AddBias => "add_bias",
+            OpKind::SoftmaxCausal => "softmax_causal",
+            OpKind::Argmax => "argmax",
+            OpKind::Sum => "sum",
+            OpKind::Mean => "mean",
             OpKind::Abs => "elementwise_abs",
             OpKind::Sign => "elementwise_sign",
-            OpKind::Pow { .. } => "pow_f32",
-            OpKind::Clamp { .. } => "clamp_f32",
-            OpKind::Where => "where_f32",
-            OpKind::MaskedFill { .. } => "masked_fill_f32",
-            OpKind::Triu { .. } => "triu_f32",
-            OpKind::Tril { .. } => "tril_f32",
-            OpKind::Gather { dim } => if *dim == 0 { "gather_dim0_f32" } else { "gather_dim1_f32" },
-            OpKind::IndexSelect { dim } => if *dim == 0 { "index_select_dim0_f32" } else { "index_select_dim1_f32" },
-            OpKind::Conv1d { .. } => "conv1d_f32",
-            OpKind::Conv2d { .. } => "conv2d_f32",
-            OpKind::BatchNorm { .. } => "batch_norm_f32",
-            OpKind::MaxPool2d { .. } => "max_pool2d_f32",
-            OpKind::AvgPool2d { .. } => "avg_pool2d_f32",
-            OpKind::SoftmaxBackward => "softmax_backward_f32",
-            OpKind::LayerNormBackward { .. } => "layer_norm_backward_f32",
-            OpKind::Conv2dBackwardInput { .. } => "conv2d_backward_input_f32",
-            OpKind::EmbeddingBackward => "embedding_backward_f32",
-            OpKind::BatchNormBackward { .. } => "batch_norm_backward_f32",
+            OpKind::Pow { .. } => "pow",
+            OpKind::Clamp { .. } => "clamp",
+            OpKind::Where => "where",
+            OpKind::MaskedFill { .. } => "masked_fill",
+            OpKind::Triu { .. } => "triu",
+            OpKind::Tril { .. } => "tril",
+            OpKind::Gather { dim } => if *dim == 0 { "gather_dim0" } else { "gather_dim1" },
+            OpKind::IndexSelect { dim } => if *dim == 0 { "index_select_dim0" } else { "index_select_dim1" },
+            OpKind::Conv1d { .. } => "conv1d",
+            OpKind::Conv2d { .. } => "conv2d",
+            OpKind::BatchNorm { .. } => "batch_norm",
+            OpKind::MaxPool2d { .. } => "max_pool2d",
+            OpKind::AvgPool2d { .. } => "avg_pool2d",
+            OpKind::SoftmaxBackward => "softmax_backward",
+            OpKind::LayerNormBackward { .. } => "layer_norm_backward",
+            OpKind::Conv2dBackwardInput { .. } => "conv2d_backward_input",
+            OpKind::EmbeddingBackward => "embedding_backward",
+            OpKind::BatchNormBackward { .. } => "batch_norm_backward",
+            OpKind::Cast { .. } => "cast",
         }
     }
 
@@ -425,9 +463,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn scalar_value_to_f64() {
+        assert_eq!(ScalarValue::Float(3.14).as_f64(), 3.14);
+        assert_eq!(ScalarValue::Int(42).as_f64(), 42.0);
+        assert_eq!(ScalarValue::UInt(255).as_f64(), 255.0);
+        assert_eq!(ScalarValue::Bool(true).as_f64(), 1.0);
+    }
+
+    #[test]
+    fn scalar_value_to_msl_literal() {
+        assert_eq!(ScalarValue::Float(1.5).to_msl_literal(), "1.5");
+        assert_eq!(ScalarValue::Int(-3).to_msl_literal(), "-3");
+        assert_eq!(ScalarValue::UInt(0).to_msl_literal(), "0u");
+        assert_eq!(ScalarValue::Bool(true).to_msl_literal(), "true");
+    }
+
+    #[test]
     fn op_kind_kernel_names() {
         assert_eq!(OpKind::Add.kernel_name(), "elementwise_add");
-        assert_eq!(OpKind::Matmul.kernel_name(), "matmul_f32");
+        assert_eq!(OpKind::Matmul.kernel_name(), "matmul");
         assert!(OpKind::Neg.is_unary());
         assert!(!OpKind::Add.is_unary());
         assert!(OpKind::Matmul.is_matmul());

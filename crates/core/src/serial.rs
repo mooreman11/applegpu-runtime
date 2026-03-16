@@ -1,6 +1,6 @@
 use std::io::{self, Read, Write, Cursor};
 
-use crate::graph::{OpKind, OpNode};
+use crate::graph::{OpKind, OpNode, ScalarValue};
 use crate::scheduler::ContainerId;
 use crate::tensor::{DType, Shape};
 
@@ -101,6 +101,7 @@ fn op_to_discriminant(op: &OpKind) -> u32 {
         OpKind::Conv2dBackwardInput { .. } => 43,
         OpKind::EmbeddingBackward => 44,
         OpKind::BatchNormBackward { .. } => 45,
+        OpKind::Cast { .. } => 46,
     }
 }
 
@@ -140,7 +141,7 @@ fn discriminant_to_op(d: u32, r: &mut impl Read) -> io::Result<OpKind> {
         13 => {
             let mut scale_bytes = [0u8; 4];
             r.read_exact(&mut scale_bytes)?;
-            Ok(OpKind::ScalarMul(f32::from_le_bytes(scale_bytes)))
+            Ok(OpKind::ScalarMul(ScalarValue::from_f32(f32::from_le_bytes(scale_bytes))))
         }
         14 => Ok(OpKind::Gelu),
         15 => {
@@ -177,20 +178,20 @@ fn discriminant_to_op(d: u32, r: &mut impl Read) -> io::Result<OpKind> {
         27 => {
             let mut exp_bytes = [0u8; 4];
             r.read_exact(&mut exp_bytes)?;
-            Ok(OpKind::Pow { exponent: f32::from_le_bytes(exp_bytes) })
+            Ok(OpKind::Pow { exponent: ScalarValue::from_f32(f32::from_le_bytes(exp_bytes)) })
         }
         28 => {
             let mut min_bytes = [0u8; 4];
             r.read_exact(&mut min_bytes)?;
             let mut max_bytes = [0u8; 4];
             r.read_exact(&mut max_bytes)?;
-            Ok(OpKind::Clamp { min_val: f32::from_le_bytes(min_bytes), max_val: f32::from_le_bytes(max_bytes) })
+            Ok(OpKind::Clamp { min_val: ScalarValue::from_f32(f32::from_le_bytes(min_bytes)), max_val: ScalarValue::from_f32(f32::from_le_bytes(max_bytes)) })
         }
         29 => Ok(OpKind::Where),
         30 => {
             let mut val_bytes = [0u8; 4];
             r.read_exact(&mut val_bytes)?;
-            Ok(OpKind::MaskedFill { value: f32::from_le_bytes(val_bytes) })
+            Ok(OpKind::MaskedFill { value: ScalarValue::from_f32(f32::from_le_bytes(val_bytes)) })
         }
         31 => {
             let mut diag_bytes = [0u8; 4];
@@ -309,8 +310,8 @@ impl EvalRequest {
                 write_u32(&mut buf, function_name.len() as u32).unwrap();
                 buf.write_all(function_name.as_bytes()).unwrap();
             }
-            if let OpKind::ScalarMul(scale) = node.op {
-                buf.write_all(&scale.to_le_bytes()).unwrap();
+            if let OpKind::ScalarMul(ref sv) = node.op {
+                buf.write_all(&(sv.as_f64() as f32).to_le_bytes()).unwrap();
             }
             if let OpKind::LayerNorm { eps } = node.op {
                 buf.write_all(&eps.to_le_bytes()).unwrap();
@@ -333,15 +334,15 @@ impl EvalRequest {
             if let OpKind::Concat { dim } = node.op {
                 write_u32(&mut buf, dim as u32).unwrap();
             }
-            if let OpKind::Pow { exponent } = node.op {
-                buf.write_all(&exponent.to_le_bytes()).unwrap();
+            if let OpKind::Pow { ref exponent } = node.op {
+                buf.write_all(&(exponent.as_f64() as f32).to_le_bytes()).unwrap();
             }
-            if let OpKind::Clamp { min_val, max_val } = node.op {
-                buf.write_all(&min_val.to_le_bytes()).unwrap();
-                buf.write_all(&max_val.to_le_bytes()).unwrap();
+            if let OpKind::Clamp { ref min_val, ref max_val } = node.op {
+                buf.write_all(&(min_val.as_f64() as f32).to_le_bytes()).unwrap();
+                buf.write_all(&(max_val.as_f64() as f32).to_le_bytes()).unwrap();
             }
-            if let OpKind::MaskedFill { value } = node.op {
-                buf.write_all(&value.to_le_bytes()).unwrap();
+            if let OpKind::MaskedFill { ref value } = node.op {
+                buf.write_all(&(value.as_f64() as f32).to_le_bytes()).unwrap();
             }
             if let OpKind::Triu { diagonal } = node.op {
                 buf.write_all(&diagonal.to_le_bytes()).unwrap();
@@ -550,7 +551,7 @@ impl From<&OpKind> for WireOpKind {
             }
             OpKind::Softmax => WireOpKind::Softmax,
             OpKind::Transpose { dim0, dim1 } => WireOpKind::Transpose { dim0: *dim0, dim1: *dim1 },
-            OpKind::ScalarMul(scale) => WireOpKind::ScalarMul(*scale),
+            OpKind::ScalarMul(ref sv) => WireOpKind::ScalarMul(sv.as_f64() as f32),
             OpKind::Gelu => WireOpKind::Gelu,
             OpKind::LayerNorm { eps } => WireOpKind::LayerNorm { eps: *eps },
             OpKind::Embedding => WireOpKind::Embedding,
@@ -564,10 +565,10 @@ impl From<&OpKind> for WireOpKind {
             OpKind::Mean => WireOpKind::Mean,
             OpKind::Abs => WireOpKind::Abs,
             OpKind::Sign => WireOpKind::Sign,
-            OpKind::Pow { exponent } => WireOpKind::Pow { exponent: *exponent },
-            OpKind::Clamp { min_val, max_val } => WireOpKind::Clamp { min_val: *min_val, max_val: *max_val },
+            OpKind::Pow { ref exponent } => WireOpKind::Pow { exponent: exponent.as_f64() as f32 },
+            OpKind::Clamp { ref min_val, ref max_val } => WireOpKind::Clamp { min_val: min_val.as_f64() as f32, max_val: max_val.as_f64() as f32 },
             OpKind::Where => WireOpKind::Where,
-            OpKind::MaskedFill { value } => WireOpKind::MaskedFill { value: *value },
+            OpKind::MaskedFill { ref value } => WireOpKind::MaskedFill { value: value.as_f64() as f32 },
             OpKind::Triu { diagonal } => WireOpKind::Triu { diagonal: *diagonal },
             OpKind::Tril { diagonal } => WireOpKind::Tril { diagonal: *diagonal },
             OpKind::Gather { dim } => WireOpKind::Gather { dim: *dim },
@@ -587,6 +588,7 @@ impl From<&OpKind> for WireOpKind {
             OpKind::Conv2dBackwardInput { stride, padding } => WireOpKind::Conv2dBackwardInput { stride: *stride, padding: *padding },
             OpKind::EmbeddingBackward => WireOpKind::EmbeddingBackward,
             OpKind::BatchNormBackward { eps } => WireOpKind::BatchNormBackward { eps: *eps },
+            OpKind::Cast { .. } => unimplemented!("Cast op is not supported over wire protocol"),
         }
     }
 }
@@ -623,7 +625,7 @@ pub fn wire_op_to_core(wire: &WireOpKind) -> OpKind {
         }
         WireOpKind::Softmax => OpKind::Softmax,
         WireOpKind::Transpose { dim0, dim1 } => OpKind::Transpose { dim0: *dim0, dim1: *dim1 },
-        WireOpKind::ScalarMul(scale) => OpKind::ScalarMul(*scale),
+        WireOpKind::ScalarMul(scale) => OpKind::ScalarMul(ScalarValue::from_f32(*scale)),
         WireOpKind::Gelu => OpKind::Gelu,
         WireOpKind::LayerNorm { eps } => OpKind::LayerNorm { eps: *eps },
         WireOpKind::Embedding => OpKind::Embedding,
@@ -637,10 +639,10 @@ pub fn wire_op_to_core(wire: &WireOpKind) -> OpKind {
         WireOpKind::Mean => OpKind::Mean,
         WireOpKind::Abs => OpKind::Abs,
         WireOpKind::Sign => OpKind::Sign,
-        WireOpKind::Pow { exponent } => OpKind::Pow { exponent: *exponent },
-        WireOpKind::Clamp { min_val, max_val } => OpKind::Clamp { min_val: *min_val, max_val: *max_val },
+        WireOpKind::Pow { exponent } => OpKind::Pow { exponent: ScalarValue::from_f32(*exponent) },
+        WireOpKind::Clamp { min_val, max_val } => OpKind::Clamp { min_val: ScalarValue::from_f32(*min_val), max_val: ScalarValue::from_f32(*max_val) },
         WireOpKind::Where => OpKind::Where,
-        WireOpKind::MaskedFill { value } => OpKind::MaskedFill { value: *value },
+        WireOpKind::MaskedFill { value } => OpKind::MaskedFill { value: ScalarValue::from_f32(*value) },
         WireOpKind::Triu { diagonal } => OpKind::Triu { diagonal: *diagonal },
         WireOpKind::Tril { diagonal } => OpKind::Tril { diagonal: *diagonal },
         WireOpKind::Gather { dim } => OpKind::Gather { dim: *dim },
