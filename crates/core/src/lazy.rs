@@ -811,7 +811,7 @@ impl LazyRuntime {
             let indices = self.get_tensor(node.inputs[1])?;
             let in_dims = input.meta.layout.shape.dims();
             let out_dims = node.out_shape.dims();
-            let kernel_base = if dim == 0 { "gather_dim0_f32" } else { "gather_dim1_f32" };
+            let kernel_base = if dim == 0 { "gather_dim0" } else { "gather_dim1" };
             REGISTRY.dispatch_gather_typed(
                 device, dtype, kernel_base,
                 &input.buffer, &indices.buffer, &out.buffer,
@@ -1484,7 +1484,7 @@ impl LazyRuntime {
             let indices = self.get_tensor(node.inputs[1])?;
             let in_dims = input.meta.layout.shape.dims();
             let out_dims = node.out_shape.dims();
-            let kernel_base = if dim == 0 { "gather_dim0_f32" } else { "gather_dim1_f32" };
+            let kernel_base = if dim == 0 { "gather_dim0" } else { "gather_dim1" };
             return REGISTRY.dispatch_gather_typed_nb(
                 device, dtype, kernel_base, queue,
                 &input.buffer, &indices.buffer, &out.buffer,

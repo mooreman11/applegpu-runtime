@@ -595,7 +595,7 @@ kernel void gather_{dn}{s}(
     uint col = gid.x;
     uint row = gid.y;
     if (row >= idx_rows || col >= cols) return;
-    int src_row = indices[row];
+    int src_row = indices[row * cols + col];
     output[row * cols + col] = input[src_row * cols + col];
 }}
 "#,
