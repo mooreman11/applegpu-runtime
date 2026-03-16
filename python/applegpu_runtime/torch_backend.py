@@ -1167,11 +1167,8 @@ def _convolution(input, weight, bias, stride, padding, dilation, transposed, out
         return NotImplemented
 
     if bias is not None:
-        # Add bias: result is [B, OC, ...], bias is [OC]
-        # Need to reshape bias for broadcasting
-        result_cpu = result.to_torch_cpu()
-        result_cpu = result_cpu + bias.reshape(1, -1, *([1] * ndim))
-        result = ApplegpuTensor.from_torch(result_cpu)
+        # add_bias supports N-D: bias[channel] added along dim 1
+        result = _wrap(gpu.add_bias(_unwrap(result), _unwrap(bias)))
     return result
 
 
