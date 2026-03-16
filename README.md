@@ -18,11 +18,32 @@ Swift Compat Layer ←  Metal, AVF (Apple Virtualization Framework)
 
 ## Install
 
-```bash
-# From GitHub Releases (prebuilt wheels)
-pip install applegpu_runtime --find-links https://github.com/mooreman11/applegpu-runtime/releases/latest
+### Python library
 
-# From source (requires Rust, Swift/Xcode, uv)
+```bash
+# PyPI (recommended)
+pip install applegpu-runtime
+
+# Or from GitHub Releases
+pip install applegpu_runtime --find-links https://github.com/mooreman11/applegpu-runtime/releases/latest
+```
+
+Supports macOS ARM64 and Linux aarch64, Python 3.10–3.13.
+
+### Container binaries (gpu-container + gpu-service)
+
+```bash
+# Homebrew (recommended)
+brew install mooreman11/tap/applegpu-runtime
+
+# Or install script
+curl -fsSL https://raw.githubusercontent.com/mooreman11/applegpu-runtime/v0.8.0/install.sh | sh
+```
+
+### From source
+
+```bash
+# Requires Rust, Swift/Xcode, uv
 make setup
 uv run maturin develop
 ```
@@ -165,23 +186,19 @@ gpu-container run pytorch:latest --cpus 8 --memory 8192 -- python train.py
 Container (Linux)              Host (macOS)
 ┌──────────────────┐           ┌──────────────────┐
 │ Python code      │           │  gpu-container   │
-│  └─ applegpu     │──TCP───▶  │  ├─ TCP bridge   │
-│     (socket      │  :7654    │  ├─ gpu-service  │
-│      backend)    │           │  ├─ Scheduler    │
-└──────────────────┘           │  ├─ BufferPool   │
-                               │  └─ Metal GPU    │
+│  └─ applegpu     │──socket──▶│  ├─ gpu-service  │
+│     (socket      │           │  ├─ Scheduler    │
+│      backend)    │           │  ├─ BufferPool   │
+└──────────────────┘           │  └─ Metal GPU    │
                                └──────────────────┘
 ```
 
 The `gpu-container` CLI (Swift, `swift/GPUContainer/`) wraps Apple's `container` tool:
 1. Auto-starts `gpu-service` if not running (readiness probe, PID file)
-2. Starts a TCP bridge forwarding port 7654 → `~/.applegpu/runtime.sock`
-3. Launches the container with `APPLEGPU_HOST` and `APPLEGPU_PORT` env vars
-4. Container-side Python detects Linux → connects via socket backend
+2. Launches the container with GPU service socket relay
+3. Container-side Python detects Linux → connects via socket backend
 
 Each connection gets a `ContainerId` with isolated resource quotas. The scheduler ensures fair GPU sharing across containers.
-
-**Next:** Replace TCP bridge with Unix socket relay via Apple Containerization framework (`UnixSocketConfiguration`) or direct vsock for lower latency. See [BACKLOG](docs/BACKLOG.md).
 
 ### Docker GPU Access
 

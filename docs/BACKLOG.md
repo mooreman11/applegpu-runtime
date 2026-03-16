@@ -134,9 +134,9 @@ _Containerization, multi-dtype completion, wire protocol v3, CI/packaging._
 - [x] `--version` flag for gpu-service and gpu-container
 - [x] Install script (`install.sh`) — downloads binaries from GitHub Releases with SHA256 checksums
 - [x] `make ci` / `make release-local` — local CI via act or direct build
-- [ ] TestPyPI validation — upload wheels, verify `pip install` works (needs TESTPYPI_TOKEN)
+- [x] TestPyPI validation — wheels uploaded, `pip install` verified (https://test.pypi.org/project/applegpu-runtime/0.8.0/)
+- [x] Homebrew tap — `brew install mooreman11/tap/applegpu-runtime` (https://github.com/mooreman11/homebrew-tap)
 - [ ] PyPI publishing — real PyPI after TestPyPI validation
-- [ ] Homebrew tap — `brew install mooreman11/tap/applegpu-runtime`
 - [ ] Binary signing/notarization — Apple Developer ID signing for gpu-container/gpu-service
 
 ### PRIORITY 2: Replace TCP Bridge with Unix Socket Relay / vsock
