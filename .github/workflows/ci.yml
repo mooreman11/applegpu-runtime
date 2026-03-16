@@ -18,7 +18,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # Tests that need Metal GPU gracefully skip via get_device() -> None -> return
-      - run: cargo test -p applegpu-core -p applegpu-wire -p applegpu-client -p applegpu-service
+      # gpu-service tests need Metal GPU, excluded from CI
+      - run: cargo test -p applegpu-core -p applegpu-wire -p applegpu-client
 
   test-swift:
     name: Swift Tests
@@ -42,6 +43,7 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - uses: astral-sh/setup-uv@v5
+      - run: uv pip install maturin
       - run: uv sync
       # Verify the Python extension builds (but skip tests — they need Metal GPU)
       - run: uv run maturin develop
