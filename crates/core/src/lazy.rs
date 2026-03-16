@@ -948,11 +948,8 @@ impl LazyRuntime {
             let input = self.get_tensor(node.inputs[0])?;
             let input_dtype = input.meta.dtype;
             let in_dims = input.meta.layout.shape.dims();
-            let (rows, cols) = if in_dims.len() == 2 {
-                (in_dims[0], in_dims[1])
-            } else {
-                (1, in_dims[0])
-            };
+            let cols = in_dims[in_dims.len() - 1];
+            let rows: usize = in_dims[..in_dims.len() - 1].iter().product::<usize>().max(1);
             REGISTRY.dispatch_argmax_typed(device, input_dtype, &input.buffer, &out.buffer, rows, cols)?;
             return Ok(out);
         }
@@ -1607,11 +1604,8 @@ impl LazyRuntime {
             let input = self.get_tensor(node.inputs[0])?;
             let input_dtype = input.meta.dtype;
             let in_dims = input.meta.layout.shape.dims();
-            let (rows, cols) = if in_dims.len() == 2 {
-                (in_dims[0], in_dims[1])
-            } else {
-                (1, in_dims[0])
-            };
+            let cols = in_dims[in_dims.len() - 1];
+            let rows: usize = in_dims[..in_dims.len() - 1].iter().product::<usize>().max(1);
             return REGISTRY.dispatch_argmax_typed_nb(device, input_dtype, queue, &input.buffer, &out.buffer, rows, cols);
         }
 

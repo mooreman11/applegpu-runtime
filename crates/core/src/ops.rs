@@ -1069,21 +1069,19 @@ pub fn softmax_causal(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
 }
 
 /// Argmax along last dimension. Output dtype is always Int32.
-/// 2D [rows, cols] -> [rows]. 1D [cols] -> [1].
+/// N-D supported: [..., cols] -> [...]. 1D [cols] -> [1].
 pub fn argmax(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
     let input_dtype = rt.dtype(input_id)?;
     validate_op_dtype(&OpKind::Argmax, input_dtype)?;
     let shape = rt.shape(input_id)?;
 
-    let (out_shape, _rows, _cols) = if shape.len() == 2 {
-        (vec![shape[0]], shape[0], shape[1])
-    } else if shape.len() == 1 {
-        (vec![1], 1, shape[0])
-    } else {
-        return Err(GpuError::InvalidTensor(format!(
-            "argmax requires 1D or 2D tensor, got {:?}", shape
-        )));
-    };
+    if shape.is_empty() {
+        return Err(GpuError::InvalidTensor(
+            "argmax requires at least 1D tensor".to_string()
+        ));
+    }
+    let mut out_shape = shape[..shape.len() - 1].to_vec();
+    if out_shape.is_empty() { out_shape = vec![1]; }
 
     let out_id = next_id();
     rt.record_op(OpNode {
@@ -2677,6 +2675,50 @@ mod tests {
         let bytes = rt.read_bytes(a_id).unwrap();
         let idx = i32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
         assert_eq!(idx, 2); // max at index 2
+    }
+
+    #[test]
+    fn test_argmax_3d_input() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        // [2, 3, 4] -> argmax along last dim -> [2, 3]
+        // batch 0: [[1,5,2,3], [0,1,0,0], [9,0,0,0]]  -> [1, 1, 0]
+        // batch 1: [[0,0,0,8], [3,3,3,3], [1,2,4,3]]   -> [3, 0, 2]
+        let data: Vec<f32> = vec![
+            1.0, 5.0, 2.0, 3.0,  0.0, 1.0, 0.0, 0.0,  9.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 8.0,  3.0, 3.0, 3.0, 3.0,  1.0, 2.0, 4.0, 3.0,
+        ];
+        let t = Tensor::from_f32(&device, vec![2, 3, 4], &data).unwrap();
+        let id = t.meta.id;
+        rt.insert_tensor(t).unwrap();
+        let a_id = crate::ops::argmax(&mut rt, id).unwrap();
+        assert_eq!(rt.shape(a_id).unwrap(), vec![2, 3]);
+        assert_eq!(rt.dtype(a_id).unwrap(), DType::Int32);
+        rt.eval(&device, a_id).unwrap();
+        let bytes = rt.read_bytes(a_id).unwrap();
+        let indices: Vec<i32> = bytes.chunks(4)
+            .map(|c| i32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        assert_eq!(indices, vec![1, 1, 0, 3, 0, 2]);
+    }
+
+    #[test]
+    fn test_argmax_4d_input() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        // [1, 2, 3] -> argmax along last dim -> [1, 2]
+        let data: Vec<f32> = vec![1.0, 3.0, 2.0, 5.0, 1.0, 4.0];
+        let t = Tensor::from_f32(&device, vec![1, 2, 3], &data).unwrap();
+        let id = t.meta.id;
+        rt.insert_tensor(t).unwrap();
+        let a_id = crate::ops::argmax(&mut rt, id).unwrap();
+        assert_eq!(rt.shape(a_id).unwrap(), vec![1, 2]);
+        rt.eval(&device, a_id).unwrap();
+        let bytes = rt.read_bytes(a_id).unwrap();
+        let indices: Vec<i32> = bytes.chunks(4)
+            .map(|c| i32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        assert_eq!(indices, vec![1, 0]); // max at index 1 and 0
     }
 
     // ── Sum tests ─────────────────────────────────────────────────────────
