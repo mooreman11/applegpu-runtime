@@ -719,4 +719,18 @@ void* gpu_bridge_compute_3d_nb(
     uint32_t grid_z
 );
 
+// ── Concurrent queue pool ────────────────────────────────────────────────────
+void* gpu_bridge_get_queue(const void* device, uint32_t index);
+
+// ── Batch context system ─────────────────────────────────────────────────────
+void* gpu_bridge_set_batch_context(uint32_t context_id, void* queue);
+void* gpu_bridge_commit_batch_context(uint32_t context_id);
+void gpu_bridge_set_active_context(uint32_t context_id);
+
+// ── MTLEvent synchronization ─────────────────────────────────────────────────
+void* gpu_bridge_create_event(const void* device);
+void gpu_bridge_encode_signal_event(void* command_buffer, void* event, uint64_t value);
+void gpu_bridge_encode_wait_event(void* command_buffer, void* event, uint64_t value);
+void gpu_bridge_destroy_event(void* event);
+
 #endif

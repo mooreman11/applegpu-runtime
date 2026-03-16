@@ -96,9 +96,16 @@ impl LazyRuntime {
     /// Evaluate a tensor: execute all pending ops needed to materialize it.
     /// After evaluation, the tensor is in `self.tensors` and its graph nodes are removed.
     ///
-    /// Uses single command buffer encoding: all ops are encoded into one
-    /// MTLCommandBuffer via begin_batch/end_batch, then we wait once at the end.
-    /// Falls back to per-op command buffers (Phase 2a) if begin_batch fails.
+    /// Dispatches independent ops across multiple Metal command queues (up to 4) using
+    /// `parallel_levels()` to identify ops with no data dependencies between them.
+    /// Each level's command buffers are committed and waited on before proceeding to
+    /// the next level, providing correct per-level synchronization without MTLEvent.
+    /// Falls back to the single command buffer path for linear graphs (zero overhead).
+    ///
+    /// TODO: Phase II could use MTLSharedEvent (which supports multiple signalers via
+    /// monotonically increasing values from different encoders) instead of commit-and-wait.
+    /// Plain MTLEvent is unsuitable because ANY encoder signaling value N marks it done,
+    /// even if other encoders at the same level haven't finished yet.
     pub fn eval(&mut self, device: &Device, id: u64) -> Result<()> {
         if self.is_materialized(id) {
             return Ok(()); // already done
@@ -106,14 +113,104 @@ impl LazyRuntime {
 
         let container_id = self.resolve_container(id);
 
-        let mut order = self.graph.topo_sort(id)?;
+        // Run fusion BEFORE computing parallel levels (fusion mutates graph topology)
+        let order = self.graph.topo_sort(id)?;
         if order.is_empty() {
             return Err(GpuError::GraphError(format!("Tensor {} not found", id)));
         }
+        let _fused_order = crate::fusion::optimize(&mut self.graph, &order);
 
-        // Run fusion optimization pass
-        order = crate::fusion::optimize(&mut self.graph, &order);
+        let levels = self.graph.parallel_levels(id)?;
 
+        // Fast path: linear graph -> existing single-CB path
+        if levels.iter().all(|l| l.len() == 1) {
+            return self.eval_single_cb(device, container_id, levels);
+        }
+
+        let num_queues = std::cmp::min(
+            levels.iter().map(|l| l.len()).max().unwrap_or(1),
+            4,
+        );
+        let queues: Vec<_> = (0..num_queues)
+            .map(|i| crate::compute::get_queue(device, i as u32))
+            .collect();
+
+        let loop_result: Result<()> = (|| {
+            for (_level_idx, level) in levels.iter().enumerate() {
+                // Create ONE command buffer per QUEUE (not per node).
+                // Multiple nodes sharing a queue share a CB.
+                let mut queue_cbs: HashMap<usize, *mut std::ffi::c_void> = HashMap::new();
+                for (i, _) in level.iter().enumerate() {
+                    let queue_idx = i % num_queues;
+                    queue_cbs.entry(queue_idx).or_insert_with(|| {
+                        let ctx_id = (queue_idx + 1) as u32;
+                        let cb = crate::compute::set_batch_context(ctx_id, queues[queue_idx]);
+                        cb // caller checks for null below
+                    });
+                }
+
+                // Check for any null command buffers (set_batch_context failure)
+                if queue_cbs.values().any(|cb| cb.is_null()) {
+                    return Err(GpuError::GraphError(
+                        "Failed to create batch context for one or more queues".to_string(),
+                    ));
+                }
+
+                // Encode ops for this level — each node uses its queue's CB
+                for (node_idx, &node_id) in level.iter().enumerate() {
+                    if self.is_materialized(node_id) { continue; }
+                    let node = self.graph.remove_node(node_id)
+                        .ok_or_else(|| GpuError::GraphError(format!("Node {} not found", node_id)))?;
+                    let out_buf = self.pool.acquire(device, node.out_shape.numel() * node.out_dtype.size_bytes())?;
+                    let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+
+                    // Set active context to this node's queue
+                    let queue_idx = node_idx % num_queues;
+                    crate::compute::set_active_context((queue_idx + 1) as u32);
+                    self.execute_node_nb(device, queues[queue_idx], &node, &out)?;
+
+                    self.scheduler.allocate_tensor(container_id, node_id, node.out_shape.numel() * node.out_dtype.size_bytes())?;
+                    self.tensors.insert(node_id, out);
+                }
+
+                // Commit all CBs for this level, then wait for all to complete
+                // before proceeding to the next level (correct synchronization).
+                let mut level_cbs: Vec<*mut std::ffi::c_void> = Vec::new();
+                for (&queue_idx, &_cb) in &queue_cbs {
+                    let ctx_id = (queue_idx + 1) as u32;
+                    let committed = crate::compute::commit_batch_context(ctx_id);
+                    level_cbs.push(committed);
+                }
+                for cb in &level_cbs {
+                    if !cb.is_null() {
+                        crate::compute::wait_command_buffer(*cb);
+                    }
+                }
+            }
+            Ok(())
+        })();
+
+        // Reset active context to default
+        crate::compute::set_active_context(0);
+
+        // On error, clean up any uncommitted batch contexts
+        if loop_result.is_err() {
+            for queue_idx in 0..num_queues {
+                let ctx_id = (queue_idx + 1) as u32;
+                let cb = crate::compute::commit_batch_context(ctx_id);
+                if !cb.is_null() {
+                    crate::compute::wait_command_buffer(cb);
+                }
+            }
+        }
+
+        loop_result
+    }
+
+    /// Single command buffer eval path — used for linear graphs (no parallelism)
+    /// and as fallback when MTLEvent creation fails.
+    fn eval_single_cb(&mut self, device: &Device, container_id: ContainerId, levels: Vec<Vec<u64>>) -> Result<()> {
+        let order: Vec<u64> = levels.into_iter().flat_map(|l| l.into_iter()).collect();
         let queue = crate::compute::get_shared_queue(device);
         let batch_cb = crate::compute::begin_batch(queue);
         let use_batch = !batch_cb.is_null();
@@ -121,23 +218,15 @@ impl LazyRuntime {
 
         let loop_result: Result<()> = (|| {
             for node_id in order {
-                if self.is_materialized(node_id) {
-                    continue;
-                }
-
+                if self.is_materialized(node_id) { continue; }
                 let node = self.graph.remove_node(node_id).ok_or_else(|| {
                     GpuError::GraphError(format!("Node {} not found in graph", node_id))
                 })?;
-
                 let out_size = node.out_shape.numel() * node.out_dtype.size_bytes();
                 let out_buf = self.pool.acquire(device, out_size)?;
                 let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
-
                 let cb = self.execute_node_nb(device, queue, &node, &out)?;
-                if !use_batch {
-                    last_cb = Some(cb);
-                }
-
+                if !use_batch { last_cb = Some(cb); }
                 let size = node.out_shape.numel() * node.out_dtype.size_bytes();
                 self.scheduler.allocate_tensor(container_id, node_id, size)?;
                 self.tensors.insert(node_id, out);
@@ -145,7 +234,6 @@ impl LazyRuntime {
             Ok(())
         })();
 
-        // Finalize: commit or abort the batch, then wait
         if use_batch {
             if loop_result.is_ok() {
                 let cb = crate::compute::end_batch();
@@ -158,7 +246,6 @@ impl LazyRuntime {
         } else if let Some(cb) = last_cb {
             crate::compute::wait_command_buffer(cb);
         }
-
         loop_result
     }
 

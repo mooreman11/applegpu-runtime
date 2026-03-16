@@ -2414,6 +2414,52 @@ pub fn abort_batch() {
     unsafe { ffi::gpu_bridge_abort_batch() }
 }
 
+// ── Concurrent queue pool ──────────────────────────────────────────
+
+/// Get a command queue from the pool by index. Queues are lazily created and reused.
+pub fn get_queue(device: &Device, index: u32) -> *mut std::ffi::c_void {
+    unsafe { ffi::gpu_bridge_get_queue(device.raw_handle(), index) }
+}
+
+// ── Batch context system ──────────────────────────────────────────
+
+/// Create a batch context: a new command buffer on the given queue, keyed by context_id.
+pub fn set_batch_context(context_id: u32, queue: *mut std::ffi::c_void) -> *mut std::ffi::c_void {
+    unsafe { ffi::gpu_bridge_set_batch_context(context_id, queue) }
+}
+
+/// Commit a batch context: commits the command buffer and returns its handle for waiting.
+pub fn commit_batch_context(context_id: u32) -> *mut std::ffi::c_void {
+    unsafe { ffi::gpu_bridge_commit_batch_context(context_id) }
+}
+
+/// Set the active context ID. Subsequent _nb dispatch calls will use this context's CB.
+pub fn set_active_context(context_id: u32) {
+    unsafe { ffi::gpu_bridge_set_active_context(context_id) }
+}
+
+// ── MTLEvent synchronization ──────────────────────────────────────
+
+/// Create an MTLEvent for inter-queue synchronization.
+pub fn create_event(device: &Device) -> *mut std::ffi::c_void {
+    unsafe { ffi::gpu_bridge_create_event(device.raw_handle()) }
+}
+
+/// Encode a signal on a command buffer: sets event value after all prior work completes.
+pub fn encode_signal_event(cb: *mut std::ffi::c_void, event: *mut std::ffi::c_void, value: u64) {
+    unsafe { ffi::gpu_bridge_encode_signal_event(cb, event, value) }
+}
+
+/// Encode a wait on a command buffer: blocks until event reaches the given value.
+pub fn encode_wait_event(cb: *mut std::ffi::c_void, event: *mut std::ffi::c_void, value: u64) {
+    unsafe { ffi::gpu_bridge_encode_wait_event(cb, event, value) }
+}
+
+/// Destroy an MTLEvent (release the retained reference).
+pub fn destroy_event(event: *mut std::ffi::c_void) {
+    unsafe { ffi::gpu_bridge_destroy_event(event) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
