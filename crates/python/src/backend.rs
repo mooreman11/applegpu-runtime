@@ -76,6 +76,9 @@ pub trait Backend: Send + Sync {
     fn triu(&self, a: u64, diagonal: i32) -> BackendResult<u64>;
     fn tril(&self, a: u64, diagonal: i32) -> BackendResult<u64>;
 
+    // Type conversion
+    fn cast(&self, a: u64, target_dtype: &str) -> BackendResult<u64>;
+
     // Indexing
     fn gather(&self, input: u64, dim: usize, index: u64) -> BackendResult<u64>;
     fn index_select(&self, input: u64, dim: usize, index: u64) -> BackendResult<u64>;

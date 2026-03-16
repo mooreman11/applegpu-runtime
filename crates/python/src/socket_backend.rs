@@ -823,6 +823,10 @@ impl Backend for SocketBackend {
     // Indexing
     // -----------------------------------------------------------------------
 
+    fn cast(&self, _a: u64, _target_dtype: &str) -> BackendResult<u64> {
+        Err("Cast not supported over socket backend".to_string())
+    }
+
     fn gather(&self, input: u64, dim: usize, index: u64) -> BackendResult<u64> {
         let tensors = self.tensors.lock().unwrap();
         let graph = self.graph.lock().unwrap();
