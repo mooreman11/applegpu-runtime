@@ -202,8 +202,20 @@ _Containerization: run GPU workloads inside OCI Linux containers on Apple Silico
 
 ## Up Next
 
-### PRIORITY 1: Replace TCP bridge with Unix socket relay / vsock
-_The TCP bridge works but adds latency and complexity. Replace with direct socket forwarding for ~10x lower latency._
+### PRIORITY 1: Packaging
+_Ship installable binaries and Python wheels. Unblocked and ready now._
+
+- [ ] **CI workflow** — enable on push/PR with `macos-15-xlarge` M2 Pro GPU runners
+- [ ] **Release workflow** — triggered on `v*` tags, builds 8 wheels + 2 binaries
+- [ ] **TestPyPI validation** — upload wheels, verify `pip install` works
+- [ ] **Install script** — `curl | sh` for gpu-container + gpu-service binaries
+- [ ] **Version bump** — 0.1.0 → 0.8.0, dynamic pyproject.toml version
+- [ ] **`--version` flag** — add to gpu-service and gpu-container
+
+**Spec:** `docs/superpowers/specs/2026-03-16-packaging-design.md`
+
+### PRIORITY 2: Replace TCP bridge with Unix socket relay / vsock
+_The TCP bridge works but adds latency and complexity. Replace with direct socket forwarding for ~10x lower latency. Blocked on macOS 26 SDK._
 
 - [x] **Transport trait generalization** — `Box<dyn Transport>` in GpuClient, impls for UnixStream/TcpStream/VsockStream, `connect_auto()` auto-detection
 - [x] **ContainerRunner skeleton** — Containerization framework `#available(macOS 26, *)` guard, `UnixSocketConfiguration` socket relay (skeleton — needs macOS 26 SDK)
@@ -213,17 +225,10 @@ _The TCP bridge works but adds latency and complexity. Replace with direct socke
 - [x] **SocketBackend connect_auto** — auto-detects vsock/unix/tcp transport, fixed VecDeque compile bug
 - [x] **Docker bind-mount documentation** — one-liner `docker run -v` example in README
 - [ ] **vsock relay** — (DEFERRED) VZVirtioSocketListener relay in Swift process, requires macOS 26 SDK + Virtualization framework
-- [ ] **End-to-end test** — `gpu-container run` with `import applegpu_runtime` inside container, verify GPU ops work over socket relay
+- [x] **End-to-end test** — Docker container with `import applegpu_runtime`, GPU ops verified over Unix socket bind-mount (F32 add, Int32 add, Cast+embedding, comparison ops)
 - [ ] **Remove TCP bridge** — once Containerization framework path is fully working, delete `TCPBridge` class
 
-### PRIORITY 2: Packaging
-_Ship installable binaries and Python wheels._
-
-- [ ] **macOS wheel** — `maturin build` for `applegpu_runtime` (Metal backend)
-- [ ] **Linux aarch64 wheel** — cross-compile with `maturin build --target aarch64-unknown-linux-gnu` (socket backend)
-- [ ] **Container base image** — `ghcr.io/mooreman11/applegpu-runtime:latest` with pre-installed applegpu-runtime + PyTorch
-- [ ] **Install script** — `curl -fsSL .../install.sh | sh` for `gpu-container` and `gpu-service` binaries
-- [ ] **GitHub Release** — universal macOS binaries for gpu-container + gpu-service
+### ~~PRIORITY 2: Packaging~~ → moved to PRIORITY 1 above
 
 ### PRIORITY 3: Model expansion + polish
 
