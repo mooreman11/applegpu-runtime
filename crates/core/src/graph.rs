@@ -117,6 +117,8 @@ pub enum OpKind {
     Conv2dBackwardInput { stride: (usize, usize), padding: (usize, usize) },
     EmbeddingBackward,
     BatchNormBackward { eps: f32 },
+    // Type conversion
+    Cast { target_dtype: DType },
 }
 
 impl OpKind {
@@ -170,6 +172,7 @@ impl OpKind {
             OpKind::Conv2dBackwardInput { .. } => "conv2d_backward_input",
             OpKind::EmbeddingBackward => "embedding_backward",
             OpKind::BatchNormBackward { .. } => "batch_norm_backward",
+            OpKind::Cast { .. } => "cast",
         }
     }
 

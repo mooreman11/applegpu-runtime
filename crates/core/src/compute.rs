@@ -1420,7 +1420,7 @@ impl KernelRegistry {
 
     /// Get or compile a pipeline for the given op. Returns Arc so caller
     /// can dispatch without holding the registry lock.
-    fn get_or_create(
+    pub fn get_or_create(
         &self,
         device: &Device,
         kernel_source: &str,
@@ -1503,6 +1503,15 @@ impl KernelRegistry {
             _ => kt::binary_kernel_source(dtype),
         };
 
+        (source, func_name)
+    }
+
+    /// Resolve kernel source and function name for a cast operation.
+    /// Cast is special: kernel name encodes both source and target dtypes.
+    pub fn resolve_cast_kernel(src: DType, dst: DType) -> (String, String) {
+        use crate::kernel_templates as kt;
+        let source = kt::cast_kernel_source(src, dst);
+        let func_name = format!("cast{}_to{}", kt::dtype_suffix(src), kt::dtype_suffix(dst));
         (source, func_name)
     }
 

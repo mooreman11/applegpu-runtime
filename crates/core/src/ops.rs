@@ -1411,6 +1411,30 @@ pub fn avg_pool2d(rt: &mut LazyRuntime, input_id: u64, kernel_size: (usize, usiz
     Ok(out_id)
 }
 
+/// Cast tensor to a different dtype.
+pub fn cast(rt: &mut LazyRuntime, input_id: u64, target_dtype: DType) -> Result<u64> {
+    let src_dtype = rt.dtype(input_id)?;
+    validate_compute_dtype(src_dtype)?;
+    validate_compute_dtype(target_dtype)?;
+
+    // No-op if already the target dtype
+    if src_dtype == target_dtype {
+        return Ok(input_id);
+    }
+
+    let shape = rt.shape(input_id)?;
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op: OpKind::Cast { target_dtype },
+        inputs: vec![input_id],
+        out_shape: Shape::new(shape.to_vec())?,
+        out_dtype: target_dtype,
+        container_id: ContainerId::DEFAULT,
+    });
+    Ok(out_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

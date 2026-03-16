@@ -101,6 +101,7 @@ fn op_to_discriminant(op: &OpKind) -> u32 {
         OpKind::Conv2dBackwardInput { .. } => 43,
         OpKind::EmbeddingBackward => 44,
         OpKind::BatchNormBackward { .. } => 45,
+        OpKind::Cast { .. } => 46,
     }
 }
 
@@ -587,6 +588,7 @@ impl From<&OpKind> for WireOpKind {
             OpKind::Conv2dBackwardInput { stride, padding } => WireOpKind::Conv2dBackwardInput { stride: *stride, padding: *padding },
             OpKind::EmbeddingBackward => WireOpKind::EmbeddingBackward,
             OpKind::BatchNormBackward { eps } => WireOpKind::BatchNormBackward { eps: *eps },
+            OpKind::Cast { .. } => unimplemented!("Cast op is not supported over wire protocol"),
         }
     }
 }
