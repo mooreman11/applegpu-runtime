@@ -721,12 +721,10 @@ impl From<&OpKind> for WireOpKind {
             OpKind::LogicalNot => WireOpKind::LogicalNot,
             OpKind::Cast { target_dtype } => WireOpKind::Cast { target_dtype: target_dtype.to_wire() as u8 },
             OpKind::Quantize { scale, zero_point, target_dtype } => {
-                let dt = match target_dtype { DType::Int8 => 0u8, DType::UInt8 => 1, _ => 0 };
-                WireOpKind::Quantize { scale: *scale, zero_point: *zero_point, target_dtype: dt }
+                WireOpKind::Quantize { scale: *scale, zero_point: *zero_point, target_dtype: target_dtype.to_wire() as u8 }
             }
             OpKind::Dequantize { scale, zero_point, target_dtype } => {
-                let dt = match target_dtype { DType::Float32 => 0u8, DType::Float16 => 1, DType::BFloat16 => 2, _ => 0 };
-                WireOpKind::Dequantize { scale: *scale, zero_point: *zero_point, target_dtype: dt }
+                WireOpKind::Dequantize { scale: *scale, zero_point: *zero_point, target_dtype: target_dtype.to_wire() as u8 }
             }
         }
     }
@@ -823,11 +821,11 @@ pub fn wire_op_to_core(wire: &WireOpKind) -> OpKind {
         WireOpKind::ElemMax => OpKind::ElemMax,
         WireOpKind::LogicalNot => OpKind::LogicalNot,
         WireOpKind::Quantize { scale, zero_point, target_dtype } => {
-            let dt = match target_dtype { 0 => DType::Int8, 1 => DType::UInt8, _ => DType::Int8 };
+            let dt = DType::from_wire(*target_dtype as u32).unwrap_or(DType::Int8);
             OpKind::Quantize { scale: *scale, zero_point: *zero_point, target_dtype: dt }
         }
         WireOpKind::Dequantize { scale, zero_point, target_dtype } => {
-            let dt = match target_dtype { 0 => DType::Float32, 1 => DType::Float16, 2 => DType::BFloat16, _ => DType::Float32 };
+            let dt = DType::from_wire(*target_dtype as u32).unwrap_or(DType::Float32);
             OpKind::Dequantize { scale: *scale, zero_point: *zero_point, target_dtype: dt }
         }
     }
@@ -1053,6 +1051,52 @@ mod tests {
             let de = EvalRequest::deserialize(&serialized).unwrap();
             assert_eq!(de.tensors[0].dtype, dtype, "tensor dtype mismatch for {:?}", dtype);
             assert_eq!(de.nodes[0].out_dtype, dtype, "node out_dtype mismatch for {:?}", dtype);
+        }
+    }
+
+    #[test]
+    fn wire_roundtrip_new_ops() {
+        use applegpu_wire::WireOpKind;
+
+        // All 19 new ops: Cast, Lt, Gt, Le, Ge, Eq, Ne,
+        // BitwiseAnd, BitwiseOr, BitwiseXor, BitwiseNot,
+        // Shl, Shr, Mod, ElemMin, ElemMax, LogicalNot,
+        // Quantize, Dequantize
+        let ops: Vec<OpKind> = vec![
+            OpKind::Cast { target_dtype: DType::Int32 },
+            OpKind::Cast { target_dtype: DType::BFloat16 },
+            OpKind::Lt,
+            OpKind::Gt,
+            OpKind::Le,
+            OpKind::Ge,
+            OpKind::Eq,
+            OpKind::Ne,
+            OpKind::BitwiseAnd,
+            OpKind::BitwiseOr,
+            OpKind::BitwiseXor,
+            OpKind::BitwiseNot,
+            OpKind::Shl { shift: 3 },
+            OpKind::Shr { shift: 7 },
+            OpKind::Mod,
+            OpKind::ElemMin,
+            OpKind::ElemMax,
+            OpKind::LogicalNot,
+            OpKind::Quantize { scale: 0.5, zero_point: 128, target_dtype: DType::UInt8 },
+            OpKind::Dequantize { scale: 0.25, zero_point: 64, target_dtype: DType::Float16 },
+        ];
+
+        for op in &ops {
+            // OpKind -> WireOpKind -> OpKind roundtrip
+            let wire: WireOpKind = WireOpKind::from(op);
+            let back = wire_op_to_core(&wire);
+
+            // Verify structural equality via debug format (OpKind may not impl PartialEq)
+            assert_eq!(
+                format!("{:?}", op),
+                format!("{:?}", back),
+                "wire roundtrip failed for {:?}",
+                op,
+            );
         }
     }
 }
