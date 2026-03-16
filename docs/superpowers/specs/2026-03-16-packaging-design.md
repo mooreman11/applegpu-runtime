@@ -31,7 +31,7 @@ Uses `macos-15-xlarge` runners — M2 Pro with 8-core GPU and Metal hardware acc
 
 1. **test-rust** (`macos-15-xlarge`):
    - `dtolnay/rust-toolchain@stable` + `Swatinem/rust-cache@v2`
-   - `cargo test -p applegpu-core -p applegpu-wire -p applegpu-client` (not `--workspace` — avoids PyO3 cdylib link failure)
+   - `cargo test -p applegpu-core -p applegpu-wire -p applegpu-client -p applegpu-service` (not `--workspace` — avoids PyO3 cdylib link failure)
 
 2. **test-swift** (`macos-15-xlarge`):
    - `cd swift && swift test` (fail the job on failure — remove existing `|| echo` fallback)
@@ -49,16 +49,17 @@ Uses `PyO3/maturin-action` for wheel builds (handles interpreter discovery, cros
 **Jobs:**
 
 1. **build-wheels-macos** (`macos-15-xlarge`):
-   - `actions/setup-python@v5` with `python-version: "3.10\n3.11\n3.12\n3.13"`
+   - `actions/setup-python@v5` with `python-version:` as YAML block scalar (`3.10`, `3.11`, `3.12`, `3.13` each on its own line)
    - `dtolnay/rust-toolchain@stable` + `Swatinem/rust-cache@v2`
    - `PyO3/maturin-action@v1` with `command: build`, `args: --release -i python3.10 python3.11 python3.12 python3.13`
    - `actions/upload-artifact@v4` to upload `target/wheels/*.whl`
 
 2. **build-wheels-linux** (`macos-15-xlarge`):
-   - `dtolnay/rust-toolchain@stable`
+   - `actions/setup-python@v5` with all 4 Python versions (same as macOS job)
+   - `dtolnay/rust-toolchain@stable` + `Swatinem/rust-cache@v2`
    - `goto-bus-stop/setup-zig@v2`
    - `PyO3/maturin-action@v1` with `command: build`, `args: --release --target aarch64-unknown-linux-gnu --zig -i python3.10 python3.11 python3.12 python3.13`, `manylinux: auto`
-   - Note: for cross-compilation, maturin uses the host Python to generate correct wheel tags. `actions/setup-python` installs all 4 versions on the macOS host.
+   - Maturin uses the host Python interpreters to determine correct wheel tags for cross-compilation.
 
 3. **build-binaries** (`macos-15-xlarge`):
    - `dtolnay/rust-toolchain@stable` + `Swatinem/rust-cache@v2`
@@ -124,6 +125,7 @@ No PyPI token needed yet — TestPyPI only for validation.
 - **Homebrew tap** — can add later with a formula that downloads from GitHub Releases.
 - **Windows/x86 builds** — Apple Silicon only project.
 - **Signing/notarization** — macOS binaries are unsigned. Can add Apple Developer ID signing later.
+- **GPUContainer macOS 26 platform requirement** — `swift/GPUContainer/Package.swift` specifies `.macOS("26.0")`. The `macos-15-xlarge` runner runs macOS 15. Must relax platform version to `.macOS(.v14)` before the Swift binary can build in CI, or wait for macOS 26 runners.
 - **Source distribution (sdist)** — wheels only for now. Can add sdist later.
 
 ## Success Criteria
