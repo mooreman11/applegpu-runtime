@@ -7,9 +7,29 @@ import Metal
 private var sharedCommandQueue: MTLCommandQueue?
 private let sharedQueueLock = NSLock()
 
-/// Active batch command buffer for single-CB encoding mode.
+/// Thread-local keys for per-thread batch state.
+/// This prevents SIGSEGV when Rust tests run in parallel — each thread gets its own
+/// batch command buffer and context ID. In production, the outer Mutex<LazyRuntime>
+/// serializes access anyway, but thread-local storage is correct for both cases.
+private let kActiveBatchCB = "com.applegpu.activeBatchCommandBuffer"
+private let kCurrentContextId = "com.applegpu.currentContextId"
+
+/// Thread-local active batch command buffer for single-CB encoding mode.
 /// When non-nil, _nb dispatch functions encode into this CB instead of creating their own.
-private var activeBatchCommandBuffer: MTLCommandBuffer?
+private var activeBatchCommandBuffer: MTLCommandBuffer? {
+    get { Thread.current.threadDictionary[kActiveBatchCB] as? MTLCommandBuffer }
+    set { Thread.current.threadDictionary[kActiveBatchCB] = newValue }
+}
+
+/// Thread-local current context ID for batch context system.
+private var currentContextId: UInt32 {
+    get { Thread.current.threadDictionary[kCurrentContextId] as? UInt32 ?? 0 }
+    set { Thread.current.threadDictionary[kCurrentContextId] = newValue }
+}
+
+/// Lock for legacy batch state access patterns that check activeBatchCommandBuffer.
+/// Still needed because begin_batch/end_batch/abort_batch are called from the same thread
+/// but we need to prevent other threads from seeing partial state.
 private let batchLock = NSLock()
 
 // --- Queue pool for concurrent dispatch ---
@@ -17,12 +37,9 @@ private var queuePool: [MTLCommandQueue] = []
 private let queuePoolLock = NSLock()
 private let maxQueueCount: Int = 4
 
-// --- Batch context system ---
+// --- Batch context system (global dict, guarded by contextLock) ---
 private var batchContexts: [UInt32: MTLCommandBuffer] = [:]
 private let contextLock = NSLock()
-// Phase I: module-level variable, safe because outer Mutex serializes all eval calls.
-// Phase II: MUST move to thread-local storage (Thread.current.threadDictionary or pthread key).
-private var currentContextId: UInt32 = 0
 
 /// Wraps a Metal compute pipeline with command queue.
 final class GPUCompute {
