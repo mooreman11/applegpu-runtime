@@ -1142,11 +1142,9 @@ def _op_native_layer_norm(a, normalized_shape, weight=None, bias=None, eps=1e-5)
 @register_op(torch.ops.aten.embedding.default)
 def _op_embedding(weight, indices, padding_idx=-1, scale_grad_by_freq=False, sparse=False):
     idx_gpu = _unwrap(indices)
-    # Our embedding kernel requires Int32 indices; convert Int64 if needed
+    # Our embedding kernel requires Int32 indices; cast Int64 on GPU (no CPU roundtrip)
     if idx_gpu.dtype == "int64":
-        idx_cpu = indices.to_torch_cpu() if isinstance(indices, ApplegpuTensor) else indices
-        idx_cpu = idx_cpu.to(torch.int32)
-        idx_gpu = gpu.from_torch(idx_cpu)
+        idx_gpu = gpu.cast(idx_gpu, "int32")
     return _wrap(gpu.embedding(_unwrap(weight), idx_gpu))
 
 
@@ -1348,11 +1346,9 @@ def _op_conv_backward(grad_output, input, weight, bias_sizes, stride, padding, d
 def _op_embedding_backward(grad_output, indices, num_weights, padding_idx, scale_grad_by_freq):
     """Embedding backward — atomic scatter-add on Metal."""
     idx_gpu = _unwrap(indices)
-    # Our embedding kernel requires Int32 indices; convert Int64 if needed
+    # Our embedding kernel requires Int32 indices; cast Int64 on GPU (no CPU roundtrip)
     if idx_gpu.dtype == "int64":
-        idx_cpu = indices.to_torch_cpu() if isinstance(indices, ApplegpuTensor) else indices
-        idx_cpu = idx_cpu.to(torch.int32)
-        idx_gpu = gpu.from_torch(idx_cpu)
+        idx_gpu = gpu.cast(idx_gpu, "int32")
     return _wrap(gpu.embedding_backward(_unwrap(grad_output), idx_gpu, int(num_weights)))
 
 
