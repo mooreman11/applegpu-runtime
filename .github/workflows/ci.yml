@@ -29,12 +29,18 @@ jobs:
       - run: cd swift && swift test || echo "::warning::Swift tests require Metal GPU (not available on CI runner)"
 
   build-python:
-    name: Python Build Check
+    name: Python Build Check (${{ matrix.python }})
     runs-on: macos-14
+    strategy:
+      matrix:
+        python: ['3.10', '3.11', '3.12', '3.13']
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
       - uses: astral-sh/setup-uv@v5
       - run: uv sync
       # Verify the Python extension builds (but skip tests — they need Metal GPU)
