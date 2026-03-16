@@ -133,6 +133,25 @@ impl SocketBackend {
         Ok(id)
     }
 
+    /// Record a unary op with an explicit output dtype (e.g. cast, logical_not, quantize).
+    fn record_unary_with_dtype(&self, a: u64, op: WireOpKind, out_dtype: WireDType) -> BackendResult<u64> {
+        let tensors = self.tensors.lock().unwrap();
+        let graph = self.graph.lock().unwrap();
+        let shape = Self::lookup_shape(&tensors, &graph, a)?;
+        drop(tensors);
+        drop(graph);
+
+        let id = self.alloc_id();
+        self.graph.lock().unwrap().insert(id, PendingNode {
+            id,
+            op,
+            inputs: vec![a],
+            out_shape: shape,
+            out_dtype,
+        });
+        Ok(id)
+    }
+
     /// Record a binary op with broadcast shape inference.
     fn record_binary(&self, a: u64, b: u64, op: WireOpKind) -> BackendResult<u64> {
         let tensors = self.tensors.lock().unwrap();
@@ -153,6 +172,29 @@ impl SocketBackend {
             inputs: vec![a, b],
             out_shape,
             out_dtype: dtype,
+        });
+        Ok(id)
+    }
+
+    /// Record a binary op with broadcast shape inference and explicit output dtype.
+    fn record_binary_with_dtype(&self, a: u64, b: u64, op: WireOpKind, out_dtype: WireDType) -> BackendResult<u64> {
+        let tensors = self.tensors.lock().unwrap();
+        let graph = self.graph.lock().unwrap();
+        let sa = Self::lookup_shape(&tensors, &graph, a)?;
+        let sb = Self::lookup_shape(&tensors, &graph, b)?;
+        drop(tensors);
+        drop(graph);
+
+        let out_shape = applegpu_wire::infer_broadcast_shape(&sa, &sb)
+            .map_err(|e| format!("Shape error in binary op: {}", e))?;
+
+        let id = self.alloc_id();
+        self.graph.lock().unwrap().insert(id, PendingNode {
+            id,
+            op,
+            inputs: vec![a, b],
+            out_shape,
+            out_dtype,
         });
         Ok(id)
     }
@@ -824,41 +866,87 @@ impl Backend for SocketBackend {
     // -----------------------------------------------------------------------
 
     // Bitwise ops
-    fn bitwise_and(&self, _a: u64, _b: u64) -> BackendResult<u64> { Err("Bitwise ops not supported over socket".to_string()) }
-    fn bitwise_or(&self, _a: u64, _b: u64) -> BackendResult<u64> { Err("Bitwise ops not supported over socket".to_string()) }
-    fn bitwise_xor(&self, _a: u64, _b: u64) -> BackendResult<u64> { Err("Bitwise ops not supported over socket".to_string()) }
-    fn bitwise_not(&self, _a: u64) -> BackendResult<u64> { Err("Bitwise ops not supported over socket".to_string()) }
-    fn shl(&self, _a: u64, _shift: u32) -> BackendResult<u64> { Err("Shift ops not supported over socket".to_string()) }
-    fn shr(&self, _a: u64, _shift: u32) -> BackendResult<u64> { Err("Shift ops not supported over socket".to_string()) }
+    fn bitwise_and(&self, a: u64, b: u64) -> BackendResult<u64> {
+        self.record_binary(a, b, WireOpKind::BitwiseAnd)
+    }
+    fn bitwise_or(&self, a: u64, b: u64) -> BackendResult<u64> {
+        self.record_binary(a, b, WireOpKind::BitwiseOr)
+    }
+    fn bitwise_xor(&self, a: u64, b: u64) -> BackendResult<u64> {
+        self.record_binary(a, b, WireOpKind::BitwiseXor)
+    }
+    fn bitwise_not(&self, a: u64) -> BackendResult<u64> {
+        self.record_unary(a, WireOpKind::BitwiseNot)
+    }
+    fn shl(&self, a: u64, shift: u32) -> BackendResult<u64> {
+        self.record_unary(a, WireOpKind::Shl { shift })
+    }
+    fn shr(&self, a: u64, shift: u32) -> BackendResult<u64> {
+        self.record_unary(a, WireOpKind::Shr { shift })
+    }
 
     // Modulo
-    fn mod_op(&self, _a: u64, _b: u64) -> BackendResult<u64> { Err("Mod op not supported over socket".to_string()) }
+    fn mod_op(&self, a: u64, b: u64) -> BackendResult<u64> {
+        self.record_binary(a, b, WireOpKind::Mod)
+    }
 
     // Element-wise min/max
-    fn elem_min(&self, _a: u64, _b: u64) -> BackendResult<u64> { Err("ElemMin not supported over socket".to_string()) }
-    fn elem_max(&self, _a: u64, _b: u64) -> BackendResult<u64> { Err("ElemMax not supported over socket".to_string()) }
+    fn elem_min(&self, a: u64, b: u64) -> BackendResult<u64> {
+        self.record_binary(a, b, WireOpKind::ElemMin)
+    }
+    fn elem_max(&self, a: u64, b: u64) -> BackendResult<u64> {
+        self.record_binary(a, b, WireOpKind::ElemMax)
+    }
 
     // Logical NOT
-    fn logical_not(&self, _a: u64) -> BackendResult<u64> { Err("LogicalNot not supported over socket".to_string()) }
-
-    // Comparison ops
-    fn lt(&self, _a: u64, _b: u64) -> BackendResult<u64> { Err("Comparison ops not supported over socket".to_string()) }
-    fn gt(&self, _a: u64, _b: u64) -> BackendResult<u64> { Err("Comparison ops not supported over socket".to_string()) }
-    fn le(&self, _a: u64, _b: u64) -> BackendResult<u64> { Err("Comparison ops not supported over socket".to_string()) }
-    fn ge(&self, _a: u64, _b: u64) -> BackendResult<u64> { Err("Comparison ops not supported over socket".to_string()) }
-    fn eq_op(&self, _a: u64, _b: u64) -> BackendResult<u64> { Err("Comparison ops not supported over socket".to_string()) }
-    fn ne_op(&self, _a: u64, _b: u64) -> BackendResult<u64> { Err("Comparison ops not supported over socket".to_string()) }
-
-    fn cast(&self, _a: u64, _target_dtype: &str) -> BackendResult<u64> {
-        Err("Cast not supported over socket backend".to_string())
+    fn logical_not(&self, a: u64) -> BackendResult<u64> {
+        self.record_unary_with_dtype(a, WireOpKind::LogicalNot, WireDType::Bool)
     }
 
-    fn quantize(&self, _a: u64, _target_dtype: &str, _scale: f32, _zero_point: i32) -> BackendResult<u64> {
-        Err("Quantize not supported over socket backend".to_string())
+    // Comparison ops — output is always Bool
+    fn lt(&self, a: u64, b: u64) -> BackendResult<u64> {
+        self.record_binary_with_dtype(a, b, WireOpKind::Lt, WireDType::Bool)
+    }
+    fn gt(&self, a: u64, b: u64) -> BackendResult<u64> {
+        self.record_binary_with_dtype(a, b, WireOpKind::Gt, WireDType::Bool)
+    }
+    fn le(&self, a: u64, b: u64) -> BackendResult<u64> {
+        self.record_binary_with_dtype(a, b, WireOpKind::Le, WireDType::Bool)
+    }
+    fn ge(&self, a: u64, b: u64) -> BackendResult<u64> {
+        self.record_binary_with_dtype(a, b, WireOpKind::Ge, WireDType::Bool)
+    }
+    fn eq_op(&self, a: u64, b: u64) -> BackendResult<u64> {
+        self.record_binary_with_dtype(a, b, WireOpKind::Eq, WireDType::Bool)
+    }
+    fn ne_op(&self, a: u64, b: u64) -> BackendResult<u64> {
+        self.record_binary_with_dtype(a, b, WireOpKind::Ne, WireDType::Bool)
     }
 
-    fn dequantize(&self, _a: u64, _target_dtype: &str, _scale: f32, _zero_point: i32) -> BackendResult<u64> {
-        Err("Dequantize not supported over socket backend".to_string())
+    fn cast(&self, a: u64, target_dtype: &str) -> BackendResult<u64> {
+        let dt = WireDType::from_name(target_dtype)
+            .ok_or_else(|| format!("Unknown dtype: {}", target_dtype))?;
+        self.record_unary_with_dtype(a, WireOpKind::Cast { target_dtype: dt.discriminant() as u8 }, dt)
+    }
+
+    fn quantize(&self, a: u64, target_dtype: &str, scale: f32, zero_point: i32) -> BackendResult<u64> {
+        let dt = WireDType::from_name(target_dtype)
+            .ok_or_else(|| format!("Unknown dtype: {}", target_dtype))?;
+        self.record_unary_with_dtype(
+            a,
+            WireOpKind::Quantize { scale, zero_point, target_dtype: dt.discriminant() as u8 },
+            dt,
+        )
+    }
+
+    fn dequantize(&self, a: u64, target_dtype: &str, scale: f32, zero_point: i32) -> BackendResult<u64> {
+        let dt = WireDType::from_name(target_dtype)
+            .ok_or_else(|| format!("Unknown dtype: {}", target_dtype))?;
+        self.record_unary_with_dtype(
+            a,
+            WireOpKind::Dequantize { scale, zero_point, target_dtype: dt.discriminant() as u8 },
+            dt,
+        )
     }
 
     fn gather(&self, input: u64, dim: usize, index: u64) -> BackendResult<u64> {
