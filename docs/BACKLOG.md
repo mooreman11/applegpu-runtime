@@ -251,13 +251,21 @@ _Graph-level fusion, eliminate Python dispatch overhead._
 - [x] **Cast op** — `gpu.cast(tensor, "int32")` for dtype conversion (Plan 2)
 - [x] **Byte-copy shape ops** — slice/concat parameterized by element size (Plan 2)
 - [x] **is_compute_supported expansion** — all dtypes except Float64 (Plan 2)
-- [ ] **Op-level dtype validation** — prevent nonsensical combos (exp(Int32), softmax(Bool))
-- [ ] **Int64 Apple9+ gating** — runtime device family check
-- [ ] **Comparison ops** — lt, gt, le, ge, eq, ne with Bool output
-- [ ] **Bitwise ops** — and, or, xor, not, shl, shr for integer types
-- [ ] **Element-wise min/max, modulo** — binary utility ops
-- [ ] **Bool logical ops** — logical_not
-- [ ] **Quantize/dequantize** — int8/uint8 ↔ f16/f32 conversion
+- [x] **Op-level dtype validation** — validate_op_dtype() encodes coverage matrix (Plan 3, PR #8)
+- [x] **Int64 Apple9+ gating** — Swift FFI + Device::supports_int64() (Plan 3, PR #8)
+- [x] **Comparison ops** — lt, gt, le, ge, eq, ne with Bool output (Plan 3, PR #8)
+- [x] **Bitwise ops** — and, or, xor, not, shl, shr for integer types (Plan 3, PR #8)
+- [x] **Element-wise min/max, modulo** — binary utility ops (Plan 3, PR #8)
+- [x] **Bool logical ops** — logical_not (Plan 3, PR #8)
+- [x] **Quantize/dequantize** — int8/uint8 ↔ f16/f32 conversion with scale+zero_point (Plan 3, PR #8)
+- [ ] **Reduction output dtype overrides** — sum(Int32)→Int32, mean(Int32)→Float32, sum(Bool)→Int32 count
+- [ ] **Quantized matmul** — Int8 weights × Float16 activations with scale factors (dedicated kernel)
+- [ ] **`isinf`/`isnan`** — float → Bool predicates for numerical debugging
+- [ ] **`fill`/`zeros`/`ones`** — compute kernels for all dtypes
+- [ ] **Fused comparison chains** — `(a > 0) & (a < 10)` as single kernel, requires mixed-dtype fusion
+- [ ] **`where`/`masked_fill` Bool condition enforcement** — enforce Bool condition type (migration needed)
+- [ ] **`is_elementwise()` expansion** — mark new ops as fusable (bitwise, elem min/max) or not (comparisons)
+- [ ] **Backward ops multi-dtype** — extend backward kernels to BFloat16
 - [ ] **Float64 compute kernels** — MSL does not support double. Deferred until Apple hardware adds support.
 
 ### Infrastructure
