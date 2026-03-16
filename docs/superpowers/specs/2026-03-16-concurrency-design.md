@@ -125,8 +125,22 @@ extern "C" {
     fn gpu_bridge_get_queue(device: *const GPUDeviceHandle, index: u32) -> *mut c_void;
     fn gpu_bridge_set_batch_context(context_id: u32, queue: *mut c_void) -> *mut c_void;
     fn gpu_bridge_commit_batch_context(context_id: u32) -> *mut c_void;
+    fn gpu_bridge_set_active_context(context_id: u32);
 }
 ```
+
+**`set_active_context` FFI** (`compute.swift`): Sets a module-level variable (Phase I) or thread-local (Phase II) that `_nb` functions read to index into `batchContexts`. This is the only change needed in `_nb` functions — replace `activeBatchCommandBuffer` lookup with `batchContexts[currentContextId]` lookup.
+
+```swift
+private var currentContextId: UInt32 = 0  // Phase I: module-level. Phase II: move to thread-local.
+
+@_cdecl("gpu_bridge_set_active_context")
+public func gpuBridgeSetActiveContext(_ contextId: UInt32) {
+    currentContextId = contextId
+}
+```
+
+**`eval_single_cb` definition:** Flattens `levels` back into a flat `Vec<u64>` and runs the existing single-CB eval path (begin_batch → encode all → end_batch → wait). Signature: `fn eval_single_cb(&mut self, device: &Device, id: u64, container_id: ContainerId, levels: Vec<Vec<u64>>) -> Result<()>`.
 
 ### 1.4 MTLEvent Synchronization
 
@@ -321,7 +335,7 @@ Any operation that needs multiple locks must acquire them in this order. Operati
 
 Each phase acquires and releases one lock. The lock ordering is respected because phases proceed in order: graph → tensors → scheduler → pool.
 
-**TOCTOU safety for `destroy()`:** Between checking graph dependents (phase 1) and removing from tensors (phase 2), another thread could add a new dependent. Mitigation: `destroy()` re-checks under the tensors write lock by calling `graph.ref_count(id)` (requires briefly re-acquiring graph read lock inside tensors write lock — this is graph → tensors order, which is correct). If ref count changed, abort the destroy.
+**TOCTOU safety for `destroy()`:** Between checking graph dependents (phase 1) and removing from tensors (phase 2), another thread could add a new dependent. Mitigation: hold graph read lock through both phases 1 and 2 — acquire `graph(read)` first, then `tensors(write)` while still holding graph. This respects the canonical order (`graph → tensors`). Re-check `graph.ref_count(id)` under the combined lock. If ref count > 0, release both locks and abort the destroy.
 
 **Note on `eval()` Phase II window:** Between graph extraction (Phase 1 of eval) and tensor insertion (Phase 5), `shape()` queries for in-flight nodes will find them in neither location and return an error. This is expected and documented behavior. Callers should retry or use `exists()` which will return false for in-flight nodes.
 

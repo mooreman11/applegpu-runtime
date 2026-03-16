@@ -172,38 +172,51 @@ fn aligned_numpy(py: Python<'_>, shape: Vec<usize>, dtype: Option<&str>) -> PyRe
     };
 
     // Create numpy array viewing the capsule's memory.
-    // numpy holds a reference to the capsule (via the base attribute),
-    // so the capsule (and its memory) lives as long as the array.
+    // Use numpy.ctypeslib.as_array for robust pointer→array conversion,
+    // then set the capsule as the array's base for lifetime management.
+    //
+    // NOTE: This requires the `numpy` (pyo3-numpy) crate as a dependency.
+    // PyArray_SetBaseObject is part of numpy's C API, not CPython's.
+    // pyo3-numpy provides safe Rust bindings for this.
     let np = py.import_bound("numpy")?;
-    let np_dtype = np.call_method1("dtype", (dtype.unwrap_or("float32"),))?;
+    let ctypeslib = np.getattr("ctypeslib")?;
+
+    // numpy.ctypeslib.as_array takes a ctypes pointer and shape
     let ctypes = py.import_bound("ctypes")?;
-    let c_buf = ctypes.call_method1(
-        "cast",
-        (ptr as usize, ctypes.getattr("POINTER")?.call1((ctypes.getattr("c_ubyte")?,))?),
-    )?;
-    let arr = np.call_method1(
-        "frombuffer",
-        pyo3::types::PyDict::from_sequence_bound(py, &[
-            ("buffer", c_buf.as_any()),
-            ("dtype", np_dtype.as_any()),
-            ("count", numel.into_py(py).bind(py)),
-        ])?
-    )?;
+    let c_uint8_ptr_type = ctypes.getattr("POINTER")?.call1((ctypes.getattr("c_ubyte")?,))?;
+    let c_ptr = ctypes.call_method1("cast", (ptr as usize, &c_uint8_ptr_type))?;
+    let raw_arr = ctypeslib.call_method1("as_array", (&c_ptr, (aligned_size,)))?;
+
+    // View with correct dtype and reshape
+    let arr = raw_arr.call_method1("view", (dtype.unwrap_or("float32"),))?;
     let arr = arr.call_method1("reshape", (shape,))?;
 
-    // Attach capsule as the array's base so the memory is freed when array is GC'd
-    unsafe {
-        pyo3::ffi::PyArray_SetBaseObject(
-            arr.as_ptr() as *mut _,
-            capsule.into_ptr(),
-        );
-    }
+    // Attach capsule as base so memory is freed when array is GC'd.
+    // numpy.ndarray.base is read-only from Python, but we can set it
+    // via the underlying C struct. Use arr.__array_interface__ or
+    // the numpy crate's set_base() if available. Alternatively, create
+    // the array via np.frombuffer(memoryview_of_capsule) which auto-sets base.
+    //
+    // Simplest robust approach: use a memoryview-backed frombuffer.
+    // The capsule's memory is exposed via ctypes, and frombuffer holds
+    // a reference to the buffer object (the ctypes pointer), but we need
+    // the capsule to own the lifetime. Solution: store capsule as an
+    // attribute on a custom wrapper object that implements the buffer protocol.
+    //
+    // IMPLEMENTATION NOTE: The exact array creation mechanism should be
+    // validated during implementation. The PyCapsule + numpy.ctypeslib.as_array
+    // approach is sound, but the base-setting requires either:
+    //   (a) pyo3-numpy crate (provides PyArray with set_base()), or
+    //   (b) a thin Python helper: arr = np.array(arr, copy=False); arr.base = capsule
+    // Option (a) is recommended. Add `numpy = "0.21"` to Cargo.toml dependencies.
 
     Ok(arr.into())
 }
 ```
 
 **Key design: PyCapsule-based ownership.** The aligned memory is owned by a PyCapsule with a destructor that calls `libc::free()`. The numpy array's `base` attribute references the capsule, so the memory lives exactly as long as the array. No leak, no double-free.
+
+**Dependency:** Add `numpy = "0.21"` (pyo3-numpy) to `crates/python/Cargo.toml`. This crate provides `PyArray::from_raw_parts()` and `set_base()` which are needed for safe array construction from raw pointers.
 
 ### 4. BufferKind Enum
 
@@ -303,13 +316,28 @@ public func gpuBridgeCreateBufferNoCopy(
 }
 ```
 
-The existing `gpu_bridge_destroy_buffer` works unchanged because both `GPUBuffer` and `GPUBufferNoCopy` are subclasses of `GPUBufferBase`:
+All existing buffer accessor functions must be updated to use `Unmanaged<GPUBufferBase>` (not `GPUBuffer`) so they work for both owned and borrowed buffers. The `final` qualifier on `GPUBuffer` must be removed since it now inherits from `GPUBufferBase`.
+
 ```swift
-// Existing function — works for both types via Unmanaged<GPUBufferBase>
+// Updated functions — all use GPUBufferBase for type-erased access
 @_cdecl("gpu_bridge_destroy_buffer")
 public func gpuBridgeDestroyBuffer(_ ptr: UnsafeMutableRawPointer?) {
     guard let ptr = ptr else { return }
     Unmanaged<GPUBufferBase>.fromOpaque(ptr).release()
+}
+
+@_cdecl("gpu_bridge_buffer_contents")
+public func gpuBridgeBufferContents(_ ptr: UnsafeRawPointer?) -> UnsafeMutableRawPointer? {
+    guard let ptr = ptr else { return nil }
+    let buf = Unmanaged<GPUBufferBase>.fromOpaque(ptr).takeUnretainedValue()
+    return buf.buffer.contents()
+}
+
+@_cdecl("gpu_bridge_buffer_length")
+public func gpuBridgeBufferLength(_ ptr: UnsafeRawPointer?) -> UInt64 {
+    guard let ptr = ptr else { return 0 }
+    let buf = Unmanaged<GPUBufferBase>.fromOpaque(ptr).takeUnretainedValue()
+    return UInt64(buf.buffer.length)
 }
 ```
 
@@ -421,14 +449,17 @@ fn from_numpy_shared(_py: Python<'_>, arr: &Bound<'_, PyAny>) -> PyResult<GpuTen
     let py_obj_ptr = arr.as_ptr();
     unsafe { pyo3::ffi::Py_IncRef(py_obj_ptr) };
 
-    // Create no-copy Metal buffer
+    // Create no-copy Metal buffer. On failure, release the ref we just added.
     let id = BACKEND.tensor_from_ptr_no_copy(
         data_ptr as *mut u8,
         nbytes,
         shape,
         dtype,
         py_obj_ptr as *mut std::ffi::c_void,
-    ).map_err(|e| PyRuntimeError::new_err(e))?;
+    ).map_err(|e| {
+        unsafe { pyo3::ffi::Py_DecRef(py_obj_ptr) };
+        PyRuntimeError::new_err(e)
+    })?;
 
     Ok(GpuTensor { id })
 }
@@ -499,7 +530,10 @@ fn from_torch_shared(py: Python<'_>, tensor: &Bound<'_, PyAny>) -> PyResult<GpuT
     let id = BACKEND.tensor_from_ptr_no_copy(
         data_ptr as *mut u8, nbytes, shape, dtype,
         py_obj_ptr as *mut std::ffi::c_void,
-    ).map_err(|e| PyRuntimeError::new_err(e))?;
+    ).map_err(|e| {
+        unsafe { pyo3::ffi::Py_DecRef(py_obj_ptr) };
+        PyRuntimeError::new_err(e)
+    })?;
 
     Ok(GpuTensor { id })
 }
@@ -512,14 +546,26 @@ pub trait Backend: Send + Sync {
     // Existing
     fn tensor_from_data(&self, data: &[u8], shape: Vec<usize>, dtype: BackendDType) -> BackendResult<u64>;
 
-    // New: no-copy tensor creation (Metal only)
+    // New: no-copy tensor creation (Metal only).
+    // IMPORTANT: The caller has already called Py_IncRef on release_context.
+    // If the implementation falls back to copy, it MUST call Py_DecRef to
+    // release the extra reference.
     fn tensor_from_ptr_no_copy(
         &self, ptr: *mut u8, len: usize, shape: Vec<usize>,
         dtype: BackendDType, release_context: *mut std::ffi::c_void,
     ) -> BackendResult<u64> {
-        // Default: fall back to copy
+        // Default: fall back to copy, release the pinned reference
         let data = unsafe { std::slice::from_raw_parts(ptr, len) };
-        self.tensor_from_data(data, shape, dtype)
+        let result = self.tensor_from_data(data, shape, dtype);
+        // Release the Py_IncRef that the caller added (we didn't use it)
+        if !release_context.is_null() {
+            unsafe {
+                pyo3::Python::with_gil(|_py| {
+                    pyo3::ffi::Py_DecRef(release_context as *mut pyo3::ffi::PyObject);
+                });
+            }
+        }
+        result
     }
 }
 ```
