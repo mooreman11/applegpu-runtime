@@ -975,6 +975,18 @@ fn cast(t: &GpuTensor, dtype: &str) -> PyResult<GpuTensor> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (t, dtype, scale=0.1, zero_point=0))]
+fn quantize(t: &GpuTensor, dtype: &str, scale: f32, zero_point: i32) -> PyResult<GpuTensor> {
+    wrap_tensor(BACKEND.quantize(t.id, dtype, scale, zero_point))
+}
+
+#[pyfunction]
+#[pyo3(signature = (t, dtype, scale=0.1, zero_point=0))]
+fn dequantize(t: &GpuTensor, dtype: &str, scale: f32, zero_point: i32) -> PyResult<GpuTensor> {
+    wrap_tensor(BACKEND.dequantize(t.id, dtype, scale, zero_point))
+}
+
+#[pyfunction]
 fn attention_causal(q: &GpuTensor, k: &GpuTensor, v: &GpuTensor) -> PyResult<GpuTensor> {
     wrap_tensor(BACKEND.attention_causal(q.id, k.id, v.id))
 }
@@ -1173,6 +1185,8 @@ fn applegpu_runtime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(softmax_causal, m)?)?;
     m.add_function(wrap_pyfunction!(argmax, m)?)?;
     m.add_function(wrap_pyfunction!(cast, m)?)?;
+    m.add_function(wrap_pyfunction!(quantize, m)?)?;
+    m.add_function(wrap_pyfunction!(dequantize, m)?)?;
     m.add_function(wrap_pyfunction!(bitwise_and, m)?)?;
     m.add_function(wrap_pyfunction!(bitwise_or, m)?)?;
     m.add_function(wrap_pyfunction!(bitwise_xor, m)?)?;

@@ -346,6 +346,20 @@ impl Backend for MetalBackend {
         map_err!(applegpu_core::ops::cast(&mut rt, a, dt))
     }
 
+    fn quantize(&self, a: u64, target_dtype: &str, scale: f32, zero_point: i32) -> BackendResult<u64> {
+        let dt = applegpu_core::tensor::DType::from_name(target_dtype)
+            .ok_or_else(|| format!("Unknown dtype: {}", target_dtype))?;
+        let mut rt = self.runtime.lock().unwrap();
+        map_err!(applegpu_core::ops::quantize(&mut rt, a, dt, scale, zero_point))
+    }
+
+    fn dequantize(&self, a: u64, target_dtype: &str, scale: f32, zero_point: i32) -> BackendResult<u64> {
+        let dt = applegpu_core::tensor::DType::from_name(target_dtype)
+            .ok_or_else(|| format!("Unknown dtype: {}", target_dtype))?;
+        let mut rt = self.runtime.lock().unwrap();
+        map_err!(applegpu_core::ops::dequantize(&mut rt, a, dt, scale, zero_point))
+    }
+
     // Shape ops
     fn reshape(&self, a: u64, shape: Vec<usize>) -> BackendResult<u64> {
         let mut rt = self.runtime.lock().unwrap();

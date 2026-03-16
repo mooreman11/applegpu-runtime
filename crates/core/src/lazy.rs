@@ -971,6 +971,30 @@ impl LazyRuntime {
             return Ok(out);
         }
 
+        if let crate::graph::OpKind::Quantize { scale, zero_point, target_dtype } = node.op {
+            let (in_strides, out_shape_u32, ndim, numel) = self.unary_nd_params(node)?;
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+            let input = self.get_tensor(node.inputs[0])?;
+            let src_dtype = input.meta.dtype;
+            let (source, func) = KernelRegistry::resolve_quantize_kernel(src_dtype, target_dtype, scale, zero_point);
+            let pipeline = REGISTRY.get_or_create(device, &source, &func)?;
+            pipeline.dispatch_unary_nd(&input.buffer, &in_strides, &out.buffer, &out_shape_u32, ndim, numel)?;
+            return Ok(out);
+        }
+
+        if let crate::graph::OpKind::Dequantize { scale, zero_point, target_dtype } = node.op {
+            let (in_strides, out_shape_u32, ndim, numel) = self.unary_nd_params(node)?;
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+            let input = self.get_tensor(node.inputs[0])?;
+            let src_dtype = input.meta.dtype;
+            let (source, func) = KernelRegistry::resolve_dequantize_kernel(src_dtype, target_dtype, scale, zero_point);
+            let pipeline = REGISTRY.get_or_create(device, &source, &func)?;
+            pipeline.dispatch_unary_nd(&input.buffer, &in_strides, &out.buffer, &out_shape_u32, ndim, numel)?;
+            return Ok(out);
+        }
+
         if node.op.is_unary() {
             let (in_strides, out_shape_u32, ndim, numel) = self.unary_nd_params(node)?;
             let out_buf = self.pool.acquire(device, out_size)?;
@@ -1585,6 +1609,24 @@ impl LazyRuntime {
             let input = self.get_tensor(node.inputs[0])?;
             let src_dtype = input.meta.dtype;
             let (source, func) = KernelRegistry::resolve_cast_kernel(src_dtype, target_dtype);
+            let pipeline = REGISTRY.get_or_create(device, &source, &func)?;
+            return pipeline.dispatch_unary_nd_nb(queue, &input.buffer, &in_strides, &out.buffer, &out_shape_u32, ndim, numel);
+        }
+
+        if let crate::graph::OpKind::Quantize { scale, zero_point, target_dtype } = node.op {
+            let (in_strides, out_shape_u32, ndim, numel) = self.unary_nd_params(node)?;
+            let input = self.get_tensor(node.inputs[0])?;
+            let src_dtype = input.meta.dtype;
+            let (source, func) = KernelRegistry::resolve_quantize_kernel(src_dtype, target_dtype, scale, zero_point);
+            let pipeline = REGISTRY.get_or_create(device, &source, &func)?;
+            return pipeline.dispatch_unary_nd_nb(queue, &input.buffer, &in_strides, &out.buffer, &out_shape_u32, ndim, numel);
+        }
+
+        if let crate::graph::OpKind::Dequantize { scale, zero_point, target_dtype } = node.op {
+            let (in_strides, out_shape_u32, ndim, numel) = self.unary_nd_params(node)?;
+            let input = self.get_tensor(node.inputs[0])?;
+            let src_dtype = input.meta.dtype;
+            let (source, func) = KernelRegistry::resolve_dequantize_kernel(src_dtype, target_dtype, scale, zero_point);
             let pipeline = REGISTRY.get_or_create(device, &source, &func)?;
             return pipeline.dispatch_unary_nd_nb(queue, &input.buffer, &in_strides, &out.buffer, &out_shape_u32, ndim, numel);
         }

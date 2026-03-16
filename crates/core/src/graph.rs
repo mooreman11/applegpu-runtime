@@ -130,6 +130,10 @@ pub enum OpKind {
     LogicalNot,
     // Type conversion
     Cast { target_dtype: DType },
+    // Quantize: float → int8/uint8 with scale and zero_point
+    Quantize { scale: f32, zero_point: i32, target_dtype: DType },
+    // Dequantize: int8/uint8 → float with scale and zero_point
+    Dequantize { scale: f32, zero_point: i32, target_dtype: DType },
 }
 
 impl OpKind {
@@ -200,6 +204,8 @@ impl OpKind {
             OpKind::ElemMax => "elem_max",
             OpKind::LogicalNot => "logical_not",
             OpKind::Cast { .. } => "cast",
+            OpKind::Quantize { .. } => "quantize",
+            OpKind::Dequantize { .. } => "dequantize",
         }
     }
 

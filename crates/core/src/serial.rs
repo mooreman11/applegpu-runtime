@@ -118,6 +118,8 @@ fn op_to_discriminant(op: &OpKind) -> u32 {
         OpKind::ElemMin => 60,
         OpKind::ElemMax => 61,
         OpKind::LogicalNot => 62,
+        OpKind::Quantize { .. } => 63,
+        OpKind::Dequantize { .. } => 64,
     }
 }
 
@@ -304,6 +306,41 @@ fn discriminant_to_op(d: u32, r: &mut impl Read) -> io::Result<OpKind> {
         60 => Ok(OpKind::ElemMin),
         61 => Ok(OpKind::ElemMax),
         62 => Ok(OpKind::LogicalNot),
+        63 => {
+            let mut scale_bytes = [0u8; 4];
+            r.read_exact(&mut scale_bytes)?;
+            let mut zp_bytes = [0u8; 4];
+            r.read_exact(&mut zp_bytes)?;
+            let dt = read_u32(r)?;
+            let target_dtype = match dt {
+                0 => DType::Int8,
+                1 => DType::UInt8,
+                _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid quantize target dtype")),
+            };
+            Ok(OpKind::Quantize {
+                scale: f32::from_le_bytes(scale_bytes),
+                zero_point: i32::from_le_bytes(zp_bytes),
+                target_dtype,
+            })
+        }
+        64 => {
+            let mut scale_bytes = [0u8; 4];
+            r.read_exact(&mut scale_bytes)?;
+            let mut zp_bytes = [0u8; 4];
+            r.read_exact(&mut zp_bytes)?;
+            let dt = read_u32(r)?;
+            let target_dtype = match dt {
+                0 => DType::Float32,
+                1 => DType::Float16,
+                2 => DType::BFloat16,
+                _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid dequantize target dtype")),
+            };
+            Ok(OpKind::Dequantize {
+                scale: f32::from_le_bytes(scale_bytes),
+                zero_point: i32::from_le_bytes(zp_bytes),
+                target_dtype,
+            })
+        }
         _ => Err(io::Error::new(io::ErrorKind::InvalidData, format!("Unknown op type: {}", d))),
     }
 }
@@ -440,6 +477,27 @@ impl EvalRequest {
             }
             if let OpKind::Shr { shift } = node.op {
                 write_u32(&mut buf, shift).unwrap();
+            }
+            if let OpKind::Quantize { scale, zero_point, target_dtype } = node.op {
+                buf.write_all(&scale.to_le_bytes()).unwrap();
+                buf.write_all(&zero_point.to_le_bytes()).unwrap();
+                let dt_code: u32 = match target_dtype {
+                    DType::Int8 => 0,
+                    DType::UInt8 => 1,
+                    _ => 0,
+                };
+                write_u32(&mut buf, dt_code).unwrap();
+            }
+            if let OpKind::Dequantize { scale, zero_point, target_dtype } = node.op {
+                buf.write_all(&scale.to_le_bytes()).unwrap();
+                buf.write_all(&zero_point.to_le_bytes()).unwrap();
+                let dt_code: u32 = match target_dtype {
+                    DType::Float32 => 0,
+                    DType::Float16 => 1,
+                    DType::BFloat16 => 2,
+                    _ => 0,
+                };
+                write_u32(&mut buf, dt_code).unwrap();
             }
         }
 
@@ -639,6 +697,8 @@ impl From<&OpKind> for WireOpKind {
             OpKind::ElemMin | OpKind::ElemMax | OpKind::LogicalNot =>
                 unimplemented!("New ops not supported over wire protocol"),
             OpKind::Cast { .. } => unimplemented!("Cast op is not supported over wire protocol"),
+            OpKind::Quantize { .. } => unimplemented!("Quantize op is not supported over wire protocol"),
+            OpKind::Dequantize { .. } => unimplemented!("Dequantize op is not supported over wire protocol"),
         }
     }
 }

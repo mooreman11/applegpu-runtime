@@ -853,6 +853,14 @@ impl Backend for SocketBackend {
         Err("Cast not supported over socket backend".to_string())
     }
 
+    fn quantize(&self, _a: u64, _target_dtype: &str, _scale: f32, _zero_point: i32) -> BackendResult<u64> {
+        Err("Quantize not supported over socket backend".to_string())
+    }
+
+    fn dequantize(&self, _a: u64, _target_dtype: &str, _scale: f32, _zero_point: i32) -> BackendResult<u64> {
+        Err("Dequantize not supported over socket backend".to_string())
+    }
+
     fn gather(&self, input: u64, dim: usize, index: u64) -> BackendResult<u64> {
         let tensors = self.tensors.lock().unwrap();
         let graph = self.graph.lock().unwrap();

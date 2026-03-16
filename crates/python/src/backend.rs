@@ -125,6 +125,8 @@ pub trait Backend: Send + Sync {
 
     // Type conversion
     fn cast(&self, a: u64, target_dtype: &str) -> BackendResult<u64>;
+    fn quantize(&self, a: u64, target_dtype: &str, scale: f32, zero_point: i32) -> BackendResult<u64>;
+    fn dequantize(&self, a: u64, target_dtype: &str, scale: f32, zero_point: i32) -> BackendResult<u64>;
 
     // Indexing
     fn gather(&self, input: u64, dim: usize, index: u64) -> BackendResult<u64>;

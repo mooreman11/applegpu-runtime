@@ -1403,6 +1403,59 @@ kernel void cast{ss}_to{ds}(device const {st}* input [[buffer(0)]], device {dt}*
     )
 }
 
+// ── Quantize/Dequantize ops ─────────────────────────────────────────────────
+
+/// Generate quantize kernel source: float → int8/uint8.
+/// Scale and zero_point are baked into the kernel as constants.
+pub fn quantize_kernel_source(src: DType, dst: DType, scale: f32, zero_point: i32) -> String {
+    let st = metal_type(src);
+    let dt = metal_type(dst);
+    let ss = dtype_suffix(src);
+    let ds = dtype_suffix(dst);
+    let (clamp_min, clamp_max) = match dst {
+        DType::Int8 => ("-128.0", "127.0"),
+        DType::UInt8 => ("0.0", "255.0"),
+        _ => panic!("Quantize target must be Int8 or UInt8"),
+    };
+    format!(
+        r#"#include <metal_stdlib>
+using namespace metal;
+{nd}
+kernel void quantize{ss}_to{ds}(device const {st}* input [[buffer(0)]], device {dt}* out [[buffer(1)]], constant uint* in_strides [[buffer(2)]], constant uint* out_shape [[buffer(3)]], constant uint& ndim [[buffer(4)]], constant uint& numel [[buffer(5)]], uint id [[thread_position_in_grid]]) {{
+    if (id >= numel) return;
+    uint in_off = nd_index_to_offset(id, out_shape, in_strides, ndim);
+    float val = round(float(input[in_off]) / {scale}) + float({zero_point});
+    out[id] = ({dt})clamp(val, {clamp_min}, {clamp_max});
+}}
+"#,
+        nd = ND_INDEX_HELPER, st = st, dt = dt, ss = ss, ds = ds,
+        scale = scale, zero_point = zero_point,
+        clamp_min = clamp_min, clamp_max = clamp_max,
+    )
+}
+
+/// Generate dequantize kernel source: int8/uint8 → float.
+/// Scale and zero_point are baked into the kernel as constants.
+pub fn dequantize_kernel_source(src: DType, dst: DType, scale: f32, zero_point: i32) -> String {
+    let st = metal_type(src);
+    let dt = metal_type(dst);
+    let ss = dtype_suffix(src);
+    let ds = dtype_suffix(dst);
+    format!(
+        r#"#include <metal_stdlib>
+using namespace metal;
+{nd}
+kernel void dequantize{ss}_to{ds}(device const {st}* input [[buffer(0)]], device {dt}* out [[buffer(1)]], constant uint* in_strides [[buffer(2)]], constant uint* out_shape [[buffer(3)]], constant uint& ndim [[buffer(4)]], constant uint& numel [[buffer(5)]], uint id [[thread_position_in_grid]]) {{
+    if (id >= numel) return;
+    uint in_off = nd_index_to_offset(id, out_shape, in_strides, ndim);
+    out[id] = ({dt})(float(input[in_off] - {zero_point}) * {scale});
+}}
+"#,
+        nd = ND_INDEX_HELPER, st = st, dt = dt, ss = ss, ds = ds,
+        scale = scale, zero_point = zero_point,
+    )
+}
+
 // ── Task 11: Byte-copy shape ops ────────────────────────────────────────────
 
 /// Generate byte-copy transpose kernel parameterized by element size.
@@ -2015,5 +2068,60 @@ mod tests {
         assert!(src.contains("device const uchar*"));
         assert!(src.contains("device uchar* out"));
         assert!(src.contains("input[in_off] ? 0 : 1"));
+    }
+
+    // ── Quantize/Dequantize tests ───────────────────────────────────
+
+    #[test]
+    fn quantize_f32_to_i8() {
+        let src = quantize_kernel_source(DType::Float32, DType::Int8, 0.1, 0);
+        assert!(src.contains("quantize_f32_to_i8"));
+        assert!(src.contains("device const float*"));
+        assert!(src.contains("device char* out"));
+        assert!(src.contains("clamp(val, -128.0, 127.0)"));
+        assert!(src.contains("/ 0.1)"));
+    }
+
+    #[test]
+    fn quantize_f32_to_u8() {
+        let src = quantize_kernel_source(DType::Float32, DType::UInt8, 0.05, 128);
+        assert!(src.contains("quantize_f32_to_u8"));
+        assert!(src.contains("device const float*"));
+        assert!(src.contains("device uchar* out"));
+        assert!(src.contains("clamp(val, 0.0, 255.0)"));
+        assert!(src.contains("+ float(128)"));
+    }
+
+    #[test]
+    fn quantize_f16_to_i8() {
+        let src = quantize_kernel_source(DType::Float16, DType::Int8, 0.02, -5);
+        assert!(src.contains("quantize_f16_to_i8"));
+        assert!(src.contains("device const half*"));
+    }
+
+    #[test]
+    fn dequantize_i8_to_f32() {
+        let src = dequantize_kernel_source(DType::Int8, DType::Float32, 0.1, 0);
+        assert!(src.contains("dequantize_i8_to_f32"));
+        assert!(src.contains("device const char*"));
+        assert!(src.contains("device float* out"));
+        assert!(src.contains("* 0.1)"));
+    }
+
+    #[test]
+    fn dequantize_u8_to_f32() {
+        let src = dequantize_kernel_source(DType::UInt8, DType::Float32, 0.05, 128);
+        assert!(src.contains("dequantize_u8_to_f32"));
+        assert!(src.contains("device const uchar*"));
+        assert!(src.contains("device float* out"));
+        assert!(src.contains("- 128)"));
+    }
+
+    #[test]
+    fn dequantize_u8_to_f16() {
+        let src = dequantize_kernel_source(DType::UInt8, DType::Float16, 0.03, 10);
+        assert!(src.contains("dequantize_u8_to_f16"));
+        assert!(src.contains("device const uchar*"));
+        assert!(src.contains("device half* out"));
     }
 }

@@ -144,6 +144,9 @@ pub fn validate_op_dtype(op: &OpKind, dtype: DType) -> Result<()> {
             }
         }
 
+        // Quantize/Dequantize: validated specially (src + dst checked by the op functions)
+        OpKind::Quantize { .. } | OpKind::Dequantize { .. } => {}
+
         // FusedElementwise: validated at fusion time
         OpKind::FusedElementwise { .. } => {}
     }
@@ -1633,6 +1636,55 @@ pub fn avg_pool2d(rt: &mut LazyRuntime, input_id: u64, kernel_size: (usize, usiz
         inputs: vec![input_id],
         out_shape: Shape::new(vec![in_shape[0], in_shape[1], out_h, out_w])?,
         out_dtype: dtype,
+        container_id: ContainerId::DEFAULT,
+    });
+    Ok(out_id)
+}
+
+/// Quantize a float tensor to int8/uint8.
+pub fn quantize(rt: &mut LazyRuntime, input_id: u64, target_dtype: DType, scale: f32, zero_point: i32) -> Result<u64> {
+    let src_dtype = rt.dtype(input_id)?;
+    if !src_dtype.is_float() {
+        return Err(GpuError::UnsupportedDtype("Quantize input must be a float dtype".to_string()));
+    }
+    if !matches!(target_dtype, DType::Int8 | DType::UInt8) {
+        return Err(GpuError::UnsupportedDtype("Quantize target must be Int8 or UInt8".to_string()));
+    }
+    if scale == 0.0 {
+        return Err(GpuError::InvalidTensor("Quantize scale must be non-zero".to_string()));
+    }
+
+    let shape = rt.shape(input_id)?;
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op: OpKind::Quantize { scale, zero_point, target_dtype },
+        inputs: vec![input_id],
+        out_shape: Shape::new(shape.to_vec())?,
+        out_dtype: target_dtype,
+        container_id: ContainerId::DEFAULT,
+    });
+    Ok(out_id)
+}
+
+/// Dequantize an int8/uint8 tensor to float.
+pub fn dequantize(rt: &mut LazyRuntime, input_id: u64, target_dtype: DType, scale: f32, zero_point: i32) -> Result<u64> {
+    let src_dtype = rt.dtype(input_id)?;
+    if !matches!(src_dtype, DType::Int8 | DType::UInt8) {
+        return Err(GpuError::UnsupportedDtype("Dequantize input must be Int8 or UInt8".to_string()));
+    }
+    if !target_dtype.is_float() {
+        return Err(GpuError::UnsupportedDtype("Dequantize target must be a float dtype".to_string()));
+    }
+
+    let shape = rt.shape(input_id)?;
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op: OpKind::Dequantize { scale, zero_point, target_dtype },
+        inputs: vec![input_id],
+        out_shape: Shape::new(shape.to_vec())?,
+        out_dtype: target_dtype,
         container_id: ContainerId::DEFAULT,
     });
     Ok(out_id)

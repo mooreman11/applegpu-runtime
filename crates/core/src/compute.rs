@@ -1522,6 +1522,22 @@ impl KernelRegistry {
         (source, func_name)
     }
 
+    /// Resolve kernel source and function name for a quantize operation.
+    pub fn resolve_quantize_kernel(src: DType, dst: DType, scale: f32, zero_point: i32) -> (String, String) {
+        use crate::kernel_templates as kt;
+        let source = kt::quantize_kernel_source(src, dst, scale, zero_point);
+        let func_name = format!("quantize{}_to{}", kt::dtype_suffix(src), kt::dtype_suffix(dst));
+        (source, func_name)
+    }
+
+    /// Resolve kernel source and function name for a dequantize operation.
+    pub fn resolve_dequantize_kernel(src: DType, dst: DType, scale: f32, zero_point: i32) -> (String, String) {
+        use crate::kernel_templates as kt;
+        let source = kt::dequantize_kernel_source(src, dst, scale, zero_point);
+        let func_name = format!("dequantize{}_to{}", kt::dtype_suffix(src), kt::dtype_suffix(dst));
+        (source, func_name)
+    }
+
     /// Dispatch a binary op through the registry.
     pub fn dispatch_binary(
         &self,
