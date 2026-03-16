@@ -75,7 +75,12 @@ fi
 # Verify
 echo ""
 echo "Installed:"
-"${INSTALL_DIR}/gpu-service" --version
-"${INSTALL_DIR}/gpu-container" --version
+SVC_VER=$("${INSTALL_DIR}/gpu-service" --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+CTR_VER=$("${INSTALL_DIR}/gpu-container" --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+echo "  gpu-service ${SVC_VER}"
+echo "  gpu-container ${CTR_VER}"
 echo ""
 echo "Done! Restart your shell or run: export PATH=\"${INSTALL_DIR}:\$PATH\""
+echo ""
+echo "Tip: You can also install via Homebrew:"
+echo "  brew install mooreman11/tap/applegpu-runtime"
