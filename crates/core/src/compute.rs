@@ -3198,57 +3198,10 @@ impl KernelRegistry {
     }
 
     /// Resolve the kernel source and function name for a given base name and dtype.
-    fn resolve_kernel(base_name: &str, dtype: DType) -> (&'static str, String) {
+    fn resolve_kernel(base_name: &str, dtype: DType) -> (String, String) {
         match dtype {
-            DType::Float16 => {
-                let f16_name = format!("{}_f16", base_name);
-                let source = match base_name {
-                    n if n.starts_with("elementwise_add") || n.starts_with("elementwise_sub")
-                        || n.starts_with("elementwise_mul") || n.starts_with("elementwise_div") =>
-                        BINARY_KERNEL_SOURCE_F16,
-                    n if n.starts_with("elementwise_") => UNARY_KERNEL_SOURCE_F16,
-                    "matmul_f32" => MATMUL_KERNEL_SOURCE_F16,
-                    "softmax_f32" => SOFTMAX_KERNEL_SOURCE_F16,
-                    "transpose_f32" => TRANSPOSE_KERNEL_SOURCE_F16,
-                    "transpose_batched_f32" => TRANSPOSE_BATCHED_KERNEL_SOURCE_F16,
-                    "scalar_mul_f32" => SCALAR_MUL_KERNEL_SOURCE_F16,
-                    "gelu_f32" => GELU_KERNEL_SOURCE_F16,
-                    "layer_norm_f32" => LAYER_NORM_KERNEL_SOURCE_F16,
-                    "softmax_backward_f32" => SOFTMAX_BACKWARD_KERNEL_SOURCE_F16,
-                    "layer_norm_backward_f32" => LAYER_NORM_BACKWARD_KERNEL_SOURCE_F16,
-                    "embedding_f32" => EMBEDDING_KERNEL_SOURCE_F16,
-                    "slice_dim0_f32" => SLICE_DIM0_KERNEL_SOURCE_F16,
-                    "slice_dim1_f32" => SLICE_DIM1_KERNEL_SOURCE_F16,
-                    "concat_dim0_f32" => CONCAT_DIM0_KERNEL_SOURCE_F16,
-                    "concat_dim1_f32" => CONCAT_DIM1_KERNEL_SOURCE_F16,
-                    "add_bias_f32" => ADD_BIAS_KERNEL_SOURCE_F16,
-                    "softmax_causal_f32" => SOFTMAX_CAUSAL_KERNEL_SOURCE_F16,
-                    "argmax_f32" => ARGMAX_KERNEL_SOURCE_F16,
-                    "sum_f32" => SUM_KERNEL_SOURCE_F16,
-                    "mean_f32" => MEAN_KERNEL_SOURCE_F16,
-                    "copy_strided_f32" => COPY_STRIDED_KERNEL_SOURCE_F16,
-                    "pow_f32" => POW_KERNEL_SOURCE_F16,
-                    "clamp_f32" => CLAMP_KERNEL_SOURCE_F16,
-                    "where_f32" => WHERE_KERNEL_SOURCE_F16,
-                    "masked_fill_f32" => MASKED_FILL_KERNEL_SOURCE_F16,
-                    "triu_f32" => TRIU_KERNEL_SOURCE_F16,
-                    "tril_f32" => TRIL_KERNEL_SOURCE_F16,
-                    "gather_dim0_f32" => GATHER_DIM0_KERNEL_SOURCE_F16,
-                    "gather_dim1_f32" => GATHER_DIM1_KERNEL_SOURCE_F16,
-                    "index_select_dim0_f32" => INDEX_SELECT_DIM0_KERNEL_SOURCE_F16,
-                    "index_select_dim1_f32" => INDEX_SELECT_DIM1_KERNEL_SOURCE_F16,
-                    _ => BINARY_KERNEL_SOURCE_F16, // fallback
-                };
-                // For named kernels like matmul_f32 -> matmul_f16
-                let func_name = if base_name.ends_with("_f32") {
-                    format!("{}_f16", &base_name[..base_name.len() - 4])
-                } else {
-                    f16_name
-                };
-                (source, func_name)
-            }
-            _ => {
-                // Float32 (default)
+            DType::Float32 => {
+                // F32: keep existing const sources and original function names (no suffix)
                 let source = match base_name {
                     n if n.starts_with("elementwise_add") || n.starts_with("elementwise_sub")
                         || n.starts_with("elementwise_mul") || n.starts_with("elementwise_div") =>
@@ -3294,7 +3247,88 @@ impl KernelRegistry {
                     "avg_pool2d_f32" => AVG_POOL2D_KERNEL_SOURCE,
                     _ => BINARY_KERNEL_SOURCE,
                 };
-                (source, base_name.to_string())
+                (source.to_string(), base_name.to_string())
+            }
+            DType::Float16 => {
+                // F16: use templates for binary/unary, keep existing const sources for others
+                let suffix = crate::kernel_templates::dtype_suffix(dtype);
+                let func_name = if base_name.ends_with("_f32") {
+                    format!("{}{}", &base_name[..base_name.len() - 4], suffix)
+                } else {
+                    format!("{}{}", base_name, suffix)
+                };
+
+                let source = match base_name {
+                    n if n.starts_with("elementwise_add") || n.starts_with("elementwise_sub")
+                        || n.starts_with("elementwise_mul") || n.starts_with("elementwise_div") =>
+                        crate::kernel_templates::binary_kernel_source(dtype),
+                    n if n.starts_with("elementwise_neg") || n.starts_with("elementwise_abs")
+                        || n.starts_with("elementwise_sign") =>
+                        crate::kernel_templates::unary_kernel_source(dtype),
+                    n if n.starts_with("elementwise_") =>
+                        crate::kernel_templates::float_unary_kernel_source(dtype),
+                    "matmul_f32" => MATMUL_KERNEL_SOURCE_F16.to_string(),
+                    "softmax_f32" => SOFTMAX_KERNEL_SOURCE_F16.to_string(),
+                    "transpose_f32" => TRANSPOSE_KERNEL_SOURCE_F16.to_string(),
+                    "transpose_batched_f32" => TRANSPOSE_BATCHED_KERNEL_SOURCE_F16.to_string(),
+                    "scalar_mul_f32" => SCALAR_MUL_KERNEL_SOURCE_F16.to_string(),
+                    "gelu_f32" => GELU_KERNEL_SOURCE_F16.to_string(),
+                    "layer_norm_f32" => LAYER_NORM_KERNEL_SOURCE_F16.to_string(),
+                    "softmax_backward_f32" => SOFTMAX_BACKWARD_KERNEL_SOURCE_F16.to_string(),
+                    "layer_norm_backward_f32" => LAYER_NORM_BACKWARD_KERNEL_SOURCE_F16.to_string(),
+                    "embedding_f32" => EMBEDDING_KERNEL_SOURCE_F16.to_string(),
+                    "slice_dim0_f32" => SLICE_DIM0_KERNEL_SOURCE_F16.to_string(),
+                    "slice_dim1_f32" => SLICE_DIM1_KERNEL_SOURCE_F16.to_string(),
+                    "concat_dim0_f32" => CONCAT_DIM0_KERNEL_SOURCE_F16.to_string(),
+                    "concat_dim1_f32" => CONCAT_DIM1_KERNEL_SOURCE_F16.to_string(),
+                    "add_bias_f32" => ADD_BIAS_KERNEL_SOURCE_F16.to_string(),
+                    "softmax_causal_f32" => SOFTMAX_CAUSAL_KERNEL_SOURCE_F16.to_string(),
+                    "argmax_f32" => ARGMAX_KERNEL_SOURCE_F16.to_string(),
+                    "sum_f32" => SUM_KERNEL_SOURCE_F16.to_string(),
+                    "mean_f32" => MEAN_KERNEL_SOURCE_F16.to_string(),
+                    "copy_strided_f32" => COPY_STRIDED_KERNEL_SOURCE_F16.to_string(),
+                    "pow_f32" => POW_KERNEL_SOURCE_F16.to_string(),
+                    "clamp_f32" => CLAMP_KERNEL_SOURCE_F16.to_string(),
+                    "where_f32" => WHERE_KERNEL_SOURCE_F16.to_string(),
+                    "masked_fill_f32" => MASKED_FILL_KERNEL_SOURCE_F16.to_string(),
+                    "triu_f32" => TRIU_KERNEL_SOURCE_F16.to_string(),
+                    "tril_f32" => TRIL_KERNEL_SOURCE_F16.to_string(),
+                    "gather_dim0_f32" => GATHER_DIM0_KERNEL_SOURCE_F16.to_string(),
+                    "gather_dim1_f32" => GATHER_DIM1_KERNEL_SOURCE_F16.to_string(),
+                    "index_select_dim0_f32" => INDEX_SELECT_DIM0_KERNEL_SOURCE_F16.to_string(),
+                    "index_select_dim1_f32" => INDEX_SELECT_DIM1_KERNEL_SOURCE_F16.to_string(),
+                    _ => BINARY_KERNEL_SOURCE_F16.to_string(), // fallback
+                };
+                (source, func_name)
+            }
+            _ => {
+                // All other dtypes (BFloat16, Int32, etc.): use templates for binary/unary,
+                // fall back to F32 const sources for non-templated ops.
+                let suffix = crate::kernel_templates::dtype_suffix(dtype);
+                let func_name = if base_name.ends_with("_f32") {
+                    format!("{}{}", &base_name[..base_name.len() - 4], suffix)
+                } else {
+                    format!("{}{}", base_name, suffix)
+                };
+
+                let source = match base_name {
+                    n if n.starts_with("elementwise_add") || n.starts_with("elementwise_sub")
+                        || n.starts_with("elementwise_mul") || n.starts_with("elementwise_div") =>
+                        crate::kernel_templates::binary_kernel_source(dtype),
+                    n if n.starts_with("elementwise_neg") || n.starts_with("elementwise_abs")
+                        || n.starts_with("elementwise_sign") =>
+                        crate::kernel_templates::unary_kernel_source(dtype),
+                    n if n.starts_with("elementwise_") => {
+                        if dtype.is_float() {
+                            crate::kernel_templates::float_unary_kernel_source(dtype)
+                        } else {
+                            crate::kernel_templates::unary_kernel_source(dtype)
+                        }
+                    }
+                    // Non-templated ops: fall back to F32 sources
+                    _ => BINARY_KERNEL_SOURCE.to_string(),
+                };
+                (source, func_name)
             }
         }
     }
@@ -3325,7 +3359,7 @@ impl KernelRegistry {
         element_count: usize,
     ) -> Result<()> {
         let (source, func) = Self::resolve_kernel(function_name, dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_elementwise(buf_a, buf_b, buf_out, element_count)
     }
 
@@ -3353,7 +3387,7 @@ impl KernelRegistry {
         element_count: usize,
     ) -> Result<()> {
         let (source, func) = Self::resolve_kernel(function_name, dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_unary(buf_input, buf_out, element_count)
     }
 
@@ -3385,7 +3419,7 @@ impl KernelRegistry {
         k: usize,
     ) -> Result<()> {
         let (source, func) = Self::resolve_kernel("matmul_f32", dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_matmul(buf_a, buf_b, buf_c, m, n, k)
     }
 
@@ -3405,7 +3439,7 @@ impl KernelRegistry {
         b_batch_stride: usize,
     ) -> Result<()> {
         let (source, func) = Self::resolve_kernel("matmul_f32", dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_matmul_batched(buf_a, buf_b, buf_c, m, n, k, batch_size, a_batch_stride, b_batch_stride)
     }
 
@@ -3453,7 +3487,7 @@ impl KernelRegistry {
         rows: usize, cols: usize,
     ) -> Result<()> {
         let (source, func) = Self::resolve_kernel("softmax_f32", dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_softmax(buf_input, buf_output, rows, cols)
     }
 
@@ -3470,7 +3504,7 @@ impl KernelRegistry {
         rows: usize, cols: usize,
     ) -> Result<()> {
         let (source, func) = Self::resolve_kernel("transpose_f32", dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_transpose(buf_input, buf_output, rows, cols)
     }
 
@@ -3479,7 +3513,7 @@ impl KernelRegistry {
         batch_size: usize, rows: usize, cols: usize,
     ) -> Result<()> {
         let (source, func) = Self::resolve_kernel("transpose_batched_f32", dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_transpose_batched(buf_input, buf_output, batch_size, rows, cols)
     }
 
@@ -3496,7 +3530,7 @@ impl KernelRegistry {
         scale: f32, element_count: usize,
     ) -> Result<()> {
         let (source, func) = Self::resolve_kernel("scalar_mul_f32", dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_scalar_mul(buf_input, buf_output, scale, element_count)
     }
 
@@ -3507,7 +3541,7 @@ impl KernelRegistry {
         ndim: u32, numel: u32, exponent: f32,
     ) -> Result<()> {
         let (source, func) = Self::resolve_kernel("pow_f32", dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_pow_nd(buf_input, in_strides, buf_out, out_shape, ndim, numel, exponent)
     }
 
@@ -3518,7 +3552,7 @@ impl KernelRegistry {
         ndim: u32, numel: u32, exponent: f32,
     ) -> Result<*mut std::ffi::c_void> {
         let (source, func) = Self::resolve_kernel("pow_f32", dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_pow_nd_nb(queue, buf_input, in_strides, buf_out, out_shape, ndim, numel, exponent)
     }
 
@@ -3529,7 +3563,7 @@ impl KernelRegistry {
         ndim: u32, numel: u32, min_val: f32, max_val: f32,
     ) -> Result<()> {
         let (source, func) = Self::resolve_kernel("clamp_f32", dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_clamp_nd(buf_input, in_strides, buf_out, out_shape, ndim, numel, min_val, max_val)
     }
 
@@ -3540,7 +3574,7 @@ impl KernelRegistry {
         ndim: u32, numel: u32, min_val: f32, max_val: f32,
     ) -> Result<*mut std::ffi::c_void> {
         let (source, func) = Self::resolve_kernel("clamp_f32", dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_clamp_nd_nb(queue, buf_input, in_strides, buf_out, out_shape, ndim, numel, min_val, max_val)
     }
 
@@ -3555,7 +3589,7 @@ impl KernelRegistry {
         ndim: u32, numel: u32,
     ) -> Result<()> {
         let (source, func) = Self::resolve_kernel("where_f32", dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_where_nd(buf_cond, cond_strides, buf_x, x_strides, buf_y, y_strides, buf_out, out_shape, ndim, numel)
     }
 
@@ -3568,7 +3602,7 @@ impl KernelRegistry {
         ndim: u32, numel: u32,
     ) -> Result<*mut std::ffi::c_void> {
         let (source, func) = Self::resolve_kernel("where_f32", dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_where_nd_nb(queue, buf_cond, cond_strides, buf_x, x_strides, buf_y, y_strides, buf_out, out_shape, ndim, numel)
     }
 
@@ -3582,7 +3616,7 @@ impl KernelRegistry {
         ndim: u32, numel: u32, fill_value: f32,
     ) -> Result<()> {
         let (source, func) = Self::resolve_kernel("masked_fill_f32", dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_masked_fill_nd(buf_input, in_strides, buf_mask, mask_strides, buf_out, out_shape, ndim, numel, fill_value)
     }
 
@@ -3594,7 +3628,7 @@ impl KernelRegistry {
         ndim: u32, numel: u32, fill_value: f32,
     ) -> Result<*mut std::ffi::c_void> {
         let (source, func) = Self::resolve_kernel("masked_fill_f32", dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_masked_fill_nd_nb(queue, buf_input, in_strides, buf_mask, mask_strides, buf_out, out_shape, ndim, numel, fill_value)
     }
 
@@ -3606,7 +3640,7 @@ impl KernelRegistry {
         batch_size: usize, rows: usize, cols: usize, diagonal: i32,
     ) -> Result<()> {
         let (source, func) = Self::resolve_kernel("triu_f32", dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_triangular(buf_input, buf_out, batch_size, rows, cols, diagonal)
     }
 
@@ -3616,7 +3650,7 @@ impl KernelRegistry {
         batch_size: usize, rows: usize, cols: usize, diagonal: i32,
     ) -> Result<*mut std::ffi::c_void> {
         let (source, func) = Self::resolve_kernel("triu_f32", dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_triangular_nb(queue, buf_input, buf_out, batch_size, rows, cols, diagonal)
     }
 
@@ -3626,7 +3660,7 @@ impl KernelRegistry {
         batch_size: usize, rows: usize, cols: usize, diagonal: i32,
     ) -> Result<()> {
         let (source, func) = Self::resolve_kernel("tril_f32", dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_triangular(buf_input, buf_out, batch_size, rows, cols, diagonal)
     }
 
@@ -3636,7 +3670,7 @@ impl KernelRegistry {
         batch_size: usize, rows: usize, cols: usize, diagonal: i32,
     ) -> Result<*mut std::ffi::c_void> {
         let (source, func) = Self::resolve_kernel("tril_f32", dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_triangular_nb(queue, buf_input, buf_out, batch_size, rows, cols, diagonal)
     }
 
@@ -3650,7 +3684,7 @@ impl KernelRegistry {
         element_count: usize,
     ) -> Result<()> {
         let (source, func) = Self::resolve_kernel("gelu_f32", dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_unary(buf_input, buf_out, element_count)
     }
 
@@ -3668,7 +3702,7 @@ impl KernelRegistry {
         eps: f32,
     ) -> Result<()> {
         let (source, func) = Self::resolve_kernel("layer_norm_f32", dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_layer_norm(buf_input, buf_gamma, buf_beta, buf_out, rows, cols, eps)
     }
 
@@ -3678,7 +3712,7 @@ impl KernelRegistry {
         rows: usize, cols: usize,
     ) -> Result<()> {
         let (source, func) = Self::resolve_kernel("softmax_backward_f32", dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_softmax_backward(buf_grad_output, buf_output, buf_grad_input, rows, cols)
     }
 
@@ -3688,7 +3722,7 @@ impl KernelRegistry {
         rows: usize, cols: usize, eps: f32,
     ) -> Result<()> {
         let (source, func) = Self::resolve_kernel("layer_norm_backward_f32", dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_layer_norm_backward(buf_grad_output, buf_input, buf_gamma, buf_grad_input, rows, cols, eps)
     }
 
@@ -3704,7 +3738,7 @@ impl KernelRegistry {
         embed_dim: usize,
     ) -> Result<()> {
         let (source, func) = Self::resolve_kernel("embedding_f32", dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_embedding(buf_weights, buf_indices, buf_out, seq_len, embed_dim)
     }
 
@@ -3715,7 +3749,7 @@ impl KernelRegistry {
         cols: usize, start_row: usize, out_rows: usize,
     ) -> Result<()> {
         let (source, func) = Self::resolve_kernel("slice_dim0_f32", dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_slice_dim0(buf_input, buf_output, cols, start_row, out_rows)
     }
 
@@ -3724,7 +3758,7 @@ impl KernelRegistry {
         in_cols: usize, out_cols: usize, start_col: usize, rows: usize,
     ) -> Result<()> {
         let (source, func) = Self::resolve_kernel("slice_dim1_f32", dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_slice_dim1(buf_input, buf_output, in_cols, out_cols, start_col, rows)
     }
 
@@ -3733,7 +3767,7 @@ impl KernelRegistry {
         rows_a: usize, cols: usize, total_rows: usize,
     ) -> Result<()> {
         let (source, func) = Self::resolve_kernel("concat_dim0_f32", dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_concat_dim0(buf_a, buf_b, buf_output, rows_a, cols, total_rows)
     }
 
@@ -3742,7 +3776,7 @@ impl KernelRegistry {
         rows: usize, cols_a: usize, cols_b: usize,
     ) -> Result<()> {
         let (source, func) = Self::resolve_kernel("concat_dim1_f32", dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_concat_dim1(buf_a, buf_b, buf_output, rows, cols_a, cols_b)
     }
 
@@ -3751,7 +3785,7 @@ impl KernelRegistry {
         rows: usize, cols: usize,
     ) -> Result<()> {
         let (source, func) = Self::resolve_kernel("add_bias_f32", dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_add_bias(buf_input, buf_bias, buf_output, rows, cols)
     }
 
@@ -3760,7 +3794,7 @@ impl KernelRegistry {
         batch_size: usize, rows: usize, cols: usize,
     ) -> Result<()> {
         let (source, func) = Self::resolve_kernel("softmax_causal_f32", dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_softmax_causal(buf_input, buf_output, batch_size, rows, cols)
     }
 
@@ -3769,7 +3803,7 @@ impl KernelRegistry {
         rows: usize, cols: usize,
     ) -> Result<()> {
         let (source, func) = Self::resolve_kernel("sum_f32", dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_softmax(buf_input, buf_output, rows, cols)
     }
 
@@ -3778,7 +3812,7 @@ impl KernelRegistry {
         rows: usize, cols: usize,
     ) -> Result<()> {
         let (source, func) = Self::resolve_kernel("mean_f32", dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_softmax(buf_input, buf_output, rows, cols)
     }
 
@@ -3787,7 +3821,7 @@ impl KernelRegistry {
         rows: usize, cols: usize,
     ) -> Result<()> {
         let (source, func) = Self::resolve_kernel("argmax_f32", input_dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         // Reuse softmax dispatch (same buffer layout: input, output, rows, cols; 1D dispatch per row)
         pipeline.dispatch_softmax(buf_input, buf_output, rows, cols)
     }
@@ -3799,7 +3833,7 @@ impl KernelRegistry {
         buf_input: &Buffer, buf_output: &Buffer, cols: usize, start_row: usize, out_rows: usize,
     ) -> Result<*mut std::ffi::c_void> {
         let (source, func) = Self::resolve_kernel("slice_dim0_f32", dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_slice_dim0_nb(queue, buf_input, buf_output, cols, start_row, out_rows)
     }
 
@@ -3808,7 +3842,7 @@ impl KernelRegistry {
         buf_input: &Buffer, buf_output: &Buffer, in_cols: usize, out_cols: usize, start_col: usize, rows: usize,
     ) -> Result<*mut std::ffi::c_void> {
         let (source, func) = Self::resolve_kernel("slice_dim1_f32", dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_slice_dim1_nb(queue, buf_input, buf_output, in_cols, out_cols, start_col, rows)
     }
 
@@ -3817,7 +3851,7 @@ impl KernelRegistry {
         buf_a: &Buffer, buf_b: &Buffer, buf_output: &Buffer, rows_a: usize, cols: usize, total_rows: usize,
     ) -> Result<*mut std::ffi::c_void> {
         let (source, func) = Self::resolve_kernel("concat_dim0_f32", dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_concat_dim0_nb(queue, buf_a, buf_b, buf_output, rows_a, cols, total_rows)
     }
 
@@ -3826,7 +3860,7 @@ impl KernelRegistry {
         buf_a: &Buffer, buf_b: &Buffer, buf_output: &Buffer, rows: usize, cols_a: usize, cols_b: usize,
     ) -> Result<*mut std::ffi::c_void> {
         let (source, func) = Self::resolve_kernel("concat_dim1_f32", dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_concat_dim1_nb(queue, buf_a, buf_b, buf_output, rows, cols_a, cols_b)
     }
 
@@ -3835,7 +3869,7 @@ impl KernelRegistry {
         buf_input: &Buffer, buf_bias: &Buffer, buf_output: &Buffer, rows: usize, cols: usize,
     ) -> Result<*mut std::ffi::c_void> {
         let (source, func) = Self::resolve_kernel("add_bias_f32", dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_add_bias_nb(queue, buf_input, buf_bias, buf_output, rows, cols)
     }
 
@@ -3844,7 +3878,7 @@ impl KernelRegistry {
         buf_input: &Buffer, buf_output: &Buffer, batch_size: usize, rows: usize, cols: usize,
     ) -> Result<*mut std::ffi::c_void> {
         let (source, func) = Self::resolve_kernel("softmax_causal_f32", dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_softmax_causal_nb(queue, buf_input, buf_output, batch_size, rows, cols)
     }
 
@@ -3853,7 +3887,7 @@ impl KernelRegistry {
         buf_input: &Buffer, buf_output: &Buffer, rows: usize, cols: usize,
     ) -> Result<*mut std::ffi::c_void> {
         let (source, func) = Self::resolve_kernel("sum_f32", dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_softmax_nb(queue, buf_input, buf_output, rows, cols)
     }
 
@@ -3862,7 +3896,7 @@ impl KernelRegistry {
         buf_input: &Buffer, buf_output: &Buffer, rows: usize, cols: usize,
     ) -> Result<*mut std::ffi::c_void> {
         let (source, func) = Self::resolve_kernel("mean_f32", dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_softmax_nb(queue, buf_input, buf_output, rows, cols)
     }
 
@@ -3871,7 +3905,7 @@ impl KernelRegistry {
         buf_input: &Buffer, buf_output: &Buffer, rows: usize, cols: usize,
     ) -> Result<*mut std::ffi::c_void> {
         let (source, func) = Self::resolve_kernel("argmax_f32", input_dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_softmax_nb(queue, buf_input, buf_output, rows, cols)
     }
 
@@ -3882,7 +3916,7 @@ impl KernelRegistry {
         buf_input: &Buffer, buf_out: &Buffer, element_count: usize,
     ) -> Result<*mut std::ffi::c_void> {
         let (source, func) = Self::resolve_kernel("gelu_f32", dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_unary_nb(queue, buf_input, buf_out, element_count)
     }
 
@@ -3892,7 +3926,7 @@ impl KernelRegistry {
         rows: usize, cols: usize, eps: f32,
     ) -> Result<*mut std::ffi::c_void> {
         let (source, func) = Self::resolve_kernel("layer_norm_f32", dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_layer_norm_nb(queue, buf_input, buf_gamma, buf_beta, buf_out, rows, cols, eps)
     }
 
@@ -3902,7 +3936,7 @@ impl KernelRegistry {
         rows: usize, cols: usize,
     ) -> Result<*mut std::ffi::c_void> {
         let (source, func) = Self::resolve_kernel("softmax_backward_f32", dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_softmax_backward_nb(queue, buf_grad_output, buf_output, buf_grad_input, rows, cols)
     }
 
@@ -3912,7 +3946,7 @@ impl KernelRegistry {
         rows: usize, cols: usize, eps: f32,
     ) -> Result<*mut std::ffi::c_void> {
         let (source, func) = Self::resolve_kernel("layer_norm_backward_f32", dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_layer_norm_backward_nb(queue, buf_grad_output, buf_input, buf_gamma, buf_grad_input, rows, cols, eps)
     }
 
@@ -3922,7 +3956,7 @@ impl KernelRegistry {
         seq_len: usize, embed_dim: usize,
     ) -> Result<*mut std::ffi::c_void> {
         let (source, func) = Self::resolve_kernel("embedding_f32", dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_embedding_nb(queue, buf_weights, buf_indices, buf_out, seq_len, embed_dim)
     }
 
@@ -3931,7 +3965,7 @@ impl KernelRegistry {
         buf_a: &Buffer, buf_b: &Buffer, buf_out: &Buffer, element_count: usize,
     ) -> Result<*mut std::ffi::c_void> {
         let (source, func) = Self::resolve_kernel(function_name, dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_elementwise_nb(queue, buf_a, buf_b, buf_out, element_count)
     }
 
@@ -3940,7 +3974,7 @@ impl KernelRegistry {
         buf_input: &Buffer, buf_out: &Buffer, element_count: usize,
     ) -> Result<*mut std::ffi::c_void> {
         let (source, func) = Self::resolve_kernel(function_name, dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_unary_nb(queue, buf_input, buf_out, element_count)
     }
 
@@ -3949,7 +3983,7 @@ impl KernelRegistry {
         buf_a: &Buffer, buf_b: &Buffer, buf_c: &Buffer, m: usize, n: usize, k: usize,
     ) -> Result<*mut std::ffi::c_void> {
         let (source, func) = Self::resolve_kernel("matmul_f32", dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_matmul_nb(queue, buf_a, buf_b, buf_c, m, n, k)
     }
 
@@ -3960,7 +3994,7 @@ impl KernelRegistry {
         batch_size: usize, a_batch_stride: usize, b_batch_stride: usize,
     ) -> Result<*mut std::ffi::c_void> {
         let (source, func) = Self::resolve_kernel("matmul_f32", dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_matmul_batched_nb(queue, buf_a, buf_b, buf_c, m, n, k, batch_size, a_batch_stride, b_batch_stride)
     }
 
@@ -3969,7 +4003,7 @@ impl KernelRegistry {
         buf_input: &Buffer, buf_output: &Buffer, rows: usize, cols: usize,
     ) -> Result<*mut std::ffi::c_void> {
         let (source, func) = Self::resolve_kernel("softmax_f32", dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_softmax_nb(queue, buf_input, buf_output, rows, cols)
     }
 
@@ -3978,7 +4012,7 @@ impl KernelRegistry {
         buf_input: &Buffer, buf_output: &Buffer, rows: usize, cols: usize,
     ) -> Result<*mut std::ffi::c_void> {
         let (source, func) = Self::resolve_kernel("transpose_f32", dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_transpose_nb(queue, buf_input, buf_output, rows, cols)
     }
 
@@ -3987,7 +4021,7 @@ impl KernelRegistry {
         buf_input: &Buffer, buf_output: &Buffer, batch_size: usize, rows: usize, cols: usize,
     ) -> Result<*mut std::ffi::c_void> {
         let (source, func) = Self::resolve_kernel("transpose_batched_f32", dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_transpose_batched_nb(queue, buf_input, buf_output, batch_size, rows, cols)
     }
 
@@ -3996,7 +4030,7 @@ impl KernelRegistry {
         buf_input: &Buffer, buf_output: &Buffer, scale: f32, element_count: usize,
     ) -> Result<*mut std::ffi::c_void> {
         let (source, func) = Self::resolve_kernel("scalar_mul_f32", dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_scalar_mul_nb(queue, buf_input, buf_output, scale, element_count)
     }
 
@@ -4031,7 +4065,7 @@ impl KernelRegistry {
         ndim: u32, numel: u32,
     ) -> Result<()> {
         let (source, func) = Self::resolve_kernel(function_name, dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_binary_nd(buf_a, a_strides, buf_b, b_strides, buf_out, out_shape, ndim, numel)
     }
 
@@ -4045,7 +4079,7 @@ impl KernelRegistry {
         ndim: u32, numel: u32,
     ) -> Result<*mut std::ffi::c_void> {
         let (source, func) = Self::resolve_kernel(function_name, dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_binary_nd_nb(queue, buf_a, a_strides, buf_b, b_strides, buf_out, out_shape, ndim, numel)
     }
 
@@ -4057,7 +4091,7 @@ impl KernelRegistry {
         ndim: u32, numel: u32,
     ) -> Result<()> {
         let (source, func) = Self::resolve_kernel(function_name, dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_unary_nd(buf_input, in_strides, buf_out, out_shape, ndim, numel)
     }
 
@@ -4070,7 +4104,7 @@ impl KernelRegistry {
         ndim: u32, numel: u32,
     ) -> Result<*mut std::ffi::c_void> {
         let (source, func) = Self::resolve_kernel(function_name, dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_unary_nd_nb(queue, buf_input, in_strides, buf_out, out_shape, ndim, numel)
     }
 
@@ -4082,7 +4116,7 @@ impl KernelRegistry {
         rows: usize, in_cols: usize, out_cols: usize,
     ) -> Result<()> {
         let (source, func) = Self::resolve_kernel(kernel_base, dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_gather(buf_input, buf_indices, buf_out, rows, in_cols, out_cols)
     }
 
@@ -4093,7 +4127,7 @@ impl KernelRegistry {
         rows: usize, in_cols: usize, out_cols: usize,
     ) -> Result<*mut std::ffi::c_void> {
         let (source, func) = Self::resolve_kernel(kernel_base, dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_gather_nb(queue, buf_input, buf_indices, buf_out, rows, in_cols, out_cols)
     }
 
@@ -4105,7 +4139,7 @@ impl KernelRegistry {
         num_indices: usize, cols: usize,
     ) -> Result<()> {
         let (source, func) = Self::resolve_kernel("index_select_dim0_f32", dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_index_select_dim0(buf_input, buf_indices, buf_out, num_indices, cols)
     }
 
@@ -4116,7 +4150,7 @@ impl KernelRegistry {
         num_indices: usize, cols: usize,
     ) -> Result<*mut std::ffi::c_void> {
         let (source, func) = Self::resolve_kernel("index_select_dim0_f32", dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_index_select_dim0_nb(queue, buf_input, buf_indices, buf_out, num_indices, cols)
     }
 
@@ -4126,7 +4160,7 @@ impl KernelRegistry {
         rows: usize, in_cols: usize, num_indices: usize,
     ) -> Result<()> {
         let (source, func) = Self::resolve_kernel("index_select_dim1_f32", dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_index_select_dim1(buf_input, buf_indices, buf_out, rows, in_cols, num_indices)
     }
 
@@ -4137,7 +4171,7 @@ impl KernelRegistry {
         rows: usize, in_cols: usize, num_indices: usize,
     ) -> Result<*mut std::ffi::c_void> {
         let (source, func) = Self::resolve_kernel("index_select_dim1_f32", dtype);
-        let pipeline = self.get_or_create(device, source, &func)?;
+        let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_index_select_dim1_nb(queue, buf_input, buf_indices, buf_out, rows, in_cols, num_indices)
     }
 
