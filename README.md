@@ -168,6 +168,27 @@ Each connection gets a `ContainerId` with isolated resource quotas. The schedule
 
 **Next:** Replace TCP bridge with Unix socket relay via Apple Containerization framework (`UnixSocketConfiguration`) or direct vsock for lower latency. See [BACKLOG](docs/BACKLOG.md).
 
+### Docker GPU Access
+
+Docker containers can access Metal GPU by bind-mounting the gpu-service socket:
+
+```bash
+# Start gpu-service on the host
+cargo run -p applegpu-service
+
+# Run any Docker container with GPU access
+docker run -v ~/.applegpu/runtime.sock:/var/run/applegpu.sock \
+  -e APPLEGPU_SOCKET=/var/run/applegpu.sock \
+  pytorch:latest python -c "
+import applegpu_runtime as gpu
+gpu.init_backend()
+a = gpu.tensor([1.0, 2.0, 3.0])
+print((a + a).to_list())  # [2.0, 4.0, 6.0] — computed on host Metal GPU
+"
+```
+
+No TCP bridge, no port forwarding, no special networking required.
+
 ### Performance
 
 | Model | Tokens/sec | Notes |
