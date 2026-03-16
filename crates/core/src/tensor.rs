@@ -45,6 +45,7 @@ impl DType {
             "uint8" | "u8" => Some(DType::UInt8),
             "uint32" | "u32" => Some(DType::UInt32),
             "bool" | "bool_" => Some(DType::Bool),
+            "bfloat16" | "bf16" => Some(DType::BFloat16),
             _ => None,
         }
     }
@@ -568,6 +569,13 @@ mod tests {
         let bytes = unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, 16) };
         let t = Tensor::from_data(&device, vec![4], DType::Int32, bytes).unwrap();
         assert_eq!(t.as_bytes().unwrap(), bytes);
+    }
+
+    #[test]
+    fn bfloat16_name_roundtrip() {
+        assert_eq!(DType::from_name("bfloat16"), Some(DType::BFloat16));
+        assert_eq!(DType::from_name("bf16"), Some(DType::BFloat16));
+        assert_eq!(DType::BFloat16.name(), "bfloat16");
     }
 
     #[test]
