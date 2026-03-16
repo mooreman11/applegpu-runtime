@@ -99,7 +99,7 @@ out = gpu.attention_causal(q, k, v)  # batched causal attention
 
 ## Capabilities
 
-### 38 GPU Operations (f32 + f16, all N-D)
+### 39 GPU Operations (all dtypes except Float64, all N-D)
 
 | Category | Ops |
 |----------|-----|
@@ -110,19 +110,23 @@ out = gpu.attention_causal(q, k, v)  # batched causal attention
 | Conditional | where, masked_fill, triu, tril |
 | Indexing | gather, index_select |
 | CNN | conv1d, conv2d, batch_norm, max_pool2d, avg_pool2d |
+| Type | cast |
 
-All ops support N-D tensors (up to 8 dimensions) with NumPy-style broadcasting and kernel fusion.
+All ops support N-D tensors (up to 8 dimensions) with NumPy-style broadcasting and kernel fusion. Kernel sources are generated from templates — a single code path handles all 10 dtypes.
 
 ### Infrastructure
 
 - **PyTorch device backend** — `ApplegpuTensor` with `__torch_dispatch__`, 40+ aten ops routed to Metal, CPU fallback with warnings
 - **Training support** — autograd, SGD/Adam/AdamW, gradient clipping, GPT-2 fine-tuning, ResNet training
 - **Fast tensor transfer** — `from_torch` 385x faster via direct `data_ptr()` (0.55ms vs 212ms for 1M elements)
+- **Zero-copy transfers** — `from_numpy_shared` / `from_torch_shared` for page-aligned data, `aligned_numpy` allocator
+- **Concurrent Metal queues** — parallel graph analysis with `parallel_levels()`, MTLEvent sync, up to 4 queues
 - **Multi-container scheduler** — priority-based fair queuing with per-container resource quotas
 - **Persistent memory pool** — power-of-two bucketed buffer reuse with watermark eviction
 - **Command buffer batching** — non-blocking GPU dispatch, single wait per eval
 - **N-D tensors** — stride-based MSL kernels, NumPy-style broadcasting
-- **Multi-dtype** — 10 types (float16/32/64, int8/16/32/64, uint8/32, bool) with NumPy/PyTorch roundtrip
+- **Multi-dtype** — 10 types (float16/32/64, int8/16/32/64, uint8/32, bool) with NumPy/PyTorch roundtrip, `gpu.cast()` for conversion
+- **Template kernel dispatch** — all MSL kernels generated from parameterized templates, unified code path for all dtypes
 - **Kernel fusion** — auto-detect element-wise chains, generate fused MSL at runtime
 - **Two backends** — MetalBackend (direct Metal, macOS) and SocketBackend (wire protocol, Linux containers)
 - **Container GPU access** — `gpu-container run` CLI, auto-start gpu-service, TCP bridge, multi-client with fair scheduling
@@ -206,7 +210,7 @@ No TCP bridge, no port forwarding, no special networking required.
 
 ### Test Coverage
 
-~600 tests across all layers (283 Rust + 13 Swift + ~300 Python)
+~650 tests across all layers (327 Rust + 16 Swift + ~306 Python)
 
 ## Examples
 
