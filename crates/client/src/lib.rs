@@ -60,6 +60,56 @@ impl GpuClient {
         Self::handshake(Box::new(stream), requested_memory)
     }
 
+    /// Auto-detect the best available transport and connect.
+    ///
+    /// Detection order:
+    /// 1. /dev/vsock exists → vsock (CID=2, port from APPLEGPU_VSOCK_PORT or 5678)
+    /// 2. APPLEGPU_SOCKET env → Unix socket at that path
+    /// 3. APPLEGPU_HOST + APPLEGPU_PORT env → TCP
+    /// 4. Default /var/run/applegpu.sock → Unix socket
+    /// 5. Error with diagnostic message
+    pub fn connect_auto(requested_memory: u64) -> Result<Self> {
+        // 1. vsock
+        if std::path::Path::new("/dev/vsock").exists() {
+            let port: u32 = std::env::var("APPLEGPU_VSOCK_PORT")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(DEFAULT_VSOCK_PORT);
+            match Self::connect_vsock(port, requested_memory) {
+                Ok(client) => return Ok(client),
+                Err(_) => {} // fall through to next transport
+            }
+        }
+
+        // 2. APPLEGPU_SOCKET env
+        if let Ok(path) = std::env::var("APPLEGPU_SOCKET") {
+            return Self::connect_unix(&path, requested_memory);
+        }
+
+        // 3. APPLEGPU_HOST + APPLEGPU_PORT env → TCP
+        if let (Ok(host), Ok(port_str)) = (
+            std::env::var("APPLEGPU_HOST"),
+            std::env::var("APPLEGPU_PORT"),
+        ) {
+            if let Ok(port) = port_str.parse::<u16>() {
+                return Self::connect_tcp(&host, port, requested_memory);
+            }
+        }
+
+        // 4. Default Unix socket path
+        let default_path = "/var/run/applegpu.sock";
+        if std::path::Path::new(default_path).exists() {
+            return Self::connect_unix(default_path, requested_memory);
+        }
+
+        // 5. Nothing found
+        Err(ClientError::Protocol(
+            "No transport available. Set APPLEGPU_SOCKET, APPLEGPU_HOST+APPLEGPU_PORT, \
+             or ensure /var/run/applegpu.sock exists."
+                .to_string(),
+        ))
+    }
+
     fn handshake(mut stream: Box<dyn Transport>, requested_memory: u64) -> Result<Self> {
         let hs = HandshakeRequest {
             protocol_version: PROTOCOL_VERSION,
@@ -279,6 +329,16 @@ mod tests {
         let result = GpuClient::handshake(Box::new(client_stream), 1024);
         assert!(result.is_err());
         server.join().unwrap();
+    }
+
+    #[test]
+    fn connect_auto_falls_back_to_error() {
+        // With no env vars set and no /dev/vsock, connect_auto should
+        // try the default path (which won't exist in test) and return an error.
+        // Note: env var manipulation is not thread-safe, so this test is best-effort.
+        let result = GpuClient::connect_auto(1024 * 1024);
+        // Should fail since no gpu-service is running
+        assert!(result.is_err());
     }
 
     #[test]
