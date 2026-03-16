@@ -97,8 +97,36 @@ pub trait Backend: Send + Sync {
     fn triu(&self, a: u64, diagonal: i32) -> BackendResult<u64>;
     fn tril(&self, a: u64, diagonal: i32) -> BackendResult<u64>;
 
+    // Comparison ops
+    fn lt(&self, a: u64, b: u64) -> BackendResult<u64>;
+    fn gt(&self, a: u64, b: u64) -> BackendResult<u64>;
+    fn le(&self, a: u64, b: u64) -> BackendResult<u64>;
+    fn ge(&self, a: u64, b: u64) -> BackendResult<u64>;
+    fn eq_op(&self, a: u64, b: u64) -> BackendResult<u64>;
+    fn ne_op(&self, a: u64, b: u64) -> BackendResult<u64>;
+
+    // Bitwise ops
+    fn bitwise_and(&self, a: u64, b: u64) -> BackendResult<u64>;
+    fn bitwise_or(&self, a: u64, b: u64) -> BackendResult<u64>;
+    fn bitwise_xor(&self, a: u64, b: u64) -> BackendResult<u64>;
+    fn bitwise_not(&self, a: u64) -> BackendResult<u64>;
+    fn shl(&self, a: u64, shift: u32) -> BackendResult<u64>;
+    fn shr(&self, a: u64, shift: u32) -> BackendResult<u64>;
+
+    // Modulo
+    fn mod_op(&self, a: u64, b: u64) -> BackendResult<u64>;
+
+    // Element-wise min/max
+    fn elem_min(&self, a: u64, b: u64) -> BackendResult<u64>;
+    fn elem_max(&self, a: u64, b: u64) -> BackendResult<u64>;
+
+    // Logical NOT
+    fn logical_not(&self, a: u64) -> BackendResult<u64>;
+
     // Type conversion
     fn cast(&self, a: u64, target_dtype: &str) -> BackendResult<u64>;
+    fn quantize(&self, a: u64, target_dtype: &str, scale: f32, zero_point: i32) -> BackendResult<u64>;
+    fn dequantize(&self, a: u64, target_dtype: &str, scale: f32, zero_point: i32) -> BackendResult<u64>;
 
     // Indexing
     fn gather(&self, input: u64, dim: usize, index: u64) -> BackendResult<u64>;

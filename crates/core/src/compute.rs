@@ -1462,6 +1462,13 @@ impl KernelRegistry {
                     kt::unary_kernel_source(dtype)
                 }
             }
+            "lt" | "gt" | "le" | "ge" | "eq" | "ne" => kt::comparison_kernel_source(dtype),
+            "bitwise_and" | "bitwise_or" | "bitwise_xor" => kt::bitwise_binary_kernel_source(dtype),
+            "bitwise_not" => kt::bitwise_not_kernel_source(dtype),
+            "shl" | "shr" => kt::shift_kernel_source(dtype),
+            "mod" => kt::mod_kernel_source(dtype),
+            "elem_min" | "elem_max" => kt::elem_minmax_kernel_source(dtype),
+            "logical_not" => return (kt::logical_not_kernel_source(), "logical_not_bool".to_string()),
             "scalar_mul" => kt::scalar_mul_kernel_source(dtype),
             "pow" => kt::pow_kernel_source(dtype),
             "clamp" => kt::clamp_kernel_source(dtype),
@@ -1493,7 +1500,7 @@ impl KernelRegistry {
             "conv2d_backward_input" => kt::conv2d_backward_input_kernel_source(dtype),
             "embedding_backward" => kt::embedding_backward_kernel_source(dtype),
             "batch_norm_backward" => kt::batch_norm_backward_kernel_source(dtype),
-            "transpose" => kt::transpose_kernel_source(dtype),
+            "transpose" => return (kt::byte_copy_transpose_source(dtype.size_bytes()), format!("transpose_bytes{}", dtype.size_bytes())),
             "transpose_batched" => kt::transpose_batched_kernel_source(dtype),
             "copy_strided" => kt::copy_strided_kernel_source(dtype),
             "slice_dim0" => return (kt::byte_copy_slice_dim0_source(dtype.size_bytes()), format!("slice_dim0_bytes{}", dtype.size_bytes())),
@@ -1512,6 +1519,22 @@ impl KernelRegistry {
         use crate::kernel_templates as kt;
         let source = kt::cast_kernel_source(src, dst);
         let func_name = format!("cast{}_to{}", kt::dtype_suffix(src), kt::dtype_suffix(dst));
+        (source, func_name)
+    }
+
+    /// Resolve kernel source and function name for a quantize operation.
+    pub fn resolve_quantize_kernel(src: DType, dst: DType, scale: f32, zero_point: i32) -> (String, String) {
+        use crate::kernel_templates as kt;
+        let source = kt::quantize_kernel_source(src, dst, scale, zero_point);
+        let func_name = format!("quantize{}_to{}", kt::dtype_suffix(src), kt::dtype_suffix(dst));
+        (source, func_name)
+    }
+
+    /// Resolve kernel source and function name for a dequantize operation.
+    pub fn resolve_dequantize_kernel(src: DType, dst: DType, scale: f32, zero_point: i32) -> (String, String) {
+        use crate::kernel_templates as kt;
+        let source = kt::dequantize_kernel_source(src, dst, scale, zero_point);
+        let func_name = format!("dequantize{}_to{}", kt::dtype_suffix(src), kt::dtype_suffix(dst));
         (source, func_name)
     }
 

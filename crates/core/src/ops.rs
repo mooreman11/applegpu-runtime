@@ -15,6 +15,145 @@ fn validate_compute_dtype(dtype: DType) -> Result<()> {
     Ok(())
 }
 
+/// Validate that an op supports the given dtype.
+///
+/// Coverage matrix:
+/// - Float-only: Exp, Log, Sqrt, Tanh, Relu, Gelu, Softmax, SoftmaxCausal, Matmul,
+///   LayerNorm, BatchNorm, Conv1d, Conv2d, MaxPool2d, AvgPool2d, AddBias, Embedding,
+///   Mean, and all backward ops
+/// - Numeric (float + Int32/Int64/UInt8/UInt32, NOT Bool/Int8/Int16):
+///   Add, Sub, Mul, Div, Neg, Abs, Sign, Clamp, ScalarMul, Pow
+/// - All-dtype: Cast, Reshape, Transpose, Slice, Concat, Where, MaskedFill, Triu, Tril
+/// - All except Bool: Gather, IndexSelect, Sum, Argmax
+/// - FusedElementwise: validated at fusion time (pass through)
+pub fn validate_op_dtype(op: &OpKind, dtype: DType) -> Result<()> {
+    // Always reject Float64 (no Metal support)
+    validate_compute_dtype(dtype)?;
+
+    match op {
+        // Float-only ops
+        OpKind::Exp | OpKind::Log | OpKind::Sqrt | OpKind::Tanh |
+        OpKind::Relu | OpKind::Gelu |
+        OpKind::Softmax | OpKind::SoftmaxCausal |
+        OpKind::Matmul |
+        OpKind::LayerNorm { .. } | OpKind::BatchNorm { .. } |
+        OpKind::Conv1d { .. } | OpKind::Conv2d { .. } |
+        OpKind::MaxPool2d { .. } | OpKind::AvgPool2d { .. } |
+        OpKind::AddBias | OpKind::Embedding |
+        OpKind::Mean |
+        OpKind::SoftmaxBackward | OpKind::LayerNormBackward { .. } |
+        OpKind::Conv2dBackwardInput { .. } | OpKind::EmbeddingBackward |
+        OpKind::BatchNormBackward { .. } => {
+            if !dtype.is_float() {
+                return Err(GpuError::UnsupportedDtype(format!(
+                    "{:?} requires a float dtype, got {}", op, dtype.name()
+                )));
+            }
+        }
+
+        // Numeric ops: float + Int32/Int64/UInt8/UInt32 (NOT Bool, Int8, Int16)
+        OpKind::Add | OpKind::Sub | OpKind::Mul | OpKind::Div |
+        OpKind::Neg | OpKind::Abs | OpKind::Sign |
+        OpKind::Clamp { .. } | OpKind::ScalarMul(_) | OpKind::Pow { .. } => {
+            match dtype {
+                DType::Bool | DType::Int8 | DType::Int16 => {
+                    return Err(GpuError::UnsupportedDtype(format!(
+                        "{:?} does not support {}", op, dtype.name()
+                    )));
+                }
+                _ => {} // Float32, Float16, BFloat16, Int32, Int64, UInt8, UInt32 are OK
+            }
+        }
+
+        // All-dtype ops (any non-Float64 dtype is fine)
+        OpKind::Cast { .. } | OpKind::Reshape { .. } | OpKind::Transpose { .. } |
+        OpKind::Slice { .. } | OpKind::Concat { .. } |
+        OpKind::Where | OpKind::MaskedFill { .. } |
+        OpKind::Triu { .. } | OpKind::Tril { .. } => {}
+
+        // All except Bool
+        OpKind::Gather { .. } | OpKind::IndexSelect { .. } |
+        OpKind::Sum | OpKind::Argmax => {
+            if matches!(dtype, DType::Bool) {
+                return Err(GpuError::UnsupportedDtype(format!(
+                    "{:?} does not support bool dtype", op
+                )));
+            }
+        }
+
+        // Comparison: ordered comparisons need numeric types (not Bool)
+        OpKind::Lt | OpKind::Gt | OpKind::Le | OpKind::Ge => {
+            if !(dtype.is_float() || matches!(dtype, DType::Int32 | DType::Int64 | DType::UInt8 | DType::UInt32)) {
+                return Err(GpuError::UnsupportedDtype(format!(
+                    "{:?} does not support {}", op, dtype.name()
+                )));
+            }
+        }
+
+        // Equality: works for all numeric types + Bool
+        OpKind::Eq | OpKind::Ne => {
+            if !(dtype.is_float() || matches!(dtype, DType::Int32 | DType::Int64 | DType::UInt8 | DType::UInt32 | DType::Bool)) {
+                return Err(GpuError::UnsupportedDtype(format!(
+                    "{:?} does not support {}", op, dtype.name()
+                )));
+            }
+        }
+
+        // Bitwise binary + NOT: integer types + Bool
+        OpKind::BitwiseAnd | OpKind::BitwiseOr | OpKind::BitwiseXor | OpKind::BitwiseNot => {
+            if !matches!(dtype, DType::Int32 | DType::Int64 | DType::UInt8 | DType::UInt32 | DType::Bool) {
+                return Err(GpuError::UnsupportedDtype(format!(
+                    "{:?} requires an integer or Bool dtype, got {}", op, dtype.name()
+                )));
+            }
+        }
+
+        // Shift: integer types only (no Bool)
+        OpKind::Shl { .. } | OpKind::Shr { .. } => {
+            if !matches!(dtype, DType::Int32 | DType::Int64 | DType::UInt8 | DType::UInt32) {
+                return Err(GpuError::UnsupportedDtype(format!(
+                    "{:?} requires an integer dtype, got {}", op, dtype.name()
+                )));
+            }
+        }
+
+        // Modulo: integer types only (no Bool, no float)
+        OpKind::Mod => {
+            if !matches!(dtype, DType::Int32 | DType::Int64 | DType::UInt8 | DType::UInt32) {
+                return Err(GpuError::UnsupportedDtype(format!(
+                    "{:?} requires an integer dtype, got {}", op, dtype.name()
+                )));
+            }
+        }
+
+        // Element-wise min/max: float + integer (not Bool)
+        OpKind::ElemMin | OpKind::ElemMax => {
+            if !(dtype.is_float() || matches!(dtype, DType::Int32 | DType::Int64 | DType::UInt8 | DType::UInt32)) {
+                return Err(GpuError::UnsupportedDtype(format!(
+                    "{:?} does not support {}", op, dtype.name()
+                )));
+            }
+        }
+
+        // Logical NOT: Bool only
+        OpKind::LogicalNot => {
+            if !matches!(dtype, DType::Bool) {
+                return Err(GpuError::UnsupportedDtype(format!(
+                    "LogicalNot requires Bool dtype, got {}", dtype.name()
+                )));
+            }
+        }
+
+        // Quantize/Dequantize: validated specially (src + dst checked by the op functions)
+        OpKind::Quantize { .. } | OpKind::Dequantize { .. } => {}
+
+        // FusedElementwise: validated at fusion time
+        OpKind::FusedElementwise { .. } => {}
+    }
+
+    Ok(())
+}
+
 static OP_ID_COUNTER: AtomicU64 = AtomicU64::new(100_000);
 
 fn next_id() -> u64 {
@@ -24,12 +163,7 @@ fn next_id() -> u64 {
 /// Record a binary element-wise op in the graph.
 fn lazy_binary_op(rt: &mut LazyRuntime, a_id: u64, b_id: u64, op: OpKind) -> Result<u64> {
     let a_dtype = rt.dtype(a_id)?;
-    validate_compute_dtype(a_dtype)?;
     let b_dtype = rt.dtype(b_id)?;
-    validate_compute_dtype(b_dtype)?;
-
-    let a_shape_vec = rt.shape(a_id)?;
-    let b_shape_vec = rt.shape(b_id)?;
 
     if a_dtype != b_dtype {
         return Err(GpuError::InvalidTensor(format!(
@@ -37,6 +171,11 @@ fn lazy_binary_op(rt: &mut LazyRuntime, a_id: u64, b_id: u64, op: OpKind) -> Res
             a_dtype, b_dtype
         )));
     }
+
+    validate_op_dtype(&op, a_dtype)?;
+
+    let a_shape_vec = rt.shape(a_id)?;
+    let b_shape_vec = rt.shape(b_id)?;
 
     let a_shape_obj = Shape::new(a_shape_vec)?;
     let b_shape_obj = Shape::new(b_shape_vec)?;
@@ -57,7 +196,7 @@ fn lazy_binary_op(rt: &mut LazyRuntime, a_id: u64, b_id: u64, op: OpKind) -> Res
 /// Record a unary element-wise op in the graph.
 fn lazy_unary_op(rt: &mut LazyRuntime, input_id: u64, op: OpKind) -> Result<u64> {
     let out_dtype = rt.dtype(input_id)?;
-    validate_compute_dtype(out_dtype)?;
+    validate_op_dtype(&op, out_dtype)?;
     let shape = rt.shape(input_id)?;
     let out_id = next_id();
     rt.record_op(OpNode {
@@ -69,6 +208,94 @@ fn lazy_unary_op(rt: &mut LazyRuntime, input_id: u64, op: OpKind) -> Result<u64>
         container_id: ContainerId::DEFAULT,
     });
     Ok(out_id)
+}
+
+/// Record a comparison op in the graph. Output dtype is always Bool.
+fn lazy_comparison_op(rt: &mut LazyRuntime, a_id: u64, b_id: u64, op: OpKind) -> Result<u64> {
+    let a_dtype = rt.dtype(a_id)?;
+    validate_compute_dtype(a_dtype)?;
+    let b_dtype = rt.dtype(b_id)?;
+    if a_dtype != b_dtype {
+        return Err(GpuError::InvalidTensor(format!(
+            "Dtype mismatch: {:?} vs {:?}",
+            a_dtype, b_dtype
+        )));
+    }
+    validate_op_dtype(&op, a_dtype)?;
+    let a_shape_obj = Shape::new(rt.shape(a_id)?)?;
+    let b_shape_obj = Shape::new(rt.shape(b_id)?)?;
+    let out_shape = a_shape_obj.broadcast_with(&b_shape_obj)?;
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op,
+        inputs: vec![a_id, b_id],
+        out_shape,
+        out_dtype: DType::Bool,
+        container_id: ContainerId::DEFAULT,
+    });
+    Ok(out_id)
+}
+
+pub fn lt(rt: &mut LazyRuntime, a: u64, b: u64) -> Result<u64> { lazy_comparison_op(rt, a, b, OpKind::Lt) }
+pub fn gt(rt: &mut LazyRuntime, a: u64, b: u64) -> Result<u64> { lazy_comparison_op(rt, a, b, OpKind::Gt) }
+pub fn le(rt: &mut LazyRuntime, a: u64, b: u64) -> Result<u64> { lazy_comparison_op(rt, a, b, OpKind::Le) }
+pub fn ge(rt: &mut LazyRuntime, a: u64, b: u64) -> Result<u64> { lazy_comparison_op(rt, a, b, OpKind::Ge) }
+pub fn eq_op(rt: &mut LazyRuntime, a: u64, b: u64) -> Result<u64> { lazy_comparison_op(rt, a, b, OpKind::Eq) }
+pub fn ne_op(rt: &mut LazyRuntime, a: u64, b: u64) -> Result<u64> { lazy_comparison_op(rt, a, b, OpKind::Ne) }
+
+// Bitwise ops
+pub fn bitwise_and(rt: &mut LazyRuntime, a: u64, b: u64) -> Result<u64> { lazy_binary_op(rt, a, b, OpKind::BitwiseAnd) }
+pub fn bitwise_or(rt: &mut LazyRuntime, a: u64, b: u64) -> Result<u64> { lazy_binary_op(rt, a, b, OpKind::BitwiseOr) }
+pub fn bitwise_xor(rt: &mut LazyRuntime, a: u64, b: u64) -> Result<u64> { lazy_binary_op(rt, a, b, OpKind::BitwiseXor) }
+pub fn bitwise_not(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> { lazy_unary_op(rt, input_id, OpKind::BitwiseNot) }
+
+/// Shift left by constant amount.
+pub fn shl(rt: &mut LazyRuntime, input_id: u64, shift: u32) -> Result<u64> {
+    let dtype = rt.dtype(input_id)?;
+    let op = OpKind::Shl { shift };
+    validate_op_dtype(&op, dtype)?;
+    let shape = rt.shape(input_id)?;
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op,
+        inputs: vec![input_id],
+        out_shape: Shape::new(shape)?,
+        out_dtype: dtype,
+        container_id: ContainerId::DEFAULT,
+    });
+    Ok(out_id)
+}
+
+/// Shift right by constant amount.
+pub fn shr(rt: &mut LazyRuntime, input_id: u64, shift: u32) -> Result<u64> {
+    let dtype = rt.dtype(input_id)?;
+    let op = OpKind::Shr { shift };
+    validate_op_dtype(&op, dtype)?;
+    let shape = rt.shape(input_id)?;
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op,
+        inputs: vec![input_id],
+        out_shape: Shape::new(shape)?,
+        out_dtype: dtype,
+        container_id: ContainerId::DEFAULT,
+    });
+    Ok(out_id)
+}
+
+// Modulo
+pub fn mod_op(rt: &mut LazyRuntime, a: u64, b: u64) -> Result<u64> { lazy_binary_op(rt, a, b, OpKind::Mod) }
+
+// Element-wise min/max
+pub fn elem_min(rt: &mut LazyRuntime, a: u64, b: u64) -> Result<u64> { lazy_binary_op(rt, a, b, OpKind::ElemMin) }
+pub fn elem_max(rt: &mut LazyRuntime, a: u64, b: u64) -> Result<u64> { lazy_binary_op(rt, a, b, OpKind::ElemMax) }
+
+/// Logical NOT (Bool only).
+pub fn logical_not(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
+    lazy_unary_op(rt, input_id, OpKind::LogicalNot)
 }
 
 pub fn add(rt: &mut LazyRuntime, a_id: u64, b_id: u64) -> Result<u64> {
@@ -118,12 +345,13 @@ pub fn sign(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
 /// Element-wise power by scalar exponent.
 pub fn pow(rt: &mut LazyRuntime, input_id: u64, exponent: f32) -> Result<u64> {
     let dtype = rt.dtype(input_id)?;
-    validate_compute_dtype(dtype)?;
+    let op = OpKind::Pow { exponent: ScalarValue::from_f32(exponent) };
+    validate_op_dtype(&op, dtype)?;
     let shape = rt.shape(input_id)?;
     let out_id = next_id();
     rt.record_op(OpNode {
         id: out_id,
-        op: OpKind::Pow { exponent: ScalarValue::from_f32(exponent) },
+        op,
         inputs: vec![input_id],
         out_shape: Shape::new(shape)?,
         out_dtype: dtype,
@@ -135,12 +363,13 @@ pub fn pow(rt: &mut LazyRuntime, input_id: u64, exponent: f32) -> Result<u64> {
 /// Element-wise clamp to [min_val, max_val].
 pub fn clamp(rt: &mut LazyRuntime, input_id: u64, min_val: f32, max_val: f32) -> Result<u64> {
     let dtype = rt.dtype(input_id)?;
-    validate_compute_dtype(dtype)?;
+    let op = OpKind::Clamp { min_val: ScalarValue::from_f32(min_val), max_val: ScalarValue::from_f32(max_val) };
+    validate_op_dtype(&op, dtype)?;
     let shape = rt.shape(input_id)?;
     let out_id = next_id();
     rt.record_op(OpNode {
         id: out_id,
-        op: OpKind::Clamp { min_val: ScalarValue::from_f32(min_val), max_val: ScalarValue::from_f32(max_val) },
+        op,
         inputs: vec![input_id],
         out_shape: Shape::new(shape)?,
         out_dtype: dtype,
@@ -152,9 +381,9 @@ pub fn clamp(rt: &mut LazyRuntime, input_id: u64, min_val: f32, max_val: f32) ->
 /// Record a matmul op. Validates 2D shapes and inner dimension match.
 pub fn matmul(rt: &mut LazyRuntime, a_id: u64, b_id: u64) -> Result<u64> {
     let a_dtype = rt.dtype(a_id)?;
-    validate_compute_dtype(a_dtype)?;
+    validate_op_dtype(&OpKind::Matmul, a_dtype)?;
     let b_dtype = rt.dtype(b_id)?;
-    validate_compute_dtype(b_dtype)?;
+    validate_op_dtype(&OpKind::Matmul, b_dtype)?;
 
     let a_shape = rt.shape(a_id)?;
     let b_shape = rt.shape(b_id)?;
@@ -226,7 +455,7 @@ pub fn matmul(rt: &mut LazyRuntime, a_id: u64, b_id: u64) -> Result<u64> {
 /// Leading dims are treated as independent rows (flattened).
 pub fn softmax(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
     let dtype = rt.dtype(input_id)?;
-    validate_compute_dtype(dtype)?;
+    validate_op_dtype(&OpKind::Softmax, dtype)?;
     let shape = rt.shape(input_id)?;
     if shape.is_empty() {
         return Err(GpuError::InvalidTensor(
@@ -249,7 +478,7 @@ pub fn softmax(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
 /// General transpose: swap dimensions dim0 and dim1.
 pub fn transpose_dims(rt: &mut LazyRuntime, input_id: u64, dim0: usize, dim1: usize) -> Result<u64> {
     let dtype = rt.dtype(input_id)?;
-    validate_compute_dtype(dtype)?;
+    validate_op_dtype(&OpKind::Transpose { dim0, dim1 }, dtype)?;
     let shape = rt.shape(input_id)?;
     let ndim = shape.len();
 
@@ -292,12 +521,13 @@ pub fn transpose(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
 /// Multiply every element by a scalar.
 pub fn scalar_mul(rt: &mut LazyRuntime, input_id: u64, scale: f32) -> Result<u64> {
     let dtype = rt.dtype(input_id)?;
-    validate_compute_dtype(dtype)?;
+    let op = OpKind::ScalarMul(ScalarValue::from_f32(scale));
+    validate_op_dtype(&op, dtype)?;
     let shape = rt.shape(input_id)?;
     let out_id = next_id();
     rt.record_op(OpNode {
         id: out_id,
-        op: OpKind::ScalarMul(ScalarValue::from_f32(scale)),
+        op,
         inputs: vec![input_id],
         out_shape: Shape::new(shape)?,
         out_dtype: dtype,
@@ -341,7 +571,7 @@ pub fn gelu(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
 pub fn layer_norm(rt: &mut LazyRuntime, input_id: u64, gamma_id: u64, beta_id: u64, eps: f32) -> Result<u64> {
     let input_shape = rt.shape(input_id)?;
     let input_dtype = rt.dtype(input_id)?;
-    validate_compute_dtype(input_dtype)?;
+    validate_op_dtype(&OpKind::LayerNorm { eps }, input_dtype)?;
 
     if input_shape.is_empty() {
         return Err(GpuError::InvalidTensor("layer_norm requires at least 1D input".to_string()));
@@ -378,7 +608,7 @@ pub fn layer_norm(rt: &mut LazyRuntime, input_id: u64, gamma_id: u64, beta_id: u
 pub fn softmax_backward(rt: &mut LazyRuntime, grad_output_id: u64, output_id: u64) -> Result<u64> {
     let grad_shape = rt.shape(grad_output_id)?;
     let grad_dtype = rt.dtype(grad_output_id)?;
-    validate_compute_dtype(grad_dtype)?;
+    validate_op_dtype(&OpKind::SoftmaxBackward, grad_dtype)?;
     let out_shape = rt.shape(output_id)?;
     let out_dtype = rt.dtype(output_id)?;
 
@@ -413,7 +643,7 @@ pub fn softmax_backward(rt: &mut LazyRuntime, grad_output_id: u64, output_id: u6
 pub fn layer_norm_backward(rt: &mut LazyRuntime, grad_output_id: u64, input_id: u64, gamma_id: u64, eps: f32) -> Result<u64> {
     let grad_shape = rt.shape(grad_output_id)?;
     let grad_dtype = rt.dtype(grad_output_id)?;
-    validate_compute_dtype(grad_dtype)?;
+    validate_op_dtype(&OpKind::LayerNormBackward { eps }, grad_dtype)?;
     let input_shape = rt.shape(input_id)?;
     let input_dtype = rt.dtype(input_id)?;
 
@@ -465,7 +695,7 @@ pub fn conv2d_backward_input(
     padding: (usize, usize),
 ) -> Result<u64> {
     let grad_dtype = rt.dtype(grad_output_id)?;
-    validate_compute_dtype(grad_dtype)?;
+    validate_op_dtype(&OpKind::Conv2dBackwardInput { stride, padding }, grad_dtype)?;
     let w_dtype = rt.dtype(weight_id)?;
     if grad_dtype != w_dtype {
         return Err(GpuError::InvalidTensor(format!(
@@ -518,7 +748,7 @@ pub fn embedding_backward(
     num_weights: usize,
 ) -> Result<u64> {
     let grad_dtype = rt.dtype(grad_output_id)?;
-    validate_compute_dtype(grad_dtype)?;
+    validate_op_dtype(&OpKind::EmbeddingBackward, grad_dtype)?;
     let indices_dtype = rt.dtype(indices_id)?;
 
     if indices_dtype != DType::Int32 {
@@ -575,7 +805,7 @@ pub fn batch_norm_backward(
     eps: f32,
 ) -> Result<u64> {
     let grad_dtype = rt.dtype(grad_output_id)?;
-    validate_compute_dtype(grad_dtype)?;
+    validate_op_dtype(&OpKind::BatchNormBackward { eps }, grad_dtype)?;
 
     let grad_shape = rt.shape(grad_output_id)?;
     if grad_shape.len() < 2 {
@@ -618,7 +848,7 @@ pub fn embedding(rt: &mut LazyRuntime, weights_id: u64, indices_id: u64) -> Resu
     let indices_shape = rt.shape(indices_id)?;
     let indices_dtype = rt.dtype(indices_id)?;
 
-    validate_compute_dtype(weights_dtype)?;
+    validate_op_dtype(&OpKind::Embedding, weights_dtype)?;
 
     if weights_shape.len() != 2 {
         return Err(GpuError::InvalidTensor("embedding weights must be 2D [vocab_size, embed_dim]".to_string()));
@@ -654,7 +884,7 @@ pub fn embedding(rt: &mut LazyRuntime, weights_id: u64, indices_id: u64) -> Resu
 /// dim=0 slices rows, dim=1 slices columns.
 pub fn slice(rt: &mut LazyRuntime, input_id: u64, dim: usize, start: usize, end: usize) -> Result<u64> {
     let dtype = rt.dtype(input_id)?;
-    validate_compute_dtype(dtype)?;
+    validate_op_dtype(&OpKind::Slice { dim, start, end }, dtype)?;
     let shape = rt.shape(input_id)?;
 
     if dim >= shape.len() {
@@ -691,7 +921,7 @@ pub fn slice(rt: &mut LazyRuntime, input_id: u64, dim: usize, start: usize, end:
 /// Concat: concatenate two tensors along a given dimension.
 pub fn concat(rt: &mut LazyRuntime, a_id: u64, b_id: u64, dim: usize) -> Result<u64> {
     let a_dtype = rt.dtype(a_id)?;
-    validate_compute_dtype(a_dtype)?;
+    validate_op_dtype(&OpKind::Concat { dim }, a_dtype)?;
     let b_dtype = rt.dtype(b_id)?;
     if a_dtype != b_dtype {
         return Err(GpuError::InvalidTensor(format!(
@@ -740,7 +970,7 @@ pub fn concat(rt: &mut LazyRuntime, a_id: u64, b_id: u64, dim: usize) -> Result<
 /// input: [rows, cols], bias: [cols] -> output: [rows, cols]
 pub fn add_bias(rt: &mut LazyRuntime, input_id: u64, bias_id: u64) -> Result<u64> {
     let input_dtype = rt.dtype(input_id)?;
-    validate_compute_dtype(input_dtype)?;
+    validate_op_dtype(&OpKind::AddBias, input_dtype)?;
     let bias_dtype = rt.dtype(bias_id)?;
     if input_dtype != bias_dtype {
         return Err(GpuError::InvalidTensor(format!(
@@ -785,7 +1015,7 @@ pub fn add_bias(rt: &mut LazyRuntime, input_id: u64, bias_id: u64) -> Result<u64
 /// Requires at least 2 dims. Last 2 dims are [rows, cols] for the causal mask.
 pub fn softmax_causal(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
     let dtype = rt.dtype(input_id)?;
-    validate_compute_dtype(dtype)?;
+    validate_op_dtype(&OpKind::SoftmaxCausal, dtype)?;
     let shape = rt.shape(input_id)?;
     if shape.len() < 2 {
         return Err(GpuError::InvalidTensor(format!(
@@ -808,7 +1038,7 @@ pub fn softmax_causal(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
 /// 2D [rows, cols] -> [rows]. 1D [cols] -> [1].
 pub fn argmax(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
     let input_dtype = rt.dtype(input_id)?;
-    validate_compute_dtype(input_dtype)?;
+    validate_op_dtype(&OpKind::Argmax, input_dtype)?;
     let shape = rt.shape(input_id)?;
 
     let (out_shape, _rows, _cols) = if shape.len() == 2 {
@@ -838,7 +1068,7 @@ pub fn argmax(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
 pub fn sum(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
     let shape = rt.shape(input_id)?;
     let dtype = rt.dtype(input_id)?;
-    validate_compute_dtype(dtype)?;
+    validate_op_dtype(&OpKind::Sum, dtype)?;
     if shape.is_empty() {
         return Err(GpuError::InvalidTensor("sum requires at least 1D tensor".into()));
     }
@@ -861,7 +1091,7 @@ pub fn sum(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
 pub fn mean(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
     let shape = rt.shape(input_id)?;
     let dtype = rt.dtype(input_id)?;
-    validate_compute_dtype(dtype)?;
+    validate_op_dtype(&OpKind::Mean, dtype)?;
     if shape.is_empty() {
         return Err(GpuError::InvalidTensor("mean requires at least 1D tensor".into()));
     }
@@ -975,11 +1205,11 @@ pub fn attention_causal(rt: &mut LazyRuntime, q_id: u64, k_id: u64, v_id: u64) -
 /// All three inputs broadcast together.
 pub fn where_cond(rt: &mut LazyRuntime, cond_id: u64, x_id: u64, y_id: u64) -> Result<u64> {
     let cond_dtype = rt.dtype(cond_id)?;
-    validate_compute_dtype(cond_dtype)?;
+    validate_op_dtype(&OpKind::Where, cond_dtype)?;
     let x_dtype = rt.dtype(x_id)?;
-    validate_compute_dtype(x_dtype)?;
+    validate_op_dtype(&OpKind::Where, x_dtype)?;
     let y_dtype = rt.dtype(y_id)?;
-    validate_compute_dtype(y_dtype)?;
+    validate_op_dtype(&OpKind::Where, y_dtype)?;
 
     if x_dtype != y_dtype {
         return Err(GpuError::InvalidTensor(format!(
@@ -1011,9 +1241,9 @@ pub fn where_cond(rt: &mut LazyRuntime, cond_id: u64, x_id: u64, y_id: u64) -> R
 /// Input and mask broadcast together.
 pub fn masked_fill(rt: &mut LazyRuntime, input_id: u64, mask_id: u64, value: f32) -> Result<u64> {
     let in_dtype = rt.dtype(input_id)?;
-    validate_compute_dtype(in_dtype)?;
+    validate_op_dtype(&OpKind::MaskedFill { value: ScalarValue::from_f32(value) }, in_dtype)?;
     let mask_dtype = rt.dtype(mask_id)?;
-    validate_compute_dtype(mask_dtype)?;
+    validate_op_dtype(&OpKind::MaskedFill { value: ScalarValue::from_f32(value) }, mask_dtype)?;
 
     let in_shape = Shape::new(rt.shape(input_id)?)?;
     let mask_shape = Shape::new(rt.shape(mask_id)?)?;
@@ -1035,7 +1265,7 @@ pub fn masked_fill(rt: &mut LazyRuntime, input_id: u64, mask_id: u64, value: f32
 /// Input must be at least 2D. Operates on last two dims.
 pub fn triu(rt: &mut LazyRuntime, input_id: u64, diagonal: i32) -> Result<u64> {
     let dtype = rt.dtype(input_id)?;
-    validate_compute_dtype(dtype)?;
+    validate_op_dtype(&OpKind::Triu { diagonal }, dtype)?;
     let shape = rt.shape(input_id)?;
     if shape.len() < 2 {
         return Err(GpuError::InvalidTensor(
@@ -1058,7 +1288,7 @@ pub fn triu(rt: &mut LazyRuntime, input_id: u64, diagonal: i32) -> Result<u64> {
 /// Input must be at least 2D. Operates on last two dims.
 pub fn tril(rt: &mut LazyRuntime, input_id: u64, diagonal: i32) -> Result<u64> {
     let dtype = rt.dtype(input_id)?;
-    validate_compute_dtype(dtype)?;
+    validate_op_dtype(&OpKind::Tril { diagonal }, dtype)?;
     let shape = rt.shape(input_id)?;
     if shape.len() < 2 {
         return Err(GpuError::InvalidTensor(
@@ -1082,7 +1312,7 @@ pub fn tril(rt: &mut LazyRuntime, input_id: u64, diagonal: i32) -> Result<u64> {
 /// Output has same shape as index, same dtype as input.
 pub fn gather(rt: &mut LazyRuntime, input_id: u64, dim: usize, index_id: u64) -> Result<u64> {
     let input_dtype = rt.dtype(input_id)?;
-    validate_compute_dtype(input_dtype)?;
+    validate_op_dtype(&OpKind::Gather { dim }, input_dtype)?;
     let input_shape = rt.shape(input_id)?;
     let index_shape = rt.shape(index_id)?;
     let index_dtype = rt.dtype(index_id)?;
@@ -1137,7 +1367,7 @@ pub fn gather(rt: &mut LazyRuntime, input_id: u64, dim: usize, index_id: u64) ->
 /// Input must be 2D, index must be 1D Int32.
 pub fn index_select(rt: &mut LazyRuntime, input_id: u64, dim: usize, index_id: u64) -> Result<u64> {
     let input_dtype = rt.dtype(input_id)?;
-    validate_compute_dtype(input_dtype)?;
+    validate_op_dtype(&OpKind::IndexSelect { dim }, input_dtype)?;
     let input_shape = rt.shape(input_id)?;
     let index_shape = rt.shape(index_id)?;
     let index_dtype = rt.dtype(index_id)?;
@@ -1189,7 +1419,7 @@ pub fn index_select(rt: &mut LazyRuntime, input_id: u64, dim: usize, index_id: u
 /// output: [batch, out_channels, out_length]
 pub fn conv1d(rt: &mut LazyRuntime, input_id: u64, weight_id: u64, stride: usize, padding: usize) -> Result<u64> {
     let in_dtype = rt.dtype(input_id)?;
-    validate_compute_dtype(in_dtype)?;
+    validate_op_dtype(&OpKind::Conv1d { stride, padding }, in_dtype)?;
     let w_dtype = rt.dtype(weight_id)?;
     if in_dtype != w_dtype {
         return Err(GpuError::InvalidTensor(format!(
@@ -1245,7 +1475,7 @@ pub fn conv1d(rt: &mut LazyRuntime, input_id: u64, weight_id: u64, stride: usize
 /// output: [batch, out_channels, out_h, out_w]
 pub fn conv2d(rt: &mut LazyRuntime, input_id: u64, weight_id: u64, stride: (usize, usize), padding: (usize, usize)) -> Result<u64> {
     let in_dtype = rt.dtype(input_id)?;
-    validate_compute_dtype(in_dtype)?;
+    validate_op_dtype(&OpKind::Conv2d { stride, padding }, in_dtype)?;
     let w_dtype = rt.dtype(weight_id)?;
     if in_dtype != w_dtype {
         return Err(GpuError::InvalidTensor(format!(
@@ -1303,7 +1533,7 @@ pub fn conv2d(rt: &mut LazyRuntime, input_id: u64, weight_id: u64, stride: (usiz
 /// input: [batch, channels, ...], mean/var/weight/bias: [channels]
 pub fn batch_norm(rt: &mut LazyRuntime, input_id: u64, mean_id: u64, var_id: u64, weight_id: u64, bias_id: u64, eps: f32) -> Result<u64> {
     let in_dtype = rt.dtype(input_id)?;
-    validate_compute_dtype(in_dtype)?;
+    validate_op_dtype(&OpKind::BatchNorm { eps }, in_dtype)?;
 
     let in_shape = rt.shape(input_id)?;
     if in_shape.len() < 2 {
@@ -1345,7 +1575,7 @@ pub fn batch_norm(rt: &mut LazyRuntime, input_id: u64, mean_id: u64, var_id: u64
 /// input: [batch, channels, height, width]
 pub fn max_pool2d(rt: &mut LazyRuntime, input_id: u64, kernel_size: (usize, usize), stride: (usize, usize), padding: (usize, usize)) -> Result<u64> {
     let dtype = rt.dtype(input_id)?;
-    validate_compute_dtype(dtype)?;
+    validate_op_dtype(&OpKind::MaxPool2d { kernel_size, stride, padding }, dtype)?;
 
     let in_shape = rt.shape(input_id)?;
     if in_shape.len() != 4 {
@@ -1380,7 +1610,7 @@ pub fn max_pool2d(rt: &mut LazyRuntime, input_id: u64, kernel_size: (usize, usiz
 /// input: [batch, channels, height, width]
 pub fn avg_pool2d(rt: &mut LazyRuntime, input_id: u64, kernel_size: (usize, usize), stride: (usize, usize), padding: (usize, usize)) -> Result<u64> {
     let dtype = rt.dtype(input_id)?;
-    validate_compute_dtype(dtype)?;
+    validate_op_dtype(&OpKind::AvgPool2d { kernel_size, stride, padding }, dtype)?;
 
     let in_shape = rt.shape(input_id)?;
     if in_shape.len() != 4 {
@@ -1411,11 +1641,60 @@ pub fn avg_pool2d(rt: &mut LazyRuntime, input_id: u64, kernel_size: (usize, usiz
     Ok(out_id)
 }
 
+/// Quantize a float tensor to int8/uint8.
+pub fn quantize(rt: &mut LazyRuntime, input_id: u64, target_dtype: DType, scale: f32, zero_point: i32) -> Result<u64> {
+    let src_dtype = rt.dtype(input_id)?;
+    if !src_dtype.is_float() {
+        return Err(GpuError::UnsupportedDtype("Quantize input must be a float dtype".to_string()));
+    }
+    if !matches!(target_dtype, DType::Int8 | DType::UInt8) {
+        return Err(GpuError::UnsupportedDtype("Quantize target must be Int8 or UInt8".to_string()));
+    }
+    if scale == 0.0 {
+        return Err(GpuError::InvalidTensor("Quantize scale must be non-zero".to_string()));
+    }
+
+    let shape = rt.shape(input_id)?;
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op: OpKind::Quantize { scale, zero_point, target_dtype },
+        inputs: vec![input_id],
+        out_shape: Shape::new(shape.to_vec())?,
+        out_dtype: target_dtype,
+        container_id: ContainerId::DEFAULT,
+    });
+    Ok(out_id)
+}
+
+/// Dequantize an int8/uint8 tensor to float.
+pub fn dequantize(rt: &mut LazyRuntime, input_id: u64, target_dtype: DType, scale: f32, zero_point: i32) -> Result<u64> {
+    let src_dtype = rt.dtype(input_id)?;
+    if !matches!(src_dtype, DType::Int8 | DType::UInt8) {
+        return Err(GpuError::UnsupportedDtype("Dequantize input must be Int8 or UInt8".to_string()));
+    }
+    if !target_dtype.is_float() {
+        return Err(GpuError::UnsupportedDtype("Dequantize target must be a float dtype".to_string()));
+    }
+
+    let shape = rt.shape(input_id)?;
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op: OpKind::Dequantize { scale, zero_point, target_dtype },
+        inputs: vec![input_id],
+        out_shape: Shape::new(shape.to_vec())?,
+        out_dtype: target_dtype,
+        container_id: ContainerId::DEFAULT,
+    });
+    Ok(out_id)
+}
+
 /// Cast tensor to a different dtype.
 pub fn cast(rt: &mut LazyRuntime, input_id: u64, target_dtype: DType) -> Result<u64> {
     let src_dtype = rt.dtype(input_id)?;
-    validate_compute_dtype(src_dtype)?;
-    validate_compute_dtype(target_dtype)?;
+    validate_op_dtype(&OpKind::Cast { target_dtype }, src_dtype)?;
+    validate_op_dtype(&OpKind::Cast { target_dtype }, target_dtype)?;
 
     // No-op if already the target dtype
     if src_dtype == target_dtype {
@@ -1984,7 +2263,8 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_rejects_int32() {
+    fn test_add_accepts_int32() {
+        // Int32 is a numeric type, so Add should accept it
         let device = match get_device() { Some(d) => d, None => return };
         let mut rt = LazyRuntime::new();
         let data = [0i32; 4];
@@ -1995,7 +2275,120 @@ mod tests {
         let b_id = b.meta.id;
         rt.insert_tensor(a).unwrap();
         rt.insert_tensor(b).unwrap();
+        assert!(crate::ops::add(&mut rt, a_id, b_id).is_ok());
+    }
+
+    #[test]
+    fn exp_rejects_int32() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        let data = [1i32, 2, 3, 4];
+        let bytes = unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, 16) };
+        let a = Tensor::from_data(&device, vec![4], DType::Int32, bytes).unwrap();
+        let a_id = a.meta.id;
+        rt.insert_tensor(a).unwrap();
+        let result = crate::ops::exp(&mut rt, a_id);
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(err_msg.contains("float"), "Error should mention float requirement: {}", err_msg);
+    }
+
+    #[test]
+    fn softmax_rejects_bool() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        let data = [1u8; 4]; // Bool is 1 byte
+        let a = Tensor::from_data(&device, vec![4], DType::Bool, &data).unwrap();
+        let a_id = a.meta.id;
+        rt.insert_tensor(a).unwrap();
+        let result = crate::ops::softmax(&mut rt, a_id);
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(err_msg.contains("float"), "Error should mention float requirement: {}", err_msg);
+    }
+
+    #[test]
+    fn where_accepts_all_dtypes() {
+        let device = match get_device() { Some(d) => d, None => return };
+
+        // Test that Where accepts Bool, Int32, Float32
+        let dtypes_and_sizes: Vec<(DType, usize)> = vec![
+            (DType::Bool, 1),
+            (DType::Int32, 4),
+            (DType::Float32, 4),
+            (DType::Int8, 1),
+            (DType::Int16, 2),
+            (DType::UInt8, 1),
+        ];
+
+        for (dtype, elem_size) in dtypes_and_sizes {
+            let mut rt = LazyRuntime::new();
+            let byte_count = 4 * elem_size;
+            let data = vec![0u8; byte_count];
+            let cond = Tensor::from_data(&device, vec![4], DType::Bool, &[1u8; 4]).unwrap();
+            let x = Tensor::from_data(&device, vec![4], dtype, &data).unwrap();
+            let y = Tensor::from_data(&device, vec![4], dtype, &data).unwrap();
+            let cond_id = cond.meta.id;
+            let x_id = x.meta.id;
+            let y_id = y.meta.id;
+            rt.insert_tensor(cond).unwrap();
+            rt.insert_tensor(x).unwrap();
+            rt.insert_tensor(y).unwrap();
+            let result = crate::ops::where_cond(&mut rt, cond_id, x_id, y_id);
+            assert!(result.is_ok(), "Where should accept {:?}, got: {:?}", dtype, result.err());
+        }
+    }
+
+    #[test]
+    fn add_rejects_bool() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        let data = [0u8; 4];
+        let a = Tensor::from_data(&device, vec![4], DType::Bool, &data).unwrap();
+        let b = Tensor::from_data(&device, vec![4], DType::Bool, &data).unwrap();
+        let a_id = a.meta.id;
+        let b_id = b.meta.id;
+        rt.insert_tensor(a).unwrap();
+        rt.insert_tensor(b).unwrap();
         assert!(crate::ops::add(&mut rt, a_id, b_id).is_err());
+    }
+
+    #[test]
+    fn matmul_rejects_int32() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        let data = [0i32; 4];
+        let bytes = unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, 16) };
+        let a = Tensor::from_data(&device, vec![2, 2], DType::Int32, bytes).unwrap();
+        let b = Tensor::from_data(&device, vec![2, 2], DType::Int32, bytes).unwrap();
+        let a_id = a.meta.id;
+        let b_id = b.meta.id;
+        rt.insert_tensor(a).unwrap();
+        rt.insert_tensor(b).unwrap();
+        assert!(crate::ops::matmul(&mut rt, a_id, b_id).is_err());
+    }
+
+    #[test]
+    fn sum_rejects_bool() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        let data = [1u8; 4];
+        let a = Tensor::from_data(&device, vec![4], DType::Bool, &data).unwrap();
+        let a_id = a.meta.id;
+        rt.insert_tensor(a).unwrap();
+        assert!(crate::ops::sum(&mut rt, a_id).is_err());
+    }
+
+    #[test]
+    fn mean_rejects_int32() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        let data = [1i32; 4];
+        let bytes = unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, 16) };
+        let a = Tensor::from_data(&device, vec![4], DType::Int32, bytes).unwrap();
+        let a_id = a.meta.id;
+        rt.insert_tensor(a).unwrap();
+        assert!(crate::ops::mean(&mut rt, a_id).is_err());
     }
 
     // ── Slice tests ──────────────────────────────────────────────────────────

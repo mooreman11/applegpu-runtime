@@ -265,11 +265,99 @@ impl Backend for MetalBackend {
         map_err!(applegpu_core::ops::mean(&mut rt, a))
     }
 
+    // Comparison ops
+    fn lt(&self, a: u64, b: u64) -> BackendResult<u64> {
+        let mut rt = self.runtime.lock().unwrap();
+        map_err!(applegpu_core::ops::lt(&mut rt, a, b))
+    }
+    fn gt(&self, a: u64, b: u64) -> BackendResult<u64> {
+        let mut rt = self.runtime.lock().unwrap();
+        map_err!(applegpu_core::ops::gt(&mut rt, a, b))
+    }
+    fn le(&self, a: u64, b: u64) -> BackendResult<u64> {
+        let mut rt = self.runtime.lock().unwrap();
+        map_err!(applegpu_core::ops::le(&mut rt, a, b))
+    }
+    fn ge(&self, a: u64, b: u64) -> BackendResult<u64> {
+        let mut rt = self.runtime.lock().unwrap();
+        map_err!(applegpu_core::ops::ge(&mut rt, a, b))
+    }
+    fn eq_op(&self, a: u64, b: u64) -> BackendResult<u64> {
+        let mut rt = self.runtime.lock().unwrap();
+        map_err!(applegpu_core::ops::eq_op(&mut rt, a, b))
+    }
+    fn ne_op(&self, a: u64, b: u64) -> BackendResult<u64> {
+        let mut rt = self.runtime.lock().unwrap();
+        map_err!(applegpu_core::ops::ne_op(&mut rt, a, b))
+    }
+
+    // Bitwise ops
+    fn bitwise_and(&self, a: u64, b: u64) -> BackendResult<u64> {
+        let mut rt = self.runtime.lock().unwrap();
+        map_err!(applegpu_core::ops::bitwise_and(&mut rt, a, b))
+    }
+    fn bitwise_or(&self, a: u64, b: u64) -> BackendResult<u64> {
+        let mut rt = self.runtime.lock().unwrap();
+        map_err!(applegpu_core::ops::bitwise_or(&mut rt, a, b))
+    }
+    fn bitwise_xor(&self, a: u64, b: u64) -> BackendResult<u64> {
+        let mut rt = self.runtime.lock().unwrap();
+        map_err!(applegpu_core::ops::bitwise_xor(&mut rt, a, b))
+    }
+    fn bitwise_not(&self, a: u64) -> BackendResult<u64> {
+        let mut rt = self.runtime.lock().unwrap();
+        map_err!(applegpu_core::ops::bitwise_not(&mut rt, a))
+    }
+    fn shl(&self, a: u64, shift: u32) -> BackendResult<u64> {
+        let mut rt = self.runtime.lock().unwrap();
+        map_err!(applegpu_core::ops::shl(&mut rt, a, shift))
+    }
+    fn shr(&self, a: u64, shift: u32) -> BackendResult<u64> {
+        let mut rt = self.runtime.lock().unwrap();
+        map_err!(applegpu_core::ops::shr(&mut rt, a, shift))
+    }
+
+    // Modulo
+    fn mod_op(&self, a: u64, b: u64) -> BackendResult<u64> {
+        let mut rt = self.runtime.lock().unwrap();
+        map_err!(applegpu_core::ops::mod_op(&mut rt, a, b))
+    }
+
+    // Element-wise min/max
+    fn elem_min(&self, a: u64, b: u64) -> BackendResult<u64> {
+        let mut rt = self.runtime.lock().unwrap();
+        map_err!(applegpu_core::ops::elem_min(&mut rt, a, b))
+    }
+    fn elem_max(&self, a: u64, b: u64) -> BackendResult<u64> {
+        let mut rt = self.runtime.lock().unwrap();
+        map_err!(applegpu_core::ops::elem_max(&mut rt, a, b))
+    }
+
+    // Logical NOT
+    fn logical_not(&self, a: u64) -> BackendResult<u64> {
+        let mut rt = self.runtime.lock().unwrap();
+        map_err!(applegpu_core::ops::logical_not(&mut rt, a))
+    }
+
     fn cast(&self, a: u64, target_dtype: &str) -> BackendResult<u64> {
         let dt = applegpu_core::tensor::DType::from_name(target_dtype)
             .ok_or_else(|| format!("Unknown dtype: {}", target_dtype))?;
         let mut rt = self.runtime.lock().unwrap();
         map_err!(applegpu_core::ops::cast(&mut rt, a, dt))
+    }
+
+    fn quantize(&self, a: u64, target_dtype: &str, scale: f32, zero_point: i32) -> BackendResult<u64> {
+        let dt = applegpu_core::tensor::DType::from_name(target_dtype)
+            .ok_or_else(|| format!("Unknown dtype: {}", target_dtype))?;
+        let mut rt = self.runtime.lock().unwrap();
+        map_err!(applegpu_core::ops::quantize(&mut rt, a, dt, scale, zero_point))
+    }
+
+    fn dequantize(&self, a: u64, target_dtype: &str, scale: f32, zero_point: i32) -> BackendResult<u64> {
+        let dt = applegpu_core::tensor::DType::from_name(target_dtype)
+            .ok_or_else(|| format!("Unknown dtype: {}", target_dtype))?;
+        let mut rt = self.runtime.lock().unwrap();
+        map_err!(applegpu_core::ops::dequantize(&mut rt, a, dt, scale, zero_point))
     }
 
     // Shape ops

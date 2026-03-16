@@ -1,6 +1,7 @@
 #ifndef APPLE_GPU_BRIDGE_H
 #define APPLE_GPU_BRIDGE_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 // Opaque handle to a GPU device
@@ -12,6 +13,7 @@ void gpu_bridge_destroy_device(GPUDeviceHandle* device);
 
 // Query
 const char* gpu_bridge_device_name(const GPUDeviceHandle* device);
+bool gpu_bridge_supports_apple9(const GPUDeviceHandle* device);
 
 // Opaque handle to a GPU buffer
 typedef struct GPUBufferHandle GPUBufferHandle;

@@ -936,8 +936,54 @@ fn mean(t: &GpuTensor) -> PyResult<GpuTensor> {
 }
 
 #[pyfunction]
+fn lt(a: &GpuTensor, b: &GpuTensor) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.lt(a.id, b.id)) }
+#[pyfunction]
+fn gt(a: &GpuTensor, b: &GpuTensor) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.gt(a.id, b.id)) }
+#[pyfunction]
+fn le(a: &GpuTensor, b: &GpuTensor) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.le(a.id, b.id)) }
+#[pyfunction]
+fn ge(a: &GpuTensor, b: &GpuTensor) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.ge(a.id, b.id)) }
+#[pyfunction]
+fn eq_(a: &GpuTensor, b: &GpuTensor) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.eq_op(a.id, b.id)) }
+#[pyfunction]
+fn ne_(a: &GpuTensor, b: &GpuTensor) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.ne_op(a.id, b.id)) }
+
+#[pyfunction]
+fn bitwise_and(a: &GpuTensor, b: &GpuTensor) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.bitwise_and(a.id, b.id)) }
+#[pyfunction]
+fn bitwise_or(a: &GpuTensor, b: &GpuTensor) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.bitwise_or(a.id, b.id)) }
+#[pyfunction]
+fn bitwise_xor(a: &GpuTensor, b: &GpuTensor) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.bitwise_xor(a.id, b.id)) }
+#[pyfunction]
+fn bitwise_not(a: &GpuTensor) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.bitwise_not(a.id)) }
+#[pyfunction]
+fn shl(a: &GpuTensor, shift: u32) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.shl(a.id, shift)) }
+#[pyfunction]
+fn shr(a: &GpuTensor, shift: u32) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.shr(a.id, shift)) }
+#[pyfunction]
+fn mod_(a: &GpuTensor, b: &GpuTensor) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.mod_op(a.id, b.id)) }
+#[pyfunction]
+fn elem_min(a: &GpuTensor, b: &GpuTensor) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.elem_min(a.id, b.id)) }
+#[pyfunction]
+fn elem_max(a: &GpuTensor, b: &GpuTensor) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.elem_max(a.id, b.id)) }
+#[pyfunction]
+fn logical_not(a: &GpuTensor) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.logical_not(a.id)) }
+
+#[pyfunction]
 fn cast(t: &GpuTensor, dtype: &str) -> PyResult<GpuTensor> {
     wrap_tensor(BACKEND.cast(t.id, dtype))
+}
+
+#[pyfunction]
+#[pyo3(signature = (t, dtype, scale=0.1, zero_point=0))]
+fn quantize(t: &GpuTensor, dtype: &str, scale: f32, zero_point: i32) -> PyResult<GpuTensor> {
+    wrap_tensor(BACKEND.quantize(t.id, dtype, scale, zero_point))
+}
+
+#[pyfunction]
+#[pyo3(signature = (t, dtype, scale=0.1, zero_point=0))]
+fn dequantize(t: &GpuTensor, dtype: &str, scale: f32, zero_point: i32) -> PyResult<GpuTensor> {
+    wrap_tensor(BACKEND.dequantize(t.id, dtype, scale, zero_point))
 }
 
 #[pyfunction]
@@ -1139,6 +1185,24 @@ fn applegpu_runtime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(softmax_causal, m)?)?;
     m.add_function(wrap_pyfunction!(argmax, m)?)?;
     m.add_function(wrap_pyfunction!(cast, m)?)?;
+    m.add_function(wrap_pyfunction!(quantize, m)?)?;
+    m.add_function(wrap_pyfunction!(dequantize, m)?)?;
+    m.add_function(wrap_pyfunction!(bitwise_and, m)?)?;
+    m.add_function(wrap_pyfunction!(bitwise_or, m)?)?;
+    m.add_function(wrap_pyfunction!(bitwise_xor, m)?)?;
+    m.add_function(wrap_pyfunction!(bitwise_not, m)?)?;
+    m.add_function(wrap_pyfunction!(shl, m)?)?;
+    m.add_function(wrap_pyfunction!(shr, m)?)?;
+    m.add_function(wrap_pyfunction!(mod_, m)?)?;
+    m.add_function(wrap_pyfunction!(elem_min, m)?)?;
+    m.add_function(wrap_pyfunction!(elem_max, m)?)?;
+    m.add_function(wrap_pyfunction!(logical_not, m)?)?;
+    m.add_function(wrap_pyfunction!(lt, m)?)?;
+    m.add_function(wrap_pyfunction!(gt, m)?)?;
+    m.add_function(wrap_pyfunction!(le, m)?)?;
+    m.add_function(wrap_pyfunction!(ge, m)?)?;
+    m.add_function(wrap_pyfunction!(eq_, m)?)?;
+    m.add_function(wrap_pyfunction!(ne_, m)?)?;
     m.add_function(wrap_pyfunction!(sum, m)?)?;
     m.add_function(wrap_pyfunction!(mean, m)?)?;
     m.add_function(wrap_pyfunction!(attention_causal, m)?)?;

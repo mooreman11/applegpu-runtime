@@ -10,6 +10,7 @@ extern "C" {
     pub fn gpu_bridge_create_device() -> *mut GPUDeviceHandle;
     pub fn gpu_bridge_destroy_device(device: *mut GPUDeviceHandle);
     pub fn gpu_bridge_device_name(device: *const GPUDeviceHandle) -> *const std::ffi::c_char;
+    pub fn gpu_bridge_supports_apple9(device: *const GPUDeviceHandle) -> bool;
 }
 
 /// Safe wrapper: create a Metal device. Returns None if no GPU available.

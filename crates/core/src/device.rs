@@ -23,6 +23,12 @@ impl Device {
         self.handle as *const _
     }
 
+    /// Returns true if this device supports Apple GPU family 9+ (M3/M4),
+    /// which is required for Int64 (`long`) MSL kernels.
+    pub fn supports_int64(&self) -> bool {
+        unsafe { ffi::gpu_bridge_supports_apple9(self.handle) }
+    }
+
     /// Get the device name (e.g. "Apple M1 Pro").
     pub fn name(&self) -> String {
         ffi::device_name(self.handle)

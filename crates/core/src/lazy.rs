@@ -275,6 +275,13 @@ impl LazyRuntime {
     /// Retained for eval_remote and any path that needs synchronous single-op execution.
     #[allow(dead_code)]
     fn execute_node(&mut self, device: &Device, node: &OpNode) -> Result<Tensor> {
+        // Int64 kernels require Apple9+ GPU (M3/M4)
+        if matches!(node.out_dtype, DType::Int64) && !device.supports_int64() {
+            return Err(GpuError::UnsupportedDtype(
+                "Int64 requires Apple9+ GPU (M3/M4). This device does not support it.".to_string(),
+            ));
+        }
+
         let out_size = node.out_shape.numel() * node.out_dtype.size_bytes();
 
         // Pre-check: if the node references an existing tensor as output, reject borrowed buffers
@@ -314,6 +321,30 @@ impl LazyRuntime {
                 &input_buffers,
                 &out.buffer,
                 &stride_refs,
+                &out_shape_u32,
+                ndim,
+                numel,
+            )?;
+            return Ok(out);
+        }
+
+        // Comparison ops: output is Bool but kernel is resolved by INPUT dtype
+        if node.op.is_comparison() {
+            let (a_strides, b_strides, out_shape_u32, ndim, numel) = self.binary_nd_params(node)?;
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+            let a = self.get_tensor(node.inputs[0])?;
+            let b = self.get_tensor(node.inputs[1])?;
+            let input_dtype = a.meta.dtype;
+            REGISTRY.dispatch_binary_nd_typed(
+                device,
+                node.op.kernel_name(),
+                input_dtype,
+                &a.buffer,
+                &a_strides,
+                &b.buffer,
+                &b_strides,
+                &out.buffer,
                 &out_shape_u32,
                 ndim,
                 numel,
@@ -495,6 +526,28 @@ impl LazyRuntime {
             let input = self.get_tensor(node.inputs[0])?;
             REGISTRY.dispatch_clamp_nd_typed(
                 device, dtype, &input.buffer, &in_strides, &out.buffer, &out_shape_u32, ndim, numel, min_f32, max_f32,
+            )?;
+            return Ok(out);
+        }
+
+        if let crate::graph::OpKind::Shl { shift } = node.op {
+            let (in_strides, out_shape_u32, ndim, numel) = self.unary_nd_params(node)?;
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+            let input = self.get_tensor(node.inputs[0])?;
+            REGISTRY.dispatch_pow_nd_typed(
+                device, dtype, &input.buffer, &in_strides, &out.buffer, &out_shape_u32, ndim, numel, shift as f32,
+            )?;
+            return Ok(out);
+        }
+
+        if let crate::graph::OpKind::Shr { shift } = node.op {
+            let (in_strides, out_shape_u32, ndim, numel) = self.unary_nd_params(node)?;
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+            let input = self.get_tensor(node.inputs[0])?;
+            REGISTRY.dispatch_pow_nd_typed(
+                device, dtype, &input.buffer, &in_strides, &out.buffer, &out_shape_u32, ndim, numel, shift as f32,
             )?;
             return Ok(out);
         }
@@ -918,6 +971,30 @@ impl LazyRuntime {
             return Ok(out);
         }
 
+        if let crate::graph::OpKind::Quantize { scale, zero_point, target_dtype } = node.op {
+            let (in_strides, out_shape_u32, ndim, numel) = self.unary_nd_params(node)?;
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+            let input = self.get_tensor(node.inputs[0])?;
+            let src_dtype = input.meta.dtype;
+            let (source, func) = KernelRegistry::resolve_quantize_kernel(src_dtype, target_dtype, scale, zero_point);
+            let pipeline = REGISTRY.get_or_create(device, &source, &func)?;
+            pipeline.dispatch_unary_nd(&input.buffer, &in_strides, &out.buffer, &out_shape_u32, ndim, numel)?;
+            return Ok(out);
+        }
+
+        if let crate::graph::OpKind::Dequantize { scale, zero_point, target_dtype } = node.op {
+            let (in_strides, out_shape_u32, ndim, numel) = self.unary_nd_params(node)?;
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+            let input = self.get_tensor(node.inputs[0])?;
+            let src_dtype = input.meta.dtype;
+            let (source, func) = KernelRegistry::resolve_dequantize_kernel(src_dtype, target_dtype, scale, zero_point);
+            let pipeline = REGISTRY.get_or_create(device, &source, &func)?;
+            pipeline.dispatch_unary_nd(&input.buffer, &in_strides, &out.buffer, &out_shape_u32, ndim, numel)?;
+            return Ok(out);
+        }
+
         if node.op.is_unary() {
             let (in_strides, out_shape_u32, ndim, numel) = self.unary_nd_params(node)?;
             let out_buf = self.pool.acquire(device, out_size)?;
@@ -991,6 +1068,13 @@ impl LazyRuntime {
         node: &OpNode,
         out: &Tensor,
     ) -> Result<*mut std::ffi::c_void> {
+        // Int64 kernels require Apple9+ GPU (M3/M4)
+        if matches!(node.out_dtype, DType::Int64) && !device.supports_int64() {
+            return Err(GpuError::UnsupportedDtype(
+                "Int64 requires Apple9+ GPU (M3/M4). This device does not support it.".to_string(),
+            ));
+        }
+
         // Reject borrowed (immutable) buffers as output targets
         if out.buffer.kind.is_borrowed() {
             return Err(GpuError::ImmutableBuffer(out.meta.id));
@@ -1025,6 +1109,28 @@ impl LazyRuntime {
                 &input_buffers,
                 &out.buffer,
                 &stride_refs,
+                &out_shape_u32,
+                ndim,
+                numel,
+            );
+        }
+
+        // Comparison ops: output is Bool but kernel is resolved by INPUT dtype
+        if node.op.is_comparison() {
+            let (a_strides, b_strides, out_shape_u32, ndim, numel) = self.binary_nd_params(node)?;
+            let a = self.get_tensor(node.inputs[0])?;
+            let b = self.get_tensor(node.inputs[1])?;
+            let input_dtype = a.meta.dtype;
+            return REGISTRY.dispatch_binary_nd_typed_nb(
+                device,
+                node.op.kernel_name(),
+                input_dtype,
+                queue,
+                &a.buffer,
+                &a_strides,
+                &b.buffer,
+                &b_strides,
+                &out.buffer,
                 &out_shape_u32,
                 ndim,
                 numel,
@@ -1169,6 +1275,22 @@ impl LazyRuntime {
             let input = self.get_tensor(node.inputs[0])?;
             return REGISTRY.dispatch_clamp_nd_typed_nb(
                 device, dtype, queue, &input.buffer, &in_strides, &out.buffer, &out_shape_u32, ndim, numel, min_f32, max_f32,
+            );
+        }
+
+        if let crate::graph::OpKind::Shl { shift } = node.op {
+            let (in_strides, out_shape_u32, ndim, numel) = self.unary_nd_params(node)?;
+            let input = self.get_tensor(node.inputs[0])?;
+            return REGISTRY.dispatch_pow_nd_typed_nb(
+                device, dtype, queue, &input.buffer, &in_strides, &out.buffer, &out_shape_u32, ndim, numel, shift as f32,
+            );
+        }
+
+        if let crate::graph::OpKind::Shr { shift } = node.op {
+            let (in_strides, out_shape_u32, ndim, numel) = self.unary_nd_params(node)?;
+            let input = self.get_tensor(node.inputs[0])?;
+            return REGISTRY.dispatch_pow_nd_typed_nb(
+                device, dtype, queue, &input.buffer, &in_strides, &out.buffer, &out_shape_u32, ndim, numel, shift as f32,
             );
         }
 
@@ -1487,6 +1609,24 @@ impl LazyRuntime {
             let input = self.get_tensor(node.inputs[0])?;
             let src_dtype = input.meta.dtype;
             let (source, func) = KernelRegistry::resolve_cast_kernel(src_dtype, target_dtype);
+            let pipeline = REGISTRY.get_or_create(device, &source, &func)?;
+            return pipeline.dispatch_unary_nd_nb(queue, &input.buffer, &in_strides, &out.buffer, &out_shape_u32, ndim, numel);
+        }
+
+        if let crate::graph::OpKind::Quantize { scale, zero_point, target_dtype } = node.op {
+            let (in_strides, out_shape_u32, ndim, numel) = self.unary_nd_params(node)?;
+            let input = self.get_tensor(node.inputs[0])?;
+            let src_dtype = input.meta.dtype;
+            let (source, func) = KernelRegistry::resolve_quantize_kernel(src_dtype, target_dtype, scale, zero_point);
+            let pipeline = REGISTRY.get_or_create(device, &source, &func)?;
+            return pipeline.dispatch_unary_nd_nb(queue, &input.buffer, &in_strides, &out.buffer, &out_shape_u32, ndim, numel);
+        }
+
+        if let crate::graph::OpKind::Dequantize { scale, zero_point, target_dtype } = node.op {
+            let (in_strides, out_shape_u32, ndim, numel) = self.unary_nd_params(node)?;
+            let input = self.get_tensor(node.inputs[0])?;
+            let src_dtype = input.meta.dtype;
+            let (source, func) = KernelRegistry::resolve_dequantize_kernel(src_dtype, target_dtype, scale, zero_point);
             let pipeline = REGISTRY.get_or_create(device, &source, &func)?;
             return pipeline.dispatch_unary_nd_nb(queue, &input.buffer, &in_strides, &out.buffer, &out_shape_u32, ndim, numel);
         }
