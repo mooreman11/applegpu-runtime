@@ -77,8 +77,10 @@ enum GPUContainerError: Error, CustomStringConvertible {
     case serviceNotFound
     case serviceStartTimeout
     case containerCliNotFound
-    case kernelNotFound
+    case kernelNotFound(String)
     case containerizationNotAvailable
+    case containerExited(code: Int)
+    case imagePullFailed(String)
 
     var description: String {
         switch self {
@@ -89,10 +91,15 @@ enum GPUContainerError: Error, CustomStringConvertible {
             return "gpu-service failed to start within 5 seconds"
         case .containerCliNotFound:
             return "Apple container CLI not found. Install with: brew install container"
-        case .kernelNotFound:
-            return "Linux kernel not found. Run 'container system start' to install the default kernel."
+        case .kernelNotFound(let path):
+            return
+                "Linux kernel not found at \(path). Run: container system kernel set --recommended"
         case .containerizationNotAvailable:
-            return "Containerization framework not yet implemented. Requires macOS 26 SDK."
+            return "Containerization framework not available (requires macOS 26+)"
+        case .containerExited(let code):
+            return "Container exited with code \(code)"
+        case .imagePullFailed(let msg):
+            return "Image pull failed: \(msg)"
         }
     }
 }
