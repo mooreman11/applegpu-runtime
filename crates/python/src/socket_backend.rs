@@ -611,6 +611,9 @@ impl Backend for SocketBackend {
     fn softmax(&self, a: u64) -> BackendResult<u64> {
         self.record_unary(a, WireOpKind::Softmax)
     }
+    fn log_softmax(&self, a: u64) -> BackendResult<u64> {
+        self.record_unary(a, WireOpKind::LogSoftmax)
+    }
     fn softmax_causal(&self, a: u64) -> BackendResult<u64> {
         self.record_unary(a, WireOpKind::SoftmaxCausal)
     }

@@ -365,6 +365,17 @@ impl LazyRuntime {
             return Ok(out);
         }
 
+        if node.op.is_log_softmax() {
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+            let input = self.get_tensor(node.inputs[0])?;
+            let dims = input.meta.layout.shape.dims();
+            let cols = dims[dims.len() - 1];
+            let total_rows: usize = dims[..dims.len() - 1].iter().product::<usize>().max(1);
+            REGISTRY.dispatch_log_softmax_typed(device, dtype, &input.buffer, &out.buffer, total_rows, cols)?;
+            return Ok(out);
+        }
+
         if node.op.is_softmax_backward() {
             let out_buf = self.pool.acquire(device, out_size)?;
             let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
@@ -1145,6 +1156,14 @@ impl LazyRuntime {
             let cols = dims[dims.len() - 1];
             let total_rows: usize = dims[..dims.len() - 1].iter().product::<usize>().max(1);
             return REGISTRY.dispatch_softmax_typed_nb(device, dtype, queue, &input.buffer, &out.buffer, total_rows, cols);
+        }
+
+        if node.op.is_log_softmax() {
+            let input = self.get_tensor(node.inputs[0])?;
+            let dims = input.meta.layout.shape.dims();
+            let cols = dims[dims.len() - 1];
+            let total_rows: usize = dims[..dims.len() - 1].iter().product::<usize>().max(1);
+            return REGISTRY.dispatch_log_softmax_typed_nb(device, dtype, queue, &input.buffer, &out.buffer, total_rows, cols);
         }
 
         if node.op.is_softmax_backward() {

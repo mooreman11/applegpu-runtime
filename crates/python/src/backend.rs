@@ -81,6 +81,7 @@ pub trait Backend: Send + Sync {
 
     // Reduction ops
     fn softmax(&self, a: u64) -> BackendResult<u64>;
+    fn log_softmax(&self, a: u64) -> BackendResult<u64>;
     fn softmax_causal(&self, a: u64) -> BackendResult<u64>;
     fn argmax(&self, a: u64) -> BackendResult<u64>;
     fn sum(&self, a: u64) -> BackendResult<u64>;

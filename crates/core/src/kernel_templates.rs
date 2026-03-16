@@ -343,6 +343,41 @@ kernel void softmax{s}(
     )
 }
 
+/// Generate log_softmax kernel source. Uses float accumulation for half types.
+/// Numerically stable: log_softmax(x) = x - max(x) - log(sum(exp(x - max(x))))
+pub fn log_softmax_kernel_source(dtype: DType) -> String {
+    let t = metal_type(dtype);
+    let s = dtype_suffix(dtype);
+    let load = |e: &str| to_float(e, dtype);
+    let store = |e: &str| to_type(e, t, dtype);
+    format!(
+        r#"#include <metal_stdlib>
+using namespace metal;
+
+kernel void log_softmax{s}(
+    device const {t}* input [[buffer(0)]],
+    device {t}* output [[buffer(1)]],
+    constant uint& rows [[buffer(2)]],
+    constant uint& cols [[buffer(3)]],
+    uint row [[thread_position_in_grid]]
+) {{
+    if (row >= rows) return;
+    uint offset = row * cols;
+    float max_val = {load_first};
+    for (uint j = 1; j < cols; j++) {{ max_val = max(max_val, {load_j}); }}
+    float log_sum_exp = 0.0f;
+    for (uint j = 0; j < cols; j++) {{ log_sum_exp += exp({load_j} - max_val); }}
+    log_sum_exp = log(log_sum_exp);
+    for (uint j = 0; j < cols; j++) {{ output[offset + j] = {store_out}; }}
+}}
+"#,
+        t = t, s = s,
+        load_first = load("input[offset]"),
+        load_j = load("input[offset + j]"),
+        store_out = store(&format!("{} - max_val - log_sum_exp", load("input[offset + j]"))),
+    )
+}
+
 /// Generate softmax_causal kernel source.
 pub fn softmax_causal_kernel_source(dtype: DType) -> String {
     let t = metal_type(dtype);
@@ -1866,6 +1901,17 @@ mod tests {
         let src = float_unary_kernel_source(DType::Float32);
         assert!(src.contains("elementwise_sin_f32"));
         assert!(src.contains("elementwise_cos_f32"));
+    }
+
+    #[test]
+    fn log_softmax_kernel_typed() {
+        let src = log_softmax_kernel_source(DType::Float32);
+        assert!(src.contains("log_softmax_f32"));
+        assert!(src.contains("log(log_sum_exp)"));
+        // f16 version uses float accumulation
+        let src_f16 = log_softmax_kernel_source(DType::Float16);
+        assert!(src_f16.contains("log_softmax_f16"));
+        assert!(src_f16.contains("float(input[offset])"));
     }
 
     // Task 8a tests

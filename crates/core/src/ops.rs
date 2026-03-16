@@ -452,6 +452,29 @@ pub fn matmul(rt: &mut LazyRuntime, a_id: u64, b_id: u64) -> Result<u64> {
     Ok(out_id)
 }
 
+/// Log-softmax along last dimension. Numerically stable: log(softmax(x)).
+/// Supports any shape with at least 1 dim.
+pub fn log_softmax(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
+    let dtype = rt.dtype(input_id)?;
+    validate_op_dtype(&OpKind::LogSoftmax, dtype)?;
+    let shape = rt.shape(input_id)?;
+    if shape.is_empty() {
+        return Err(GpuError::InvalidTensor(
+            "log_softmax requires at least 1D tensor".to_string()
+        ));
+    }
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op: OpKind::LogSoftmax,
+        inputs: vec![input_id],
+        out_shape: Shape::new(shape)?,
+        out_dtype: dtype,
+        container_id: ContainerId::DEFAULT,
+    });
+    Ok(out_id)
+}
+
 /// Softmax along last dimension. Supports any shape with at least 1 dim.
 /// Leading dims are treated as independent rows (flattened).
 pub fn softmax(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {

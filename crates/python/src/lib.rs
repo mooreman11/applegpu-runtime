@@ -233,6 +233,7 @@ impl GpuTensor {
     fn exp(&self) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.exp(self.id)) }
     fn log(&self) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.log(self.id)) }
     fn softmax(&self) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.softmax(self.id)) }
+    fn log_softmax(&self) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.log_softmax(self.id)) }
     fn tanh(&self) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.tanh(self.id)) }
     fn sin(&self) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.sin(self.id)) }
     fn cos(&self) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.cos(self.id)) }
@@ -866,6 +867,8 @@ fn reshape(t: &GpuTensor, new_shape: Vec<usize>) -> PyResult<GpuTensor> { t.resh
 #[pyfunction]
 fn softmax(t: &GpuTensor) -> PyResult<GpuTensor> { t.softmax() }
 #[pyfunction]
+fn log_softmax(t: &GpuTensor) -> PyResult<GpuTensor> { t.log_softmax() }
+#[pyfunction]
 fn transpose(t: &GpuTensor) -> PyResult<GpuTensor> { t.transpose() }
 #[pyfunction]
 fn transpose_dims(t: &GpuTensor, dim0: usize, dim1: usize) -> PyResult<GpuTensor> { t.transpose_dims(dim0, dim1) }
@@ -1177,6 +1180,7 @@ fn applegpu_runtime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(scalar_mul, m)?)?;
     m.add_function(wrap_pyfunction!(reshape, m)?)?;
     m.add_function(wrap_pyfunction!(softmax, m)?)?;
+    m.add_function(wrap_pyfunction!(log_softmax, m)?)?;
     m.add_function(wrap_pyfunction!(transpose, m)?)?;
     m.add_function(wrap_pyfunction!(transpose_dims, m)?)?;
     m.add_function(wrap_pyfunction!(tanh, m)?)?;

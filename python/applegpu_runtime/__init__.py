@@ -32,6 +32,7 @@ from applegpu_runtime.applegpu_runtime import (
     scalar_mul,
     reshape,
     softmax,
+    log_softmax,
     transpose,
     transpose_dims,
     tanh,

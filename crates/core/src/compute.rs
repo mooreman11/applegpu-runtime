@@ -1454,6 +1454,7 @@ impl KernelRegistry {
             "clamp" => kt::clamp_kernel_source(dtype),
             "gelu" => kt::gelu_kernel_source(dtype),
             "softmax" => kt::softmax_kernel_source(dtype),
+            "log_softmax" => kt::log_softmax_kernel_source(dtype),
             "softmax_causal" => kt::softmax_causal_kernel_source(dtype),
             "argmax" => kt::argmax_kernel_source(dtype),
             "sum" => kt::sum_kernel_source(dtype),
@@ -1668,6 +1669,15 @@ impl KernelRegistry {
         rows: usize, cols: usize,
     ) -> Result<()> {
         let (source, func) = Self::resolve_kernel("softmax", dtype);
+        let pipeline = self.get_or_create(device, &source, &func)?;
+        pipeline.dispatch_softmax(buf_input, buf_output, rows, cols)
+    }
+
+    pub fn dispatch_log_softmax_typed(
+        &self, device: &Device, dtype: DType, buf_input: &Buffer, buf_output: &Buffer,
+        rows: usize, cols: usize,
+    ) -> Result<()> {
+        let (source, func) = Self::resolve_kernel("log_softmax", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_softmax(buf_input, buf_output, rows, cols)
     }
@@ -2182,6 +2192,15 @@ impl KernelRegistry {
         buf_input: &Buffer, buf_output: &Buffer, rows: usize, cols: usize,
     ) -> Result<*mut std::ffi::c_void> {
         let (source, func) = Self::resolve_kernel("softmax", dtype);
+        let pipeline = self.get_or_create(device, &source, &func)?;
+        pipeline.dispatch_softmax_nb(queue, buf_input, buf_output, rows, cols)
+    }
+
+    pub fn dispatch_log_softmax_typed_nb(
+        &self, device: &Device, dtype: DType, queue: *mut std::ffi::c_void,
+        buf_input: &Buffer, buf_output: &Buffer, rows: usize, cols: usize,
+    ) -> Result<*mut std::ffi::c_void> {
+        let (source, func) = Self::resolve_kernel("log_softmax", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_softmax_nb(queue, buf_input, buf_output, rows, cols)
     }
