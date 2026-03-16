@@ -29,7 +29,7 @@ impl DType {
 
     /// Whether this dtype has GPU compute kernels.
     pub fn is_compute_supported(&self) -> bool {
-        matches!(self, DType::Float32 | DType::Float16)
+        !matches!(self, DType::Float64)
     }
 
     /// Whether this dtype is a floating-point type.

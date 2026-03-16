@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 fn validate_compute_dtype(dtype: DType) -> Result<()> {
     if !dtype.is_compute_supported() {
-        return Err(GpuError::InvalidTensor(format!(
-            "No compute kernel for {:?}. Supported: Float32, Float16.", dtype
+        return Err(GpuError::UnsupportedDtype(format!(
+            "{} is not supported for GPU compute", dtype.name()
         )));
     }
     Ok(())
