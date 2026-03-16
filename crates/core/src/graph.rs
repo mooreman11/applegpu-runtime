@@ -3,6 +3,40 @@ use std::collections::HashMap;
 use crate::scheduler::ContainerId;
 use crate::tensor::{DType, Shape};
 
+/// A scalar value that can represent any dtype's scalar.
+/// Used by ops that carry scalar parameters (Pow, ScalarMul, Clamp, MaskedFill).
+#[derive(Debug, Clone, Copy)]
+pub enum ScalarValue {
+    Float(f64),
+    Int(i64),
+    UInt(u64),
+    Bool(bool),
+}
+
+impl ScalarValue {
+    pub fn as_f64(&self) -> f64 {
+        match self {
+            ScalarValue::Float(v) => *v,
+            ScalarValue::Int(v) => *v as f64,
+            ScalarValue::UInt(v) => *v as f64,
+            ScalarValue::Bool(v) => if *v { 1.0 } else { 0.0 },
+        }
+    }
+
+    pub fn to_msl_literal(&self) -> String {
+        match self {
+            ScalarValue::Float(v) => format!("{}", v),
+            ScalarValue::Int(v) => format!("{}", v),
+            ScalarValue::UInt(v) => format!("{}u", v),
+            ScalarValue::Bool(v) => if *v { "true".to_string() } else { "false".to_string() },
+        }
+    }
+
+    pub fn from_f32(v: f32) -> Self {
+        ScalarValue::Float(v as f64)
+    }
+}
+
 /// The kind of operation a graph node represents.
 #[derive(Debug, Clone)]
 pub enum OpKind {
@@ -423,6 +457,22 @@ impl Graph {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scalar_value_to_f64() {
+        assert_eq!(ScalarValue::Float(3.14).as_f64(), 3.14);
+        assert_eq!(ScalarValue::Int(42).as_f64(), 42.0);
+        assert_eq!(ScalarValue::UInt(255).as_f64(), 255.0);
+        assert_eq!(ScalarValue::Bool(true).as_f64(), 1.0);
+    }
+
+    #[test]
+    fn scalar_value_to_msl_literal() {
+        assert_eq!(ScalarValue::Float(1.5).to_msl_literal(), "1.5");
+        assert_eq!(ScalarValue::Int(-3).to_msl_literal(), "-3");
+        assert_eq!(ScalarValue::UInt(0).to_msl_literal(), "0u");
+        assert_eq!(ScalarValue::Bool(true).to_msl_literal(), "true");
+    }
 
     #[test]
     fn op_kind_kernel_names() {
