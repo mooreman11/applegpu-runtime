@@ -492,18 +492,14 @@ impl ComputePipeline {
         num_indices: usize,
         cols: usize,
     ) -> Result<()> {
-        // Reuse embedding FFI (same signature: input, indices, output, count, dim)
-        let result = unsafe {
-            ffi::gpu_bridge_compute_embedding(
-                self.handle,
-                buf_input.raw_handle() as *const _,
-                buf_indices.raw_handle() as *const _,
-                buf_out.raw_handle(),
-                num_indices as u32,
-                cols as u32,
-            )
-        };
-        if result == 0 { Ok(()) } else { Err(GpuError::ComputeFailed("IndexSelect dim0 dispatch failed".to_string())) }
+        // Use generic 3D dispatch with the template pipeline (not embedding FFI)
+        let in_rows = 0u32; // not used by kernel but passed as buffer(3)
+        self.dispatch_3d(
+            &[buf_input, buf_indices], buf_out,
+            &[in_rows, cols as u32, num_indices as u32],
+            &[],
+            (cols as u32, num_indices as u32, 1),
+        )
     }
 
     /// Non-blocking index_select_dim0. Returns command buffer handle.
@@ -516,18 +512,14 @@ impl ComputePipeline {
         num_indices: usize,
         cols: usize,
     ) -> Result<*mut std::ffi::c_void> {
-        let cb = unsafe {
-            ffi::gpu_bridge_compute_embedding_nb(
-                self.handle,
-                queue,
-                buf_input.raw_handle() as *const _,
-                buf_indices.raw_handle() as *const _,
-                buf_out.raw_handle(),
-                num_indices as u32,
-                cols as u32,
-            )
-        };
-        if cb.is_null() { Err(GpuError::ComputeFailed("Non-blocking index_select dim0 dispatch failed".to_string())) } else { Ok(cb) }
+        let in_rows = 0u32;
+        self.dispatch_3d_nb(
+            queue,
+            &[buf_input, buf_indices], buf_out,
+            &[in_rows, cols as u32, num_indices as u32],
+            &[],
+            (cols as u32, num_indices as u32, 1),
+        )
     }
 
     /// Dispatch index_select_dim1: output[row, i] = input[row, indices[i]].
@@ -540,18 +532,12 @@ impl ComputePipeline {
         in_cols: usize,
         num_indices: usize,
     ) -> Result<()> {
-        let result = unsafe {
-            ffi::gpu_bridge_compute_gather(
-                self.handle,
-                buf_input.raw_handle() as *const _,
-                buf_indices.raw_handle() as *const _,
-                buf_out.raw_handle(),
-                rows as u32,
-                in_cols as u32,
-                num_indices as u32,
-            )
-        };
-        if result == 0 { Ok(()) } else { Err(GpuError::ComputeFailed("IndexSelect dim1 dispatch failed".to_string())) }
+        self.dispatch_3d(
+            &[buf_input, buf_indices], buf_out,
+            &[rows as u32, in_cols as u32, num_indices as u32],
+            &[],
+            (num_indices as u32, rows as u32, 1),
+        )
     }
 
     /// Non-blocking index_select_dim1. Returns command buffer handle.
@@ -565,19 +551,13 @@ impl ComputePipeline {
         in_cols: usize,
         num_indices: usize,
     ) -> Result<*mut std::ffi::c_void> {
-        let cb = unsafe {
-            ffi::gpu_bridge_compute_gather_nb(
-                self.handle,
-                queue,
-                buf_input.raw_handle() as *const _,
-                buf_indices.raw_handle() as *const _,
-                buf_out.raw_handle(),
-                rows as u32,
-                in_cols as u32,
-                num_indices as u32,
-            )
-        };
-        if cb.is_null() { Err(GpuError::ComputeFailed("Non-blocking index_select dim1 dispatch failed".to_string())) } else { Ok(cb) }
+        self.dispatch_3d_nb(
+            queue,
+            &[buf_input, buf_indices], buf_out,
+            &[rows as u32, in_cols as u32, num_indices as u32],
+            &[],
+            (num_indices as u32, rows as u32, 1),
+        )
     }
 
     /// Dispatch slice_dim0: output[row,col] = input[(start_row+row), col].
