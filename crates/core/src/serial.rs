@@ -284,6 +284,12 @@ fn discriminant_to_op(d: u32, r: &mut impl Read) -> io::Result<OpKind> {
             r.read_exact(&mut eps_bytes)?;
             Ok(OpKind::BatchNormBackward { eps: f32::from_le_bytes(eps_bytes) })
         }
+        46 => {
+            let dt = read_u32(r)?;
+            let target_dtype = DType::from_wire(dt)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("Unknown cast target dtype: {}", dt)))?;
+            Ok(OpKind::Cast { target_dtype })
+        }
         47 => Ok(OpKind::Lt),
         48 => Ok(OpKind::Gt),
         49 => Ok(OpKind::Le),
@@ -359,7 +365,7 @@ impl EvalRequest {
             for &d in &t.shape {
                 write_u64(&mut buf, d as u64).unwrap();
             }
-            write_u32(&mut buf, 0).unwrap(); // dtype: 0 = f32
+            write_u32(&mut buf, t.dtype.to_wire()).unwrap();
             write_u32(&mut buf, t.data.len() as u32).unwrap();
             buf.write_all(&t.data).unwrap();
         }
@@ -377,7 +383,7 @@ impl EvalRequest {
             for &d in node.out_shape.dims() {
                 write_u64(&mut buf, d as u64).unwrap();
             }
-            write_u32(&mut buf, 0).unwrap(); // out_dtype: 0 = f32
+            write_u32(&mut buf, node.out_dtype.to_wire()).unwrap();
 
             if let OpKind::FusedElementwise { ref kernel_source, ref function_name } = node.op {
                 write_u32(&mut buf, kernel_source.len() as u32).unwrap();
@@ -472,6 +478,9 @@ impl EvalRequest {
             if let OpKind::BatchNormBackward { eps } = node.op {
                 buf.write_all(&eps.to_le_bytes()).unwrap();
             }
+            if let OpKind::Cast { target_dtype } = node.op {
+                write_u32(&mut buf, target_dtype.to_wire()).unwrap();
+            }
             if let OpKind::Shl { shift } = node.op {
                 write_u32(&mut buf, shift).unwrap();
             }
@@ -528,11 +537,13 @@ impl EvalRequest {
             for _ in 0..num_dims {
                 shape.push(read_u64(&mut r)? as usize);
             }
-            let _dtype = read_u32(&mut r)?;
+            let dtype_disc = read_u32(&mut r)?;
+            let dtype = DType::from_wire(dtype_disc)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("Unknown dtype discriminant: {}", dtype_disc)))?;
             let data_len = read_u32(&mut r)? as usize;
             let mut data = vec![0u8; data_len];
             r.read_exact(&mut data)?;
-            tensors.push(TensorData { id, shape, dtype: DType::Float32, data });
+            tensors.push(TensorData { id, shape, dtype, data });
         }
 
         let num_nodes = read_u32(&mut r)? as usize;
@@ -550,7 +561,9 @@ impl EvalRequest {
             for _ in 0..num_out_dims {
                 out_shape.push(read_u64(&mut r)? as usize);
             }
-            let _out_dtype = read_u32(&mut r)?;
+            let out_dtype_disc = read_u32(&mut r)?;
+            let out_dtype = DType::from_wire(out_dtype_disc)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("Unknown out_dtype discriminant: {}", out_dtype_disc)))?;
 
             let op = discriminant_to_op(op_disc, &mut r)?;
             let out_shape = Shape::new(out_shape)
@@ -560,7 +573,7 @@ impl EvalRequest {
                 op,
                 inputs,
                 out_shape,
-                out_dtype: DType::Float32,
+                out_dtype,
                 container_id: ContainerId::DEFAULT,
             });
         }
@@ -690,15 +703,31 @@ impl From<&OpKind> for WireOpKind {
             OpKind::Conv2dBackwardInput { stride, padding } => WireOpKind::Conv2dBackwardInput { stride: *stride, padding: *padding },
             OpKind::EmbeddingBackward => WireOpKind::EmbeddingBackward,
             OpKind::BatchNormBackward { eps } => WireOpKind::BatchNormBackward { eps: *eps },
-            OpKind::Lt | OpKind::Gt | OpKind::Le | OpKind::Ge | OpKind::Eq | OpKind::Ne =>
-                unimplemented!("Comparison ops not supported over wire"),
-            OpKind::BitwiseAnd | OpKind::BitwiseOr | OpKind::BitwiseXor | OpKind::BitwiseNot |
-            OpKind::Shl { .. } | OpKind::Shr { .. } | OpKind::Mod |
-            OpKind::ElemMin | OpKind::ElemMax | OpKind::LogicalNot =>
-                unimplemented!("New ops not supported over wire protocol"),
-            OpKind::Cast { .. } => unimplemented!("Cast op is not supported over wire protocol"),
-            OpKind::Quantize { .. } => unimplemented!("Quantize op is not supported over wire protocol"),
-            OpKind::Dequantize { .. } => unimplemented!("Dequantize op is not supported over wire protocol"),
+            OpKind::Lt => WireOpKind::Lt,
+            OpKind::Gt => WireOpKind::Gt,
+            OpKind::Le => WireOpKind::Le,
+            OpKind::Ge => WireOpKind::Ge,
+            OpKind::Eq => WireOpKind::Eq,
+            OpKind::Ne => WireOpKind::Ne,
+            OpKind::BitwiseAnd => WireOpKind::BitwiseAnd,
+            OpKind::BitwiseOr => WireOpKind::BitwiseOr,
+            OpKind::BitwiseXor => WireOpKind::BitwiseXor,
+            OpKind::BitwiseNot => WireOpKind::BitwiseNot,
+            OpKind::Shl { shift } => WireOpKind::Shl { shift: *shift },
+            OpKind::Shr { shift } => WireOpKind::Shr { shift: *shift },
+            OpKind::Mod => WireOpKind::Mod,
+            OpKind::ElemMin => WireOpKind::ElemMin,
+            OpKind::ElemMax => WireOpKind::ElemMax,
+            OpKind::LogicalNot => WireOpKind::LogicalNot,
+            OpKind::Cast { target_dtype } => WireOpKind::Cast { target_dtype: target_dtype.to_wire() as u8 },
+            OpKind::Quantize { scale, zero_point, target_dtype } => {
+                let dt = match target_dtype { DType::Int8 => 0u8, DType::UInt8 => 1, _ => 0 };
+                WireOpKind::Quantize { scale: *scale, zero_point: *zero_point, target_dtype: dt }
+            }
+            OpKind::Dequantize { scale, zero_point, target_dtype } => {
+                let dt = match target_dtype { DType::Float32 => 0u8, DType::Float16 => 1, DType::BFloat16 => 2, _ => 0 };
+                WireOpKind::Dequantize { scale: *scale, zero_point: *zero_point, target_dtype: dt }
+            }
         }
     }
 }
@@ -710,7 +739,7 @@ impl From<&OpNode> for WireOpNode {
             op: WireOpKind::from(&node.op),
             inputs: node.inputs.clone(),
             out_shape: node.out_shape.dims().to_vec(),
-            out_dtype: 0,
+            out_dtype: node.out_dtype.to_wire(),
         }
     }
 }
@@ -772,18 +801,49 @@ pub fn wire_op_to_core(wire: &WireOpKind) -> OpKind {
         WireOpKind::Conv2dBackwardInput { stride, padding } => OpKind::Conv2dBackwardInput { stride: *stride, padding: *padding },
         WireOpKind::EmbeddingBackward => OpKind::EmbeddingBackward,
         WireOpKind::BatchNormBackward { eps } => OpKind::BatchNormBackward { eps: *eps },
+        WireOpKind::Cast { target_dtype } => {
+            let dt = DType::from_wire(*target_dtype as u32)
+                .unwrap_or(DType::Float32);
+            OpKind::Cast { target_dtype: dt }
+        }
+        WireOpKind::Lt => OpKind::Lt,
+        WireOpKind::Gt => OpKind::Gt,
+        WireOpKind::Le => OpKind::Le,
+        WireOpKind::Ge => OpKind::Ge,
+        WireOpKind::Eq => OpKind::Eq,
+        WireOpKind::Ne => OpKind::Ne,
+        WireOpKind::BitwiseAnd => OpKind::BitwiseAnd,
+        WireOpKind::BitwiseOr => OpKind::BitwiseOr,
+        WireOpKind::BitwiseXor => OpKind::BitwiseXor,
+        WireOpKind::BitwiseNot => OpKind::BitwiseNot,
+        WireOpKind::Shl { shift } => OpKind::Shl { shift: *shift },
+        WireOpKind::Shr { shift } => OpKind::Shr { shift: *shift },
+        WireOpKind::Mod => OpKind::Mod,
+        WireOpKind::ElemMin => OpKind::ElemMin,
+        WireOpKind::ElemMax => OpKind::ElemMax,
+        WireOpKind::LogicalNot => OpKind::LogicalNot,
+        WireOpKind::Quantize { scale, zero_point, target_dtype } => {
+            let dt = match target_dtype { 0 => DType::Int8, 1 => DType::UInt8, _ => DType::Int8 };
+            OpKind::Quantize { scale: *scale, zero_point: *zero_point, target_dtype: dt }
+        }
+        WireOpKind::Dequantize { scale, zero_point, target_dtype } => {
+            let dt = match target_dtype { 0 => DType::Float32, 1 => DType::Float16, 2 => DType::BFloat16, _ => DType::Float32 };
+            OpKind::Dequantize { scale: *scale, zero_point: *zero_point, target_dtype: dt }
+        }
     }
 }
 
 pub fn wire_node_to_core(wire: &WireOpNode) -> std::result::Result<OpNode, std::io::Error> {
     let out_shape = Shape::new(wire.out_shape.clone())
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+    let out_dtype = DType::from_wire(wire.out_dtype)
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Unknown wire out_dtype: {}", wire.out_dtype)))?;
     Ok(OpNode {
         id: wire.id,
         op: wire_op_to_core(&wire.op),
         inputs: wire.inputs.clone(),
         out_shape,
-        out_dtype: DType::Float32,
+        out_dtype,
         container_id: ContainerId::DEFAULT,
     })
 }
@@ -906,5 +966,93 @@ mod tests {
         let deserialized = EvalRequest::deserialize(&serialized).unwrap();
         assert!(deserialized.nodes[0].op.is_matmul());
         assert_eq!(deserialized.nodes[0].out_shape.dims(), &[2, 2]);
+    }
+
+    #[test]
+    fn request_roundtrip_int32_dtype() {
+        let data: Vec<i32> = vec![10, 20, 30, 40];
+        let bytes: Vec<u8> = data.iter().flat_map(|v| v.to_le_bytes()).collect();
+
+        let req = EvalRequest {
+            target_id: 99,
+            tensors: vec![
+                TensorData { id: 1, shape: vec![4], dtype: DType::Int32, data: bytes },
+            ],
+            nodes: vec![
+                OpNode {
+                    id: 99,
+                    op: OpKind::Add,
+                    inputs: vec![1, 1],
+                    out_shape: Shape::new(vec![4]).unwrap(),
+                    out_dtype: DType::Int32,
+                    container_id: ContainerId::DEFAULT,
+                },
+            ],
+        };
+
+        let serialized = req.serialize();
+        let deserialized = EvalRequest::deserialize(&serialized).unwrap();
+
+        assert_eq!(deserialized.tensors[0].dtype, DType::Int32);
+        assert_eq!(deserialized.nodes[0].out_dtype, DType::Int32);
+    }
+
+    #[test]
+    fn request_roundtrip_cast_op() {
+        let req = EvalRequest {
+            target_id: 7,
+            tensors: vec![],
+            nodes: vec![
+                OpNode {
+                    id: 7,
+                    op: OpKind::Cast { target_dtype: DType::Float16 },
+                    inputs: vec![1],
+                    out_shape: Shape::new(vec![4]).unwrap(),
+                    out_dtype: DType::Float16,
+                    container_id: ContainerId::DEFAULT,
+                },
+            ],
+        };
+
+        let serialized = req.serialize();
+        let deserialized = EvalRequest::deserialize(&serialized).unwrap();
+
+        assert_eq!(deserialized.nodes[0].out_dtype, DType::Float16);
+        if let OpKind::Cast { target_dtype } = deserialized.nodes[0].op {
+            assert_eq!(target_dtype, DType::Float16);
+        } else {
+            panic!("Expected Cast op");
+        }
+    }
+
+    #[test]
+    fn request_roundtrip_all_dtypes() {
+        let dtypes = vec![
+            DType::Float32, DType::Float16, DType::Float64,
+            DType::Int8, DType::Int16, DType::Int32, DType::Int64,
+            DType::UInt8, DType::UInt32, DType::Bool, DType::BFloat16,
+        ];
+        for dtype in dtypes {
+            let req = EvalRequest {
+                target_id: 1,
+                tensors: vec![
+                    TensorData { id: 1, shape: vec![1], dtype, data: vec![0u8; dtype.size_bytes()] },
+                ],
+                nodes: vec![
+                    OpNode {
+                        id: 1,
+                        op: OpKind::Neg,
+                        inputs: vec![1],
+                        out_shape: Shape::new(vec![1]).unwrap(),
+                        out_dtype: dtype,
+                        container_id: ContainerId::DEFAULT,
+                    },
+                ],
+            };
+            let serialized = req.serialize();
+            let de = EvalRequest::deserialize(&serialized).unwrap();
+            assert_eq!(de.tensors[0].dtype, dtype, "tensor dtype mismatch for {:?}", dtype);
+            assert_eq!(de.nodes[0].out_dtype, dtype, "node out_dtype mismatch for {:?}", dtype);
+        }
     }
 }

@@ -55,6 +55,41 @@ impl DType {
         }
     }
 
+    /// Encode as wire protocol discriminant (matches `WireDType`).
+    pub fn to_wire(&self) -> u32 {
+        match self {
+            DType::Float32 => 0,
+            DType::Float16 => 1,
+            DType::Float64 => 2,
+            DType::Int8 => 3,
+            DType::Int16 => 4,
+            DType::Int32 => 5,
+            DType::Int64 => 6,
+            DType::UInt8 => 7,
+            DType::UInt32 => 8,
+            DType::Bool => 9,
+            DType::BFloat16 => 10,
+        }
+    }
+
+    /// Decode from wire protocol discriminant (matches `WireDType`).
+    pub fn from_wire(d: u32) -> Option<DType> {
+        match d {
+            0 => Some(DType::Float32),
+            1 => Some(DType::Float16),
+            2 => Some(DType::Float64),
+            3 => Some(DType::Int8),
+            4 => Some(DType::Int16),
+            5 => Some(DType::Int32),
+            6 => Some(DType::Int64),
+            7 => Some(DType::UInt8),
+            8 => Some(DType::UInt32),
+            9 => Some(DType::Bool),
+            10 => Some(DType::BFloat16),
+            _ => None,
+        }
+    }
+
     /// Map to string name.
     pub fn name(&self) -> &'static str {
         match self {
