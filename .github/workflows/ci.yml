@@ -43,7 +43,7 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - uses: astral-sh/setup-uv@v5
-      - run: uv pip install maturin
+      - run: pip install maturin
       - run: uv sync
       # Verify the Python extension builds (but skip tests — they need Metal GPU)
       - run: uv run maturin develop
