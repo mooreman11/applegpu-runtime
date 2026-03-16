@@ -51,8 +51,14 @@ impl GpuClient {
     }
 
     pub fn connect_vsock(port: u32, requested_memory: u64) -> Result<Self> {
+        // transport::connect_vsock returns Box<dyn Transport>.
+        // Task 4 will type-erase GpuClient.stream and handshake() to accept
+        // Box<dyn Transport> — at that point this becomes a direct delegation.
         let stream = transport::connect_vsock(2, port)?;
-        Self::handshake(stream, requested_memory)
+        drop((stream, requested_memory));
+        Err(ClientError::Protocol(
+            "connect_vsock: handshake not yet type-erased; upgrade to Task 4".into(),
+        ))
     }
 
     fn handshake(mut stream: UnixStream, requested_memory: u64) -> Result<Self> {

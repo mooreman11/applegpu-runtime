@@ -31,51 +31,24 @@ pub fn connect_tcp(host: &str, port: u16) -> io::Result<TcpStream> {
 }
 
 /// Connect via vsock (AF_VSOCK). Only available on Linux.
-/// CID 2 = host. Returns a UnixStream wrapping the vsock fd.
+/// CID 2 = host. Returns a boxed Transport for uniform handling.
 #[cfg(target_os = "linux")]
-pub fn connect_vsock(cid: u32, port: u32) -> io::Result<UnixStream> {
-    use std::os::unix::io::FromRawFd;
+pub fn connect_vsock(cid: u32, port: u32) -> io::Result<Box<dyn Transport>> {
+    let stream = vsock::VsockStream::connect_with_cid_port(cid, port)?;
+    Ok(Box::new(stream))
+}
 
-    let fd = unsafe { libc::socket(40, libc::SOCK_STREAM, 0) };
-    if fd < 0 {
-        return Err(io::Error::last_os_error());
+#[cfg(target_os = "linux")]
+impl Transport for vsock::VsockStream {
+    fn shutdown(&self) -> io::Result<()> {
+        use std::os::unix::io::AsRawFd;
+        let ret = unsafe { libc::shutdown(self.as_raw_fd(), libc::SHUT_RDWR) };
+        if ret < 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
     }
-
-    #[repr(C)]
-    struct SockaddrVm {
-        svm_family: u16,
-        svm_reserved1: u16,
-        svm_port: u32,
-        svm_cid: u32,
-        svm_zero: [u8; 4],
-    }
-
-    let addr = SockaddrVm {
-        svm_family: 40,
-        svm_reserved1: 0,
-        svm_port: port,
-        svm_cid: cid,
-        svm_zero: [0; 4],
-    };
-
-    let ret = unsafe {
-        libc::connect(
-            fd,
-            &addr as *const SockaddrVm as *const libc::sockaddr,
-            std::mem::size_of::<SockaddrVm>() as u32,
-        )
-    };
-    if ret < 0 {
-        unsafe { libc::close(fd) };
-        return Err(io::Error::last_os_error());
-    }
-
-    let stream = unsafe { UnixStream::from_raw_fd(fd) };
-    Ok(stream)
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn connect_vsock(_cid: u32, _port: u32) -> io::Result<UnixStream> {
+pub fn connect_vsock(_cid: u32, _port: u32) -> io::Result<Box<dyn Transport>> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "vsock is only available on Linux guests",
