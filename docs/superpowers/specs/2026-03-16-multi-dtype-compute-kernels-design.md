@@ -159,9 +159,16 @@ Remaining work, batched by priority:
 
 ## Backlog
 
+### Deferred from this spec (future work)
+
 - **Float64 compute kernels** — MSL does not support `double`. Revisit when Apple hardware adds support.
-- **Backward ops multi-dtype** — extend backward kernels to BFloat16/Int types
-- **`isinf`/`isnan`** for float types → Bool output
-- **`fill`/`zeros`/`ones`** compute kernels for all dtypes
-- **Quantized matmul** — Int8 weights × Float16 activations with scale factors (dedicated kernel, not generic int matmul)
-- **Reduction output dtype overrides** — implement the reduction output dtype table (sum of Int32 → Int32, mean of Int32 → Float32, etc.)
+- **Backward ops multi-dtype** — extend backward kernels (SoftmaxBackward, LayerNormBackward, Conv2dBackwardInput, EmbeddingBackward, BatchNormBackward) to BFloat16. Int backward ops are not meaningful.
+- **Reduction output dtype overrides** — implement the reduction output dtype table above (e.g., sum of Int32 → Int32 wrapping, mean of Int32 → Float32, sum of Bool → Int32 count). Currently all reductions output the same dtype as input.
+- **Quantized matmul** — Int8 weights × Float16 activations with scale factors (dedicated kernel, not generic int matmul). High-value for inference performance.
+- **`isinf`/`isnan`** — float → Bool predicates for numerical debugging
+- **`fill`/`zeros`/`ones`** — compute kernels for all dtypes (currently uses from_bytes for initialization)
+- **Fused comparison chains** — e.g., `(a > 0) & (a < 10)` as a single kernel. Requires fusion engine to handle mixed-dtype chains (float input → bool intermediate → bool output).
+- **`where` / `masked_fill` Bool condition enforcement** — currently condition tensor can be any dtype (nonzero = true). Spec says condition should be Bool. Need migration path.
+- **Int8/Int16 arithmetic** — currently blocked as "storage only" types. If use cases arise (e.g., quantized residual connections), revisit.
+- **`is_elementwise()` expansion** — new ops (comparisons, bitwise, elem min/max) need to be marked as fusable or not for the kernel fusion engine. Comparisons should NOT be fused (they change output dtype). Bitwise and elem min/max CAN be fused.
+- **Per-op per-device capability query** — `KernelRegistry::supports(op, dtype, device)` for fine-grained capability checks. Current `validate_op_dtype` is static; doesn't account for device-specific restrictions beyond Int64.
