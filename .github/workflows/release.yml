@@ -1,0 +1,114 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  build-wheels-macos:
+    name: Build macOS Wheels
+    runs-on: macos-15-xlarge
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: |
+            3.10
+            3.11
+            3.12
+            3.13
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          args: --release -i python3.10 python3.11 python3.12 python3.13
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-macos
+          path: target/wheels/*.whl
+
+  build-wheels-linux:
+    name: Build Linux aarch64 Wheels
+    runs-on: macos-15-xlarge
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: |
+            3.10
+            3.11
+            3.12
+            3.13
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: goto-bus-stop/setup-zig@v2
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          args: --release --target aarch64-unknown-linux-gnu --zig -i python3.10 python3.11 python3.12 python3.13
+          manylinux: auto
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux
+          path: target/wheels/*.whl
+
+  build-binaries:
+    name: Build Swift + Rust Binaries
+    runs-on: macos-15-xlarge
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build gpu-service
+        run: cargo build -p applegpu-service --release
+      - name: Build gpu-container
+        run: cd swift/GPUContainer && swift build -c release
+      - name: Collect binaries
+        run: |
+          mkdir -p dist
+          cp target/release/gpu-service dist/
+          cp swift/GPUContainer/.build/release/gpu-container dist/
+          cd dist && shasum -a 256 * > checksums.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binaries
+          path: dist/*
+
+  release:
+    name: Create Release
+    needs: [build-wheels-macos, build-wheels-linux, build-binaries]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Collect all artifacts
+        run: |
+          mkdir -p dist
+          cp artifacts/wheels-macos/*.whl dist/
+          cp artifacts/wheels-linux/*.whl dist/
+          cp artifacts/binaries/* dist/
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+      - name: Publish to TestPyPI
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.TESTPYPI_TOKEN }}
+        run: |
+          pip install twine
+          twine upload --repository testpypi dist/*.whl || echo "TestPyPI upload failed (token may not be configured)"
