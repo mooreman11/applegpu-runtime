@@ -21,6 +21,16 @@ GPUBufferHandle* gpu_bridge_create_buffer(const GPUDeviceHandle* device, uint64_
 GPUBufferHandle* gpu_bridge_create_buffer_with_data(const GPUDeviceHandle* device, const void* data, uint64_t size_bytes);
 void gpu_bridge_destroy_buffer(GPUBufferHandle* buffer);
 
+// Zero-copy buffer: Metal references external memory. Deallocator fires when buffer is released.
+typedef void (*GPUDeallocator)(void* ptr, uint64_t len, void* context);
+GPUBufferHandle* gpu_bridge_create_buffer_no_copy(
+    const GPUDeviceHandle* device,
+    void* data,
+    uint64_t size_bytes,
+    GPUDeallocator deallocator,
+    void* deallocator_context
+);
+
 // Buffer data access
 void* gpu_bridge_buffer_contents(const GPUBufferHandle* buffer);
 uint64_t gpu_bridge_buffer_length(const GPUBufferHandle* buffer);

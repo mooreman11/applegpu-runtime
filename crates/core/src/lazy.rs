@@ -46,6 +46,15 @@ impl LazyRuntime {
         Ok(())
     }
 
+    /// Insert a tensor with custom memory accounting size.
+    /// Used for shared (zero-copy) tensors where memory belongs to Python, not Metal.
+    pub fn insert_tensor_with_size(&mut self, tensor: Tensor, accounting_size: usize) -> Result<()> {
+        let id = tensor.meta.id;
+        self.scheduler.allocate_tensor(ContainerId::DEFAULT, id, accounting_size)?;
+        self.tensors.insert(id, tensor);
+        Ok(())
+    }
+
     /// Insert a tensor attributed to a specific container.
     pub fn insert_tensor_for(&mut self, tensor: Tensor, container_id: ContainerId) -> Result<()> {
         let size = tensor.meta.size_bytes();
@@ -267,6 +276,13 @@ impl LazyRuntime {
     #[allow(dead_code)]
     fn execute_node(&mut self, device: &Device, node: &OpNode) -> Result<Tensor> {
         let out_size = node.out_shape.numel() * node.out_dtype.size_bytes();
+
+        // Pre-check: if the node references an existing tensor as output, reject borrowed buffers
+        if let Some(existing) = self.tensors.get(&node.id) {
+            if existing.buffer.kind.is_borrowed() {
+                return Err(GpuError::ImmutableBuffer(existing.meta.id));
+            }
+        }
 
         // Handle fused kernels first (N-D stride-based dispatch)
         if let crate::graph::OpKind::FusedElementwise { ref kernel_source, ref function_name } = node.op {
@@ -975,6 +991,11 @@ impl LazyRuntime {
         node: &OpNode,
         out: &Tensor,
     ) -> Result<*mut std::ffi::c_void> {
+        // Reject borrowed (immutable) buffers as output targets
+        if out.buffer.kind.is_borrowed() {
+            return Err(GpuError::ImmutableBuffer(out.meta.id));
+        }
+
         // Handle fused kernels first (N-D stride-based dispatch)
         if let crate::graph::OpKind::FusedElementwise { ref kernel_source, ref function_name } = node.op {
             let input_tensors: Vec<&Tensor> = node.inputs.iter()

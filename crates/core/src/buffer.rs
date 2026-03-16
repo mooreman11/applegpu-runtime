@@ -1,12 +1,38 @@
+use std::ffi::c_void;
+
 use crate::device::Device;
 use crate::error::{GpuError, Result};
 use crate::ffi;
+
+/// Ownership tracking for GPU buffers.
+#[derive(Debug)]
+pub enum BufferKind {
+    /// Buffer owns its Metal memory. Can be used as op output. Poolable.
+    Owned,
+    /// Buffer borrows external memory (numpy/torch). Read-only for GPU ops. Not poolable.
+    /// The _pinned_object is a raw pointer (e.g. PyObject*) that was ref-incremented at creation.
+    /// It will be released by Metal's deallocator callback when the buffer is destroyed.
+    Borrowed { _pinned_object: *mut c_void },
+}
+
+// Safety: _pinned_object is a reference-counted PyObject*. The pointer itself is never
+// dereferenced from Rust — it's only passed to the Swift deallocator which calls Py_DecRef
+// with the GIL.
+unsafe impl Send for BufferKind {}
+unsafe impl Sync for BufferKind {}
+
+impl BufferKind {
+    pub fn is_borrowed(&self) -> bool {
+        matches!(self, BufferKind::Borrowed { .. })
+    }
+}
 
 /// A Metal GPU buffer. Wraps an MTLBuffer via the Swift bridge.
 /// Uses storageModeShared for zero-copy CPU/GPU access.
 pub struct Buffer {
     handle: *mut ffi::GPUBufferHandle,
     len: usize,
+    pub(crate) kind: BufferKind,
 }
 
 unsafe impl Send for Buffer {}
@@ -24,6 +50,7 @@ impl Buffer {
             Ok(Buffer {
                 handle,
                 len: size_bytes,
+                kind: BufferKind::Owned,
             })
         }
     }
@@ -43,6 +70,37 @@ impl Buffer {
             Ok(Buffer {
                 handle,
                 len: data.len(),
+                kind: BufferKind::Owned,
+            })
+        }
+    }
+
+    /// Create a zero-copy buffer referencing external memory.
+    /// The deallocator callback (passed to Swift/Metal) fires when the buffer is released.
+    /// `pinned_object` is an opaque pointer (e.g. PyObject*) passed as context to the deallocator.
+    pub fn from_ptr_no_copy(
+        device: &Device,
+        ptr: *mut u8,
+        len: usize,
+        pinned_object: *mut c_void,
+        deallocator: Option<unsafe extern "C" fn(*mut c_void, u64, *mut c_void)>,
+    ) -> Result<Self> {
+        let handle = unsafe {
+            ffi::gpu_bridge_create_buffer_no_copy(
+                device.raw_handle(),
+                ptr as *mut c_void,
+                len as u64,
+                deallocator,
+                pinned_object,
+            )
+        };
+        if handle.is_null() {
+            Err(GpuError::BufferAllocationFailed(len))
+        } else {
+            Ok(Buffer {
+                handle,
+                len,
+                kind: BufferKind::Borrowed { _pinned_object: pinned_object },
             })
         }
     }
@@ -101,6 +159,18 @@ impl Drop for Buffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_buffer_kind_owned_is_not_borrowed() {
+        let kind = BufferKind::Owned;
+        assert!(!kind.is_borrowed());
+    }
+
+    #[test]
+    fn test_buffer_kind_borrowed_is_borrowed() {
+        let kind = BufferKind::Borrowed { _pinned_object: std::ptr::null_mut() };
+        assert!(kind.is_borrowed());
+    }
 
     #[test]
     fn buffer_alloc_and_length() {

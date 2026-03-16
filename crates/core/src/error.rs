@@ -27,6 +27,8 @@ pub enum GpuError {
     AdmissionRejected(String),
     /// Operation not supported for the given dtype
     UnsupportedDtype(String),
+    /// Borrowed (immutable) buffer cannot be used as output
+    ImmutableBuffer(u64),
 }
 
 impl std::fmt::Display for GpuError {
@@ -45,6 +47,7 @@ impl std::fmt::Display for GpuError {
             GpuError::JobNotFound(msg) => write!(f, "Job not found: {}", msg),
             GpuError::AdmissionRejected(msg) => write!(f, "Admission rejected: {}", msg),
             GpuError::UnsupportedDtype(msg) => write!(f, "Unsupported dtype: {}", msg),
+            GpuError::ImmutableBuffer(id) => write!(f, "Tensor {} has a borrowed (immutable) buffer and cannot be used as output", id),
         }
     }
 }

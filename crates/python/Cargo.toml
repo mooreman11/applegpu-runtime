@@ -12,6 +12,7 @@ pyo3 = { version = "0.22", features = ["extension-module"] }
 numpy = "0.22"
 half = "2"
 once_cell = "1"
+libc = "0.2"
 
 # Wire crate is platform-independent — always available
 applegpu-wire = { path = "../wire" }

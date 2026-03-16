@@ -47,7 +47,11 @@ impl BufferPool {
 
     /// Return a buffer to the pool for future reuse.
     /// Drops non-power-of-two buffers and buffers that would exceed the watermark.
+    /// Borrowed (zero-copy) buffers are never pooled — they are simply dropped.
     pub fn release(&mut self, buffer: Buffer) {
+        if buffer.kind.is_borrowed() {
+            return; // Borrowed buffers cannot be pooled — just drop them
+        }
         let len = buffer.len();
         if !len.is_power_of_two() {
             // Drop non-power-of-two buffers (not from pool)

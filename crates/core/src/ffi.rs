@@ -64,6 +64,14 @@ extern "C" {
 
     pub fn gpu_bridge_destroy_buffer(buffer: *mut GPUBufferHandle);
 
+    pub fn gpu_bridge_create_buffer_no_copy(
+        device: *const GPUDeviceHandle,
+        data: *mut std::ffi::c_void,
+        size_bytes: u64,
+        deallocator: Option<unsafe extern "C" fn(*mut std::ffi::c_void, u64, *mut std::ffi::c_void)>,
+        deallocator_context: *mut std::ffi::c_void,
+    ) -> *mut GPUBufferHandle;
+
     pub fn gpu_bridge_buffer_contents(buffer: *const GPUBufferHandle) -> *mut std::ffi::c_void;
 
     pub fn gpu_bridge_buffer_length(buffer: *const GPUBufferHandle) -> u64;

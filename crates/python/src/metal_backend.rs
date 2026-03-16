@@ -1,6 +1,7 @@
 #![cfg(target_os = "macos")]
 
 use std::collections::HashMap;
+use std::ffi::c_void;
 use std::sync::Mutex;
 
 use applegpu_core::lazy::LazyRuntime;
@@ -8,6 +9,22 @@ use applegpu_core::tensor::{DType, Tensor};
 use applegpu_core::scheduler::{ContainerId, ContainerConfig, Priority, JobId, JobStatus};
 
 use crate::backend::{Backend, BackendResult};
+
+/// C-compatible deallocator matching GPUDeallocator typedef.
+/// Called by Metal (via Swift) when the MTLBuffer is released.
+/// `context` is a PyObject* that was Py_IncRef'd during from_numpy_shared.
+/// Must acquire the GIL before calling Py_DecRef.
+unsafe extern "C" fn buffer_deallocator(
+    _ptr: *mut c_void,
+    _len: u64,
+    context: *mut c_void,
+) {
+    if !context.is_null() {
+        pyo3::Python::with_gil(|_py| {
+            pyo3::ffi::Py_DecRef(context as *mut pyo3::ffi::PyObject);
+        });
+    }
+}
 
 /// Metal backend for macOS — wraps LazyRuntime with a Mutex for thread safety.
 pub struct MetalBackend {
@@ -68,6 +85,23 @@ impl Backend for MetalBackend {
         let t = map_err!(Tensor::from_data(&runtime.device, shape, dtype, data))?;
         let id = t.meta.id;
         map_err!(self.runtime.lock().unwrap().insert_tensor(t))?;
+        Ok(id)
+    }
+
+    fn tensor_from_ptr_no_copy(
+        &self, ptr: *mut u8, len: usize, shape: Vec<usize>,
+        dtype: DType, release_context: *mut c_void,
+    ) -> BackendResult<u64> {
+        let runtime = get_device_runtime()?;
+        let buffer = applegpu_core::buffer::Buffer::from_ptr_no_copy(
+            &runtime.device, ptr, len, release_context,
+            Some(buffer_deallocator),
+        ).map_err(|e| e.to_string())?;
+        let id = applegpu_core::tensor::next_tensor_id();
+        let tensor = Tensor::from_raw(id, shape, dtype, buffer);
+        let mut rt = self.runtime.lock().unwrap();
+        // size=0 for memory accounting (memory belongs to Python)
+        map_err!(rt.insert_tensor_with_size(tensor, 0))?;
         Ok(id)
     }
 
