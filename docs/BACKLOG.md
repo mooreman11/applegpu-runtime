@@ -123,63 +123,66 @@ _Containerization, multi-dtype completion, wire protocol v3, CI/packaging._
 ### Packaging + CI
 - [x] Version bump to 0.8.0 (dynamic pyproject.toml versioning)
 - [x] `pip install applegpu_runtime` from GitHub Releases
+- [x] CI workflow — enabled on push/PR with `macos-14` runners (Rust + Swift + Python 3.10-3.13 build checks)
+- [x] Release workflow — triggered on `v*` tags, builds 8 wheels + binaries
+- [x] `--version` flag for gpu-service and gpu-container
+- [x] Install script (`install.sh`) with SHA256 checksums
+- [x] `make ci` / `make release-local` — local CI via act or direct build
+- [x] TestPyPI — wheels uploaded, verified (https://test.pypi.org/project/applegpu-runtime/0.8.0/)
+- [x] Homebrew tap — `brew install mooreman11/tap/applegpu-runtime`
+
+### N-D Generalization + Missing Ops
+- [x] Generalize `add_bias` to N-D — channel-aware kernel with `channel_stride`
+- [x] Audit and fix 2D-hardcoded ops — only `argmax` needed fixing, rest already N-D
+- [x] `sin`/`cos` — float unary ops
+- [x] `log_softmax` — fused with numerical stability
+- [x] Fix Conv1d/Conv2d bias CPU fallback in torch_backend — uses `gpu.add_bias()` now
+- [x] Verify cross-attention shapes — `q_len != kv_len` works (3D and 4D tested)
+
+### Vsock Relay (partially implemented)
+- [x] Package.swift — Containerization dependency, Swift 6.1, macOS 26.0
+- [x] Extract shared `UnixSocketHelper`
+- [x] ContainerRunner — Tier 1/2 with ContainerManager API
+- [x] Run.swift fixes — APPLEGPU_FORCE_TCP, async fix, configurable bridge IP
+- [x] VsockRelay.swift deprecated, image normalization, entitlements
 
 ---
 
 ## Up Next
 
-### PRIORITY 1: Packaging Polish
-- [x] CI workflow — enabled on push/PR with `macos-14` runners (Rust + Swift + Python 3.10-3.13 build checks)
-- [x] Release workflow — triggered on `v*` tags, builds 8 wheels + binaries uploaded via `gh release upload`
-- [x] `--version` flag for gpu-service and gpu-container
-- [x] Install script (`install.sh`) — downloads binaries from GitHub Releases with SHA256 checksums
-- [x] `make ci` / `make release-local` — local CI via act or direct build
-- [x] TestPyPI validation — wheels uploaded, `pip install` verified (https://test.pypi.org/project/applegpu-runtime/0.8.0/)
-- [x] Homebrew tap — `brew install mooreman11/tap/applegpu-runtime` (https://github.com/mooreman11/homebrew-tap)
-- [ ] PyPI publishing — real PyPI after TestPyPI validation
-- [ ] Binary signing/notarization — Apple Developer ID signing for gpu-container/gpu-service
+### PRIORITY 1: Whisper Speech-to-Text (in progress)
+_Model skeleton complete, forward pass has a bug producing wrong logits._
+- [x] Model skeleton + HuggingFace weight loading (168 tensors for tiny)
+- [x] Audio encoder — Conv1d + GELU + attention blocks + LayerNorm
+- [x] Text decoder — dual KV cache (self-attn grows, cross-attn static)
+- [x] Greedy decoding with forced prefix tokens + special token suppression
+- [x] Causal mask fix — use `attention_causal` only for prefix step (q_len > 1)
+- [ ] **Debug forward pass** — logits produce garbage (repeated punctuation). Need layer-by-layer comparison against PyTorch reference.
+- [ ] Integration test with real speech audio
+- [ ] Example script (`whisper_transcribe.py`) — created but untested end-to-end
 
-### PRIORITY 2: Replace TCP Bridge with Unix Socket Relay / vsock
-_Three-tier fallback architecture. Partially implemented — blocked by framework socket staging bug._
+### PRIORITY 2: PyPI Publishing
+- [ ] Create PyPI account + API token
+- [ ] Publish wheels to real PyPI
+- [ ] Add `PYPI_TOKEN` GitHub secret for automated releases
 
-**Done:**
-- [x] Package.swift — Containerization dependency, Swift 6.1, macOS 26.0
-- [x] Extract shared `UnixSocketHelper` — deduplicate relay + connect code
-- [x] ContainerRunner — Tier 1/2 implementation with ContainerManager API
-- [x] Run.swift fixes — APPLEGPU_FORCE_TCP flag, async fix, configurable bridge IP
-- [x] VsockRelay.swift deprecated
-- [x] Image reference normalization (alpine → docker.io/library/alpine:latest)
-- [x] Virtualization entitlements (com.apple.security.virtualization)
+### PRIORITY 3: Vsock Socket Relay (blocked)
+_Blocked by apple/containerization framework socket staging bug (errno 20 ENOTDIR)._
+- [ ] Fix socket staging — try low-level `LinuxContainer(rootfs:vmm:)` API or `dialVsock` manual relay
+- [ ] Remove TCP bridge once vsock path is proven
+- [ ] Delete VsockRelay.swift (kept with deprecation)
+- [ ] Socket helper unit tests
 
-**Blocked:**
-- [ ] `UnixSocketConfiguration` socket staging — framework bug: bind-mount fails with `errno 20 (ENOTDIR)` because destination file doesn't exist in rootfs ext4 before mount. Happens during rootfs prep, before VM boot. Filed as known issue.
-  - Workaround options: (a) use low-level `LinuxContainer(rootfs:vmm:)` API which may handle staging differently, (b) use `dialVsock(port:)` for manual relay after VM boots, (c) wait for framework fix
-- [ ] Low-level API path — use `LinuxContainer` directly with pre-prepared rootfs + `VZVirtualMachineManager` instead of `ContainerManager.create(reference:)`. More code but avoids the rootfs mount ordering issue. The framework's own integration tests use this path successfully.
-
-**Post-vsock cleanup (after validation):**
-- [ ] Remove TCP bridge — once Containerization framework path is proven stable
-- [ ] Delete VsockRelay.swift — kept with deprecation notice
-- [ ] Socket helper unit tests — test connect/relay with temporary Unix sockets
-
-### PRIORITY 3: N-D Generalization + Missing Ops
-_Several ops are hardcoded to 2D when the underlying kernel works on flattened rows×cols. These block Conv1d bias, higher-dimensional models, and Whisper. Also add missing unary/reduction ops._
-- [ ] Generalize `add_bias` to N-D — accept any N-D where `bias.len() == input.shape[1]`
-- [ ] Audit and fix all 2D-hardcoded ops in ops.rs (softmax, sum, mean, argmax, layer_norm, etc.)
-- [ ] `sin`/`cos` — float unary ops for sinusoidal positional encoding
-- [ ] `log_softmax` — fused with numerical stability
-- [ ] Fix Conv1d/Conv2d bias CPU fallback in torch_backend
-- [ ] Verify cross-attention shapes (`q_len != kv_len`)
-
-### PRIORITY 4: Model Expansion
-- [ ] Whisper — speech-to-text (requires Priority 3 ops)
-- [ ] Stable Diffusion — requires group_norm (new kernel)
+### PRIORITY 4: More Models + Polish
+- [ ] Stable Diffusion — requires `group_norm` (new kernel)
 - [ ] Fine-tuned model export — save trained weights
 - [ ] Native `model.to("applegpu")` — proper PrivateUse1 storage backend
+- [ ] Binary signing/notarization — Apple Developer ID
 
 ### PRIORITY 5: Performance Optimization
-- [ ] `torch.compile()` support — register as compile backend for graph-level fusion
-- [ ] Async eval — `gpu.eval_async(tensor)` returns a GpuFuture, non-blocking Python
-- [ ] Fine-grained locking — split `Mutex<LazyRuntime>` into per-component locks
+- [ ] `torch.compile()` support — register as compile backend
+- [ ] Async eval — `gpu.eval_async(tensor)` returns GpuFuture
+- [ ] Fine-grained locking — split `Mutex<LazyRuntime>` per-component
 
 ---
 
