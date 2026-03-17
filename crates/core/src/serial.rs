@@ -129,6 +129,7 @@ fn op_to_discriminant(op: &OpKind) -> u32 {
         OpKind::TanhBackward => 71,
         OpKind::SigmoidBackward => 72,
         OpKind::GeluBackward => 73,
+        OpKind::Conv1dBackwardInput { .. } => 74,
     }
 }
 
@@ -373,6 +374,11 @@ fn discriminant_to_op(d: u32, r: &mut impl Read) -> io::Result<OpKind> {
         71 => Ok(OpKind::TanhBackward),
         72 => Ok(OpKind::SigmoidBackward),
         73 => Ok(OpKind::GeluBackward),
+        74 => {
+            let stride = read_u32(r)? as usize;
+            let padding = read_u32(r)? as usize;
+            Ok(OpKind::Conv1dBackwardInput { stride, padding })
+        }
         _ => Err(io::Error::new(io::ErrorKind::InvalidData, format!("Unknown op type: {}", d))),
     }
 }
@@ -500,6 +506,10 @@ impl EvalRequest {
                 write_u64(&mut buf, stride.1 as u64).unwrap();
                 write_u64(&mut buf, padding.0 as u64).unwrap();
                 write_u64(&mut buf, padding.1 as u64).unwrap();
+            }
+            if let OpKind::Conv1dBackwardInput { stride, padding } = node.op {
+                write_u32(&mut buf, stride as u32).unwrap();
+                write_u32(&mut buf, padding as u32).unwrap();
             }
             if let OpKind::BatchNormBackward { eps } = node.op {
                 buf.write_all(&eps.to_le_bytes()).unwrap();
@@ -735,6 +745,7 @@ impl From<&OpKind> for WireOpKind {
             OpKind::SoftmaxBackward => WireOpKind::SoftmaxBackward,
             OpKind::LayerNormBackward { eps } => WireOpKind::LayerNormBackward { eps: *eps },
             OpKind::Conv2dBackwardInput { stride, padding } => WireOpKind::Conv2dBackwardInput { stride: *stride, padding: *padding },
+            OpKind::Conv1dBackwardInput { stride, padding } => WireOpKind::Conv1dBackwardInput { stride: *stride, padding: *padding },
             OpKind::EmbeddingBackward => WireOpKind::EmbeddingBackward,
             OpKind::BatchNormBackward { eps } => WireOpKind::BatchNormBackward { eps: *eps },
             OpKind::Lt => WireOpKind::Lt,
@@ -840,6 +851,7 @@ pub fn wire_op_to_core(wire: &WireOpKind) -> OpKind {
         WireOpKind::SoftmaxBackward => OpKind::SoftmaxBackward,
         WireOpKind::LayerNormBackward { eps } => OpKind::LayerNormBackward { eps: *eps },
         WireOpKind::Conv2dBackwardInput { stride, padding } => OpKind::Conv2dBackwardInput { stride: *stride, padding: *padding },
+        WireOpKind::Conv1dBackwardInput { stride, padding } => OpKind::Conv1dBackwardInput { stride: *stride, padding: *padding },
         WireOpKind::EmbeddingBackward => OpKind::EmbeddingBackward,
         WireOpKind::BatchNormBackward { eps } => OpKind::BatchNormBackward { eps: *eps },
         WireOpKind::Cast { target_dtype } => {

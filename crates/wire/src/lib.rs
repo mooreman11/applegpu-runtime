@@ -219,6 +219,7 @@ pub enum WireOpKind {
     SoftmaxBackward,
     LayerNormBackward { eps: f32 },
     Conv2dBackwardInput { stride: (usize, usize), padding: (usize, usize) },
+    Conv1dBackwardInput { stride: usize, padding: usize },
     EmbeddingBackward,
     BatchNormBackward { eps: f32 },
     // 46: type conversion
@@ -325,6 +326,7 @@ impl WireOpKind {
             WireOpKind::TanhBackward => 71,
             WireOpKind::SigmoidBackward => 72,
             WireOpKind::GeluBackward => 73,
+            WireOpKind::Conv1dBackwardInput { .. } => 74,
         }
     }
 
@@ -418,6 +420,10 @@ impl WireOpKind {
                 write_u64(w, stride.1 as u64)?;
                 write_u64(w, padding.0 as u64)?;
                 write_u64(w, padding.1 as u64)
+            }
+            WireOpKind::Conv1dBackwardInput { stride, padding } => {
+                write_u32(w, *stride as u32)?;
+                write_u32(w, *padding as u32)
             }
             WireOpKind::BatchNormBackward { eps } => write_f32(w, *eps),
             WireOpKind::Cast { target_dtype } => w.write_all(&[*target_dtype]),
@@ -599,6 +605,11 @@ impl WireOpKind {
             71 => Ok(WireOpKind::TanhBackward),
             72 => Ok(WireOpKind::SigmoidBackward),
             73 => Ok(WireOpKind::GeluBackward),
+            74 => {
+                let stride = read_u32(r)? as usize;
+                let padding = read_u32(r)? as usize;
+                Ok(WireOpKind::Conv1dBackwardInput { stride, padding })
+            }
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("Unknown op discriminant: {}", disc),

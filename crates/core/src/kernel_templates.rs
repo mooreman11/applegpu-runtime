@@ -1363,6 +1363,59 @@ kernel void layer_norm_backward{s}(
     )
 }
 
+/// Generate conv1d_backward_input kernel source. Float-only.
+pub fn conv1d_backward_input_kernel_source(dtype: DType) -> String {
+    let t = metal_type(dtype);
+    let s = dtype_suffix(dtype);
+    let acc = needs_float_acc(dtype);
+    let load = |e: &str| if acc { format!("float({})", e) } else { e.to_string() };
+    let store = |e: &str| if acc { format!("{}({})", t, e) } else { e.to_string() };
+    format!(
+        r#"#include <metal_stdlib>
+using namespace metal;
+
+kernel void conv1d_backward_input{s}(
+    device const {t}* grad_output [[buffer(0)]],
+    device const {t}* weight [[buffer(1)]],
+    device {t}* grad_input [[buffer(2)]],
+    constant uint& batch [[buffer(3)]],
+    constant uint& in_channels [[buffer(4)]],
+    constant uint& out_channels [[buffer(5)]],
+    constant uint& in_len [[buffer(6)]],
+    constant uint& out_len [[buffer(7)]],
+    constant uint& kernel_len [[buffer(8)]],
+    constant uint& stride [[buffer(9)]],
+    constant uint& pad [[buffer(10)]],
+    uint3 gid [[thread_position_in_grid]]
+) {{
+    uint il = gid.x;
+    uint ic = gid.y;
+    uint b = gid.z;
+    if (il >= in_len || ic >= in_channels || b >= batch) return;
+
+    float sum = 0.0f;
+    for (uint oc = 0; oc < out_channels; oc++) {{
+        for (uint k = 0; k < kernel_len; k++) {{
+            int pos = int(il) + int(pad) - int(k);
+            if (pos < 0 || pos % int(stride) != 0) continue;
+            uint ol = uint(pos) / stride;
+            if (ol >= out_len) continue;
+            uint go_idx = b * out_channels * out_len + oc * out_len + ol;
+            uint w_idx = oc * in_channels * kernel_len + ic * kernel_len + k;
+            sum += {load_go} * {load_w};
+        }}
+    }}
+    uint gi_idx = b * in_channels * in_len + ic * in_len + il;
+    grad_input[gi_idx] = {store_sum};
+}}
+"#,
+        t = t, s = s,
+        load_go = load("grad_output[go_idx]"),
+        load_w = load("weight[w_idx]"),
+        store_sum = store("sum"),
+    )
+}
+
 /// Generate conv2d_backward_input kernel source. Float-only.
 pub fn conv2d_backward_input_kernel_source(dtype: DType) -> String {
     let t = metal_type(dtype);

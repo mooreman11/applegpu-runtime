@@ -435,6 +435,39 @@ impl LazyRuntime {
             return Ok(out);
         }
 
+        if let crate::graph::OpKind::Conv1dBackwardInput { stride, padding } = node.op {
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+            let grad_output = self.get_tensor(node.inputs[0])?;
+            let weight = self.get_tensor(node.inputs[1])?;
+            let go_dims = grad_output.meta.layout.shape.dims();
+            let w_dims = weight.meta.layout.shape.dims();
+            let out_dims = node.out_shape.dims();
+            let batch = go_dims[0];
+            let out_channels = go_dims[1];
+            let out_len = go_dims[2];
+            let in_channels = out_dims[1];
+            let in_len = out_dims[2];
+            let kernel_len = w_dims[2];
+            let uint_params: Vec<u32> = vec![
+                batch as u32,
+                in_channels as u32,
+                out_channels as u32,
+                in_len as u32,
+                out_len as u32,
+                kernel_len as u32,
+                stride as u32,
+                padding as u32,
+            ];
+            let (k_src, k_fn) = KernelRegistry::resolve_kernel("conv1d_backward_input", dtype);
+            REGISTRY.dispatch_cnn_3d(
+                device, &k_src, &k_fn,
+                &[&grad_output.buffer, &weight.buffer], &out.buffer,
+                &uint_params, &[], (in_len as u32, in_channels as u32, batch as u32),
+            )?;
+            return Ok(out);
+        }
+
         if node.op.is_embedding_backward() {
             let out_buf = self.pool.acquire(device, out_size)?;
             // Zero the output buffer (embedding backward accumulates into zeroed buffer)
@@ -1290,6 +1323,36 @@ impl LazyRuntime {
                 device, &k_src, &k_fn, queue,
                 &[&grad_output.buffer, &weight.buffer], &out.buffer,
                 &uint_params, &[], (out_dims[3] as u32, grid_y, go_dims[0] as u32),
+            );
+        }
+
+        if let crate::graph::OpKind::Conv1dBackwardInput { stride, padding } = node.op {
+            let grad_output = self.get_tensor(node.inputs[0])?;
+            let weight = self.get_tensor(node.inputs[1])?;
+            let go_dims = grad_output.meta.layout.shape.dims();
+            let w_dims = weight.meta.layout.shape.dims();
+            let out_dims = node.out_shape.dims();
+            let batch = go_dims[0];
+            let out_channels = go_dims[1];
+            let out_len = go_dims[2];
+            let in_channels = out_dims[1];
+            let in_len = out_dims[2];
+            let kernel_len = w_dims[2];
+            let uint_params: Vec<u32> = vec![
+                batch as u32,
+                in_channels as u32,
+                out_channels as u32,
+                in_len as u32,
+                out_len as u32,
+                kernel_len as u32,
+                stride as u32,
+                padding as u32,
+            ];
+            let (k_src, k_fn) = KernelRegistry::resolve_kernel("conv1d_backward_input", dtype);
+            return REGISTRY.dispatch_cnn_3d_nb(
+                device, &k_src, &k_fn, queue,
+                &[&grad_output.buffer, &weight.buffer], &out.buffer,
+                &uint_params, &[], (in_len as u32, in_channels as u32, batch as u32),
             );
         }
 

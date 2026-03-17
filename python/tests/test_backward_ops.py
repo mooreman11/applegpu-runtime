@@ -96,3 +96,31 @@ class TestGeluBackward:
         assert abs(result[0] - 0.5) < 0.01
         assert abs(result[1] - 1.083) < 0.02
         assert abs(result[2] - (-0.083)) < 0.02
+
+
+class TestConv1dBackwardInput:
+    def test_matches_pytorch(self):
+        np.random.seed(42)
+        x = torch.randn(1, 3, 16, requires_grad=True)
+        w = torch.randn(8, 3, 3)
+        y = torch.nn.functional.conv1d(x, w, stride=1, padding=1)
+        grad = torch.randn_like(y)
+        y.backward(grad)
+        expected = x.grad.numpy()
+        result = _to_numpy(gpu.conv1d_backward_input(
+            gpu.from_numpy(grad.detach().numpy()), gpu.from_numpy(w.numpy()),
+            in_channels=3, in_len=16, stride=1, padding=1))
+        np.testing.assert_allclose(result, expected, atol=1e-4)
+
+    def test_stride2(self):
+        np.random.seed(42)
+        x = torch.randn(2, 4, 32, requires_grad=True)
+        w = torch.randn(8, 4, 3)
+        y = torch.nn.functional.conv1d(x, w, stride=2, padding=1)
+        grad = torch.randn_like(y)
+        y.backward(grad)
+        expected = x.grad.numpy()
+        result = _to_numpy(gpu.conv1d_backward_input(
+            gpu.from_numpy(grad.detach().numpy()), gpu.from_numpy(w.numpy()),
+            in_channels=4, in_len=32, stride=2, padding=1))
+        np.testing.assert_allclose(result, expected, atol=1e-4)

@@ -1480,6 +1480,7 @@ impl KernelRegistry {
             "avg_pool2d" => kt::avg_pool2d_kernel_source(dtype),
             "softmax_backward" => kt::softmax_backward_kernel_source(dtype),
             "layer_norm_backward" => kt::layer_norm_backward_kernel_source(dtype),
+            "conv1d_backward_input" => kt::conv1d_backward_input_kernel_source(dtype),
             "conv2d_backward_input" => kt::conv2d_backward_input_kernel_source(dtype),
             "embedding_backward" => kt::embedding_backward_kernel_source(dtype),
             "batch_norm_backward" => kt::batch_norm_backward_kernel_source(dtype),

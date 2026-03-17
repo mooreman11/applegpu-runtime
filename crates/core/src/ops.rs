@@ -43,7 +43,8 @@ pub fn validate_op_dtype(op: &OpKind, dtype: DType) -> Result<()> {
         OpKind::AddBias | OpKind::Embedding |
         OpKind::Mean | OpKind::Var { .. } |
         OpKind::SoftmaxBackward | OpKind::LayerNormBackward { .. } |
-        OpKind::Conv2dBackwardInput { .. } | OpKind::EmbeddingBackward |
+        OpKind::Conv2dBackwardInput { .. } | OpKind::Conv1dBackwardInput { .. } |
+        OpKind::EmbeddingBackward |
         OpKind::BatchNormBackward { .. } |
         OpKind::ThresholdBackward { .. } |
         OpKind::TanhBackward | OpKind::SigmoidBackward |
@@ -770,6 +771,61 @@ pub fn conv2d_backward_input(
         op: OpKind::Conv2dBackwardInput { stride, padding },
         inputs: vec![grad_output_id, weight_id],
         out_shape: Shape::new(vec![batch, in_channels, in_h, in_w])?,
+        out_dtype: grad_dtype,
+        container_id: ContainerId::DEFAULT,
+    });
+    Ok(out_id)
+}
+
+/// Conv1d backward input: computes grad_input from grad_output and weight.
+/// grad_output: [batch, out_channels, out_len]
+/// weight: [out_channels, in_channels, kernel_len]
+/// output: [batch, in_channels, in_len]
+pub fn conv1d_backward_input(
+    rt: &mut LazyRuntime,
+    grad_output_id: u64,
+    weight_id: u64,
+    in_channels: usize,
+    in_len: usize,
+    stride: usize,
+    padding: usize,
+) -> Result<u64> {
+    let grad_dtype = rt.dtype(grad_output_id)?;
+    validate_op_dtype(&OpKind::Conv1dBackwardInput { stride, padding }, grad_dtype)?;
+    let w_dtype = rt.dtype(weight_id)?;
+    if grad_dtype != w_dtype {
+        return Err(GpuError::InvalidTensor(format!(
+            "conv1d_backward_input dtype mismatch: grad {:?} vs weight {:?}", grad_dtype, w_dtype
+        )));
+    }
+
+    let grad_shape = rt.shape(grad_output_id)?;
+    let w_shape = rt.shape(weight_id)?;
+
+    if grad_shape.len() != 3 {
+        return Err(GpuError::InvalidTensor(format!(
+            "conv1d_backward_input grad_output must be 3D [B,OC,OL], got {:?}", grad_shape
+        )));
+    }
+    if w_shape.len() != 3 {
+        return Err(GpuError::InvalidTensor(format!(
+            "conv1d_backward_input weight must be 3D [OC,IC,KL], got {:?}", w_shape
+        )));
+    }
+    if grad_shape[1] != w_shape[0] {
+        return Err(GpuError::InvalidTensor(format!(
+            "conv1d_backward_input out_channels mismatch: grad {} vs weight {}", grad_shape[1], w_shape[0]
+        )));
+    }
+
+    let batch = grad_shape[0];
+
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op: OpKind::Conv1dBackwardInput { stride, padding },
+        inputs: vec![grad_output_id, weight_id],
+        out_shape: Shape::new(vec![batch, in_channels, in_len])?,
         out_dtype: grad_dtype,
         container_id: ContainerId::DEFAULT,
     });
@@ -4453,6 +4509,77 @@ mod tests {
         rt.insert_tensor(go_3d).unwrap();
         rt.insert_tensor(w).unwrap();
         assert!(conv2d_backward_input(&mut rt, go_id, w_id, 3, 3, (1, 1), (0, 0)).is_err());
+    }
+
+    // ── Conv1d backward tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_conv1d_backward_input_identity_kernel() {
+        // Forward: input [1,1,4], weight [1,1,1]=[1.0], stride=1, pad=0 -> out [1,1,4]
+        // Backward: grad_output [1,1,4], weight [1,1,1]=[1.0]
+        // grad_input should equal grad_output (1x1 kernel acts as identity in backward too)
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        let grad_data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
+        let grad_output = Tensor::from_f32(&device, vec![1, 1, 4], &grad_data).unwrap();
+        let weight = Tensor::from_f32(&device, vec![1, 1, 1], &[1.0]).unwrap();
+        let go_id = grad_output.meta.id;
+        let w_id = weight.meta.id;
+        rt.insert_tensor(grad_output).unwrap();
+        rt.insert_tensor(weight).unwrap();
+
+        let gi_id = conv1d_backward_input(&mut rt, go_id, w_id, 1, 4, 1, 0).unwrap();
+        assert_eq!(rt.shape(gi_id).unwrap(), vec![1, 1, 4]);
+
+        rt.eval(&device, gi_id).unwrap();
+        let result = rt.read_f32(gi_id).unwrap();
+        assert_eq!(result.as_slice(), grad_data.as_slice());
+    }
+
+    #[test]
+    fn test_conv1d_backward_input_values() {
+        // Forward: input [1,1,4], weight [1,1,2]=[1,0], stride=1, pad=0 -> out [1,1,3]
+        // Backward: grad_output [1,1,3] = [1,0,0]
+        // grad_input[il] = sum over (oc,k) of grad_output[ol]*weight[oc,ic,k]
+        //   where ol = (il+pad-k)/stride, only if divisible and in range
+        // With weight=[1,0], pad=0, stride=1:
+        //   il=0: k=0 -> ol=0, w=1 => 1*1=1
+        //   il=1: k=0 -> ol=1, w=1 => 0*1=0;  k=1 -> ol=0, w=0 => 1*0=0 => sum=0
+        //   il=2: k=0 -> ol=2, w=1 => 0*1=0;  k=1 -> ol=1, w=0 => 0*0=0 => sum=0
+        //   il=3: k=1 -> ol=2, w=0 => 0*0=0 => sum=0
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        let grad_output = Tensor::from_f32(&device, vec![1, 1, 3], &[1.0, 0.0, 0.0]).unwrap();
+        let weight = Tensor::from_f32(&device, vec![1, 1, 2], &[1.0, 0.0]).unwrap();
+        let go_id = grad_output.meta.id;
+        let w_id = weight.meta.id;
+        rt.insert_tensor(grad_output).unwrap();
+        rt.insert_tensor(weight).unwrap();
+
+        let gi_id = conv1d_backward_input(&mut rt, go_id, w_id, 1, 4, 1, 0).unwrap();
+        rt.eval(&device, gi_id).unwrap();
+        let result = rt.read_f32(gi_id).unwrap();
+        let expected = [1.0, 0.0, 0.0, 0.0];
+        for (i, (&got, &exp)) in result.iter().zip(expected.iter()).enumerate() {
+            assert!((got - exp).abs() < 1e-5, "index {}: got {} expected {}", i, got, exp);
+        }
+    }
+
+    #[test]
+    fn test_conv1d_backward_input_shape_validation() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        // grad_output must be 3D
+        let go_2d = Tensor::from_f32(&device, vec![1, 2], &[1.0; 2]).unwrap();
+        let w = Tensor::from_f32(&device, vec![1, 1, 2], &[1.0; 2]).unwrap();
+        let go_id = go_2d.meta.id;
+        let w_id = w.meta.id;
+        rt.insert_tensor(go_2d).unwrap();
+        rt.insert_tensor(w).unwrap();
+        assert!(conv1d_backward_input(&mut rt, go_id, w_id, 1, 4, 1, 0).is_err());
     }
 
     // ── Embedding backward tests ─────────────────────────────────────────

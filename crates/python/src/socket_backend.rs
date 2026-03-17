@@ -1154,6 +1154,9 @@ impl Backend for SocketBackend {
     fn conv2d_backward_input(&self, _grad: u64, _weight: u64, _in_h: usize, _in_w: usize, _stride: (usize, usize), _padding: (usize, usize)) -> BackendResult<u64> {
         Err("conv2d_backward_input not yet implemented over socket backend".to_string())
     }
+    fn conv1d_backward_input(&self, _grad: u64, _weight: u64, _in_channels: usize, _in_len: usize, _stride: usize, _padding: usize) -> BackendResult<u64> {
+        Err("conv1d_backward_input not yet implemented over socket backend".to_string())
+    }
     fn embedding_backward(&self, _grad: u64, _indices: u64, _num_weights: usize) -> BackendResult<u64> {
         Err("embedding_backward not yet implemented over socket backend".to_string())
     }

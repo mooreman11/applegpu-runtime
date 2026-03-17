@@ -1548,15 +1548,26 @@ def _op_conv_backward(grad_output, input, weight, bias_sizes, stride, padding, d
 
     if output_mask[0]:
         if is_conv1d:
-            # Conv1d grad_input on CPU (no dedicated Metal kernel yet)
-            go_cpu = grad_output.to_torch_cpu() if isinstance(grad_output, ApplegpuTensor) else grad_output
-            in_cpu = input.to_torch_cpu() if isinstance(input, ApplegpuTensor) else input
-            w_cpu = weight.to_torch_cpu() if isinstance(weight, ApplegpuTensor) else weight
-            gi_cpu = torch.ops.aten.convolution_backward(
-                go_cpu, in_cpu, w_cpu, bias_sizes, stride, padding, dilation,
-                transposed, output_padding, groups, [True, False, False]
-            )[0]
-            grad_input = ApplegpuTensor.from_torch(gi_cpu)
+            if groups == 1:
+                # Conv1d grad_input on Metal GPU
+                go_gpu = _unwrap(grad_output)
+                w_gpu = _unwrap(weight)
+                in_shape_actual = input.shape if isinstance(input, ApplegpuTensor) else input.shape
+                grad_input = _wrap(gpu.conv1d_backward_input(
+                    go_gpu, w_gpu,
+                    in_channels=in_shape_actual[1], in_len=in_shape_actual[2],
+                    stride=stride[0], padding=padding[0]),
+                    torch_dtype=grad_output.dtype)
+            else:
+                # Groups > 1: CPU fallback
+                go_cpu = grad_output.to_torch_cpu() if isinstance(grad_output, ApplegpuTensor) else grad_output
+                in_cpu = input.to_torch_cpu() if isinstance(input, ApplegpuTensor) else input
+                w_cpu = weight.to_torch_cpu() if isinstance(weight, ApplegpuTensor) else weight
+                gi_cpu = torch.ops.aten.convolution_backward(
+                    go_cpu, in_cpu, w_cpu, bias_sizes, stride, padding, dilation,
+                    transposed, output_padding, groups, [True, False, False]
+                )[0]
+                grad_input = ApplegpuTensor.from_torch(gi_cpu)
         else:
             # Conv2d grad_input on Metal
             in_h, in_w = in_shape[-2], in_shape[-1]

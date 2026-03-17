@@ -121,6 +121,7 @@ pub enum OpKind {
     SoftmaxBackward,
     LayerNormBackward { eps: f32 },
     Conv2dBackwardInput { stride: (usize, usize), padding: (usize, usize) },
+    Conv1dBackwardInput { stride: usize, padding: usize },
     EmbeddingBackward,
     BatchNormBackward { eps: f32 },
     ThresholdBackward { threshold: f32 },
@@ -200,6 +201,7 @@ impl OpKind {
             OpKind::SoftmaxBackward => "softmax_backward",
             OpKind::LayerNormBackward { .. } => "layer_norm_backward",
             OpKind::Conv2dBackwardInput { .. } => "conv2d_backward_input",
+            OpKind::Conv1dBackwardInput { .. } => "conv1d_backward_input",
             OpKind::EmbeddingBackward => "embedding_backward",
             OpKind::BatchNormBackward { .. } => "batch_norm_backward",
             OpKind::ThresholdBackward { .. } => "threshold_backward",
@@ -392,6 +394,10 @@ impl OpKind {
 
     pub fn is_conv2d_backward_input(&self) -> bool {
         matches!(self, OpKind::Conv2dBackwardInput { .. })
+    }
+
+    pub fn is_conv1d_backward_input(&self) -> bool {
+        matches!(self, OpKind::Conv1dBackwardInput { .. })
     }
 
     pub fn is_embedding_backward(&self) -> bool {

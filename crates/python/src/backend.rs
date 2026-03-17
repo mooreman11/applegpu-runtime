@@ -156,6 +156,7 @@ pub trait Backend: Send + Sync {
     fn softmax_backward(&self, grad: u64, output: u64) -> BackendResult<u64>;
     fn layer_norm_backward(&self, grad: u64, input: u64, gamma: u64, eps: f32) -> BackendResult<u64>;
     fn conv2d_backward_input(&self, grad: u64, weight: u64, in_h: usize, in_w: usize, stride: (usize, usize), padding: (usize, usize)) -> BackendResult<u64>;
+    fn conv1d_backward_input(&self, grad: u64, weight: u64, in_channels: usize, in_len: usize, stride: usize, padding: usize) -> BackendResult<u64>;
     fn embedding_backward(&self, grad: u64, indices: u64, num_weights: usize) -> BackendResult<u64>;
     fn batch_norm_backward(&self, grad: u64, weight: u64, var: u64, eps: f32) -> BackendResult<u64>;
     fn threshold_backward(&self, grad_output: u64, input: u64, threshold: f32) -> BackendResult<u64>;

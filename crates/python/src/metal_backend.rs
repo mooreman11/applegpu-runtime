@@ -516,6 +516,11 @@ impl Backend for MetalBackend {
         map_err!(applegpu_core::ops::conv2d_backward_input(&mut rt, grad, weight, in_h, in_w, stride, padding))
     }
 
+    fn conv1d_backward_input(&self, grad: u64, weight: u64, in_channels: usize, in_len: usize, stride: usize, padding: usize) -> BackendResult<u64> {
+        let mut rt = self.runtime.lock().unwrap();
+        map_err!(applegpu_core::ops::conv1d_backward_input(&mut rt, grad, weight, in_channels, in_len, stride, padding))
+    }
+
     fn embedding_backward(&self, grad: u64, indices: u64, num_weights: usize) -> BackendResult<u64> {
         let mut rt = self.runtime.lock().unwrap();
         map_err!(applegpu_core::ops::embedding_backward(&mut rt, grad, indices, num_weights))

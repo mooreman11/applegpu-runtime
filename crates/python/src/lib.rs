@@ -1145,6 +1145,12 @@ fn conv2d_backward_input(grad_output: &GpuTensor, weight: &GpuTensor, in_h: usiz
 }
 
 #[pyfunction]
+#[pyo3(signature = (grad_output, weight, in_channels, in_len, stride, padding))]
+fn conv1d_backward_input(grad_output: &GpuTensor, weight: &GpuTensor, in_channels: usize, in_len: usize, stride: usize, padding: usize) -> PyResult<GpuTensor> {
+    wrap_tensor(BACKEND.conv1d_backward_input(grad_output.id, weight.id, in_channels, in_len, stride, padding))
+}
+
+#[pyfunction]
 fn embedding_backward(grad_output: &GpuTensor, indices: &GpuTensor, num_weights: usize) -> PyResult<GpuTensor> {
     wrap_tensor(BACKEND.embedding_backward(grad_output.id, indices.id, num_weights))
 }
@@ -1280,6 +1286,7 @@ fn applegpu_runtime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(softmax_backward, m)?)?;
     m.add_function(wrap_pyfunction!(layer_norm_backward, m)?)?;
     m.add_function(wrap_pyfunction!(conv2d_backward_input, m)?)?;
+    m.add_function(wrap_pyfunction!(conv1d_backward_input, m)?)?;
     m.add_function(wrap_pyfunction!(embedding_backward, m)?)?;
     m.add_function(wrap_pyfunction!(batch_norm_backward, m)?)?;
     m.add_function(wrap_pyfunction!(threshold_backward, m)?)?;
