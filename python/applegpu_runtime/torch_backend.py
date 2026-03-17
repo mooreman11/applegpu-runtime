@@ -101,6 +101,17 @@ def _squeeze_shape(t, dim):
     return shape
 
 
+def _extract_cpu_backing(t):
+    """Extract the CPU backing tensor from an ApplegpuTensor without going through
+    __torch_dispatch__. This prevents infinite recursion when the GPU tensor has been
+    freed and we need to reconstruct from the backing data."""
+    # Create a new plain tensor from the same storage, completely bypassing dispatch.
+    # untyped_storage() gives the raw memory, then we wrap it as a plain torch.Tensor.
+    storage = t.untyped_storage()
+    cpu_tensor = torch.tensor([], dtype=t.dtype).set_(storage).reshape(t.shape).clone()
+    return cpu_tensor
+
+
 def _unwrap(t):
     """Get the GpuTensor from an ApplegpuTensor, or convert CPU tensor/scalar.
 
@@ -116,24 +127,16 @@ def _unwrap(t):
                 _ = gt.shape  # will raise if destroyed
                 return gt
             except (ValueError, RuntimeError):
-                # Tensor was freed by lazy runtime -- recreate from CPU backing
-                was_in_fallback = _in_fallback
-                _in_fallback = True
-                try:
-                    cpu_data = t.detach().clone()
-                finally:
-                    _in_fallback = was_in_fallback
+                # Tensor was freed by lazy runtime -- recreate from CPU backing.
+                # Access the backing CPU data WITHOUT going through __torch_dispatch__
+                # to avoid infinite recursion.
+                cpu_data = _extract_cpu_backing(t)
                 new_gt = gpu.from_torch(cpu_data)
                 t._gpu_tensor = new_gt
                 _gpu_tensor_registry[t.data_ptr()] = new_gt
                 return new_gt
-        # No GPU tensor at all -- create from backing
-        was_in_fallback = _in_fallback
-        _in_fallback = True
-        try:
-            cpu_data = t.detach().clone()
-        finally:
-            _in_fallback = was_in_fallback
+        # No GPU tensor at all -- create from backing.
+        cpu_data = _extract_cpu_backing(t)
         new_gt = gpu.from_torch(cpu_data)
         t._gpu_tensor = new_gt
         _gpu_tensor_registry[t.data_ptr()] = new_gt
