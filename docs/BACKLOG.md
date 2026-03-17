@@ -213,6 +213,7 @@ _Blocked by apple/containerization framework socket staging bug (errno 20 ENOTDI
 - [ ] Multi-GPU support _(very low priority)_ — device pool, per-device buffer pools, cross-device transfers
 
 ### Training
+- [ ] **Migrate CPU-fallback backward ops to Metal** — tanh_backward, sigmoid_backward, gelu_backward currently round-trip through CPU. Implement as Metal kernels (sigmoid: `grad * out * (1 - out)`, tanh: `grad * (1 - out^2)`, gelu: derivative formula). Eliminates GPU→CPU→GPU transfers during training.
 - [ ] Int64 compute kernels — batch_norm's num_batches_tracked falls back to CPU
 - [ ] Gradient accumulation — for large batch training across multiple micro-batches
 
