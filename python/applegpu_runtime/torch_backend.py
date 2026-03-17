@@ -1391,6 +1391,40 @@ def _adaptive_avg_pool2d(input, output_size):
     return _wrap(gpu.avg_pool2d(gpu_input, kh, kw, kh, kw, 0, 0))
 
 
+@register_op(torch.ops.aten.linalg_vector_norm.default)
+def _op_linalg_vector_norm(a, ord=2.0, dim=None, keepdim=False, dtype=None):
+    """Vector norm reduction. Falls back to CPU.
+
+    TODO: CPU fallback. For L2 norm (most common), a Metal kernel computing
+    sum of squares then sqrt would work. Called once per training step for
+    gradient clipping — not a hot-path bottleneck.
+    """
+    a_cpu = a.to_torch_cpu() if isinstance(a, ApplegpuTensor) else a
+    result = torch.ops.aten.linalg_vector_norm.default(a_cpu, ord, dim, keepdim, dtype=dtype)
+    return ApplegpuTensor.from_torch(result)
+
+
+@register_op(torch.ops.aten._unique2.default)
+def _op_unique2(a, sorted=True, return_inverse=False, return_counts=False):
+    """Unique elements. Falls back to CPU.
+
+    TODO: CPU fallback. GPU unique requires parallel sort + adjacent-difference
+    + stream compaction — complex but doable. Used in hybrid model vectorized
+    per-symbol dispatch.
+    """
+    a_cpu = a.to_torch_cpu() if isinstance(a, ApplegpuTensor) else a
+    results = torch.ops.aten._unique2.default(a_cpu, sorted, return_inverse, return_counts)
+    out = []
+    for r in results:
+        if isinstance(r, torch.Tensor) and r.numel() > 0:
+            out.append(ApplegpuTensor.from_torch(r))
+        elif isinstance(r, torch.Tensor):
+            out.append(r)  # Keep empty tensors as CPU (can't allocate 0-byte GPU buffer)
+        else:
+            out.append(r)
+    return tuple(out)
+
+
 @register_op(torch.ops.aten.flatten.using_ints)
 def _flatten(input, start_dim=0, end_dim=-1):
     """Flatten dimensions from start_dim to end_dim into a single dimension."""
