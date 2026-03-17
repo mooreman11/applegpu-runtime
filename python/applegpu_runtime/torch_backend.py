@@ -406,6 +406,26 @@ def _op_std(a, dim=None, *, correction=1, keepdim=False):
     return _wrap(gpu.std_dev(_unwrap(a), corr))
 
 
+@register_op(torch.ops.aten.sigmoid_.default)
+def _op_sigmoid_inplace(a):
+    """In-place sigmoid."""
+    result = gpu.sigmoid(_unwrap(a))
+    if isinstance(a, ApplegpuTensor):
+        a._gpu_tensor = result
+        _gpu_tensor_registry[a.data_ptr()] = result
+    return a
+
+
+@register_op(torch.ops.aten.tanh_.default)
+def _op_tanh_inplace(a):
+    """In-place tanh."""
+    result = gpu.tanh(_unwrap(a))
+    if isinstance(a, ApplegpuTensor):
+        a._gpu_tensor = result
+        _gpu_tensor_registry[a.data_ptr()] = result
+    return a
+
+
 @register_op(torch.ops.aten.abs.default)
 def _op_abs(a):
     return _wrap(gpu.abs(_unwrap(a)))
@@ -1392,6 +1412,39 @@ def _adaptive_avg_pool2d(input, output_size):
     kh = in_h // out_h
     kw = in_w // out_w
     return _wrap(gpu.avg_pool2d(gpu_input, kh, kw, kh, kw, 0, 0))
+
+
+@register_op(torch.ops.aten.unbind.int)
+def _op_unbind(a, dim=0):
+    """Unbind tensor along a dimension into a tuple of slices."""
+    gpu_a = _unwrap(a)
+    shape = list(gpu_a.shape)
+    n = shape[dim]
+    results = []
+    for i in range(n):
+        sliced = gpu.slice(gpu_a, dim, i, i + 1)
+        # Remove the sliced dimension via reshape
+        new_shape = shape[:dim] + shape[dim+1:]
+        if not new_shape:
+            new_shape = [1]
+        results.append(_wrap(gpu.reshape(sliced, new_shape)))
+    return tuple(results)
+
+
+@register_op(torch.ops.aten.unsafe_split.Tensor)
+def _op_unsafe_split(a, split_size, dim=0):
+    """Split tensor into chunks along a dimension."""
+    gpu_a = _unwrap(a)
+    shape = list(gpu_a.shape)
+    total = shape[dim]
+    split_size = int(split_size)
+    results = []
+    start = 0
+    while start < total:
+        end = min(start + split_size, total)
+        results.append(_wrap(gpu.slice(gpu_a, dim, start, end)))
+        start = end
+    return tuple(results)
 
 
 @register_op(torch.ops.aten.linalg_vector_norm.default)
