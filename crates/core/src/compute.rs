@@ -2482,6 +2482,28 @@ pub fn wait_command_buffer(cb: *mut std::ffi::c_void) {
     unsafe { ffi::gpu_bridge_wait_command_buffer(cb) }
 }
 
+/// GPU→GPU blit copy using MTLBlitCommandEncoder (no compute pipeline needed).
+pub fn blit_copy(device: &Device, src: &Buffer, dst: &Buffer, size_bytes: usize) -> Result<()> {
+    let queue = get_shared_queue(device);
+    if queue.is_null() {
+        return Err(GpuError::ComputeFailed("failed to get shared queue".into()));
+    }
+    let cb = unsafe {
+        ffi::gpu_bridge_blit_copy_nb(
+            device.raw_handle() as *mut _,
+            queue,
+            src.raw_handle() as *mut _,
+            dst.raw_handle() as *mut _,
+            size_bytes as u64,
+        )
+    };
+    if cb.is_null() {
+        return Err(GpuError::ComputeFailed("blit copy failed".into()));
+    }
+    unsafe { ffi::gpu_bridge_wait_command_buffer(cb) };
+    Ok(())
+}
+
 /// Begin batch encoding: creates a single command buffer for all subsequent _nb dispatches.
 /// Returns a non-null handle on success (unretained — only for null-checking).
 /// All _nb calls will encode into this CB until end_batch() or abort_batch() is called.

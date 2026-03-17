@@ -1113,11 +1113,13 @@ def _op_scalar_tensor(val, dtype=None, layout=None, device=None, pin_memory=None
 
 @register_op(torch.ops.aten.copy_.default)
 def _op_copy_(dst, src, non_blocking=False):
-    """In-place copy of src into dst.
-
-    TODO: GPU→GPU copy goes through CPU (to_torch_cpu → from_torch). A Metal
-    blit encoder (MTLBlitCommandEncoder.copy) would do GPU→GPU directly.
-    """
+    """In-place copy of src into dst. Uses GPU→GPU blit when both are GPU tensors."""
+    if isinstance(src, ApplegpuTensor) and isinstance(dst, ApplegpuTensor):
+        try:
+            gpu.blit_copy(dst._gpu_tensor, _unwrap(src))
+            return dst
+        except Exception:
+            pass  # Fall through to CPU path on size mismatch
     if isinstance(src, ApplegpuTensor):
         cpu_data = src.to_torch_cpu()
         new_gpu = gpu.from_torch(cpu_data)

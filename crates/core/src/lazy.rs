@@ -1906,6 +1906,15 @@ impl LazyRuntime {
         Ok(t.as_f32_slice()?.to_vec())
     }
 
+    /// GPU→GPU blit copy: copy src buffer contents into dst buffer.
+    /// Both tensors must be materialized. Copies min(src, dst) bytes.
+    pub fn blit_copy(&self, device: &Device, dst_id: u64, src_id: u64) -> Result<()> {
+        let src = self.get_tensor(src_id)?;
+        let dst = self.get_tensor(dst_id)?;
+        let size = std::cmp::min(src.meta.size_bytes(), dst.meta.size_bytes());
+        crate::compute::blit_copy(device, &src.buffer, &dst.buffer, size)
+    }
+
     /// Evaluate a tensor via the remote GPU service (VM backend).
     /// Serializes the graph + input tensors, sends over IPC, receives result.
     pub fn eval_remote(&mut self, device: &Device, id: u64, socket_path: &str) -> Result<()> {

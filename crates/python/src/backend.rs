@@ -160,6 +160,9 @@ pub trait Backend: Send + Sync {
     fn batch_norm_backward(&self, grad: u64, weight: u64, var: u64, eps: f32) -> BackendResult<u64>;
     fn threshold_backward(&self, grad_output: u64, input: u64, threshold: f32) -> BackendResult<u64>;
 
+    // Blit copy (GPU→GPU)
+    fn blit_copy(&self, dst: u64, src: u64) -> BackendResult<()>;
+
     // Resource management
     fn set_limits(&self, max_tensor_size_mb: usize, max_memory_mb: usize, max_tensors: usize);
     fn memory_usage(&self) -> usize;

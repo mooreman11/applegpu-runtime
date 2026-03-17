@@ -1165,6 +1165,11 @@ impl Backend for SocketBackend {
         Err("threshold_backward not yet implemented over socket backend".to_string())
     }
 
+    // Blit copy (GPU→GPU)
+    fn blit_copy(&self, _dst: u64, _src: u64) -> BackendResult<()> {
+        Err("blit_copy not yet implemented over socket backend".to_string())
+    }
+
     // -----------------------------------------------------------------------
     // Resource management — local tracking only
     // -----------------------------------------------------------------------
