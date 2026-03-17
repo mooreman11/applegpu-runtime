@@ -882,6 +882,13 @@ def _op_transpose_int(a, dim0, dim1):
     return _wrap(gpu.transpose_dims(_unwrap(a), dim0, dim1))
 
 
+@register_op(torch.ops.aten.transpose_.default)
+def _op_transpose_inplace(a, dim0, dim1):
+    # transpose_ is a view op that swaps dims. Return a new wrapped tensor
+    # with the correct shape since we can't modify PyTorch's internal metadata.
+    return _wrap(gpu.transpose_dims(_unwrap(a), dim0, dim1))
+
+
 @register_op(torch.ops.aten.permute.default)
 def _op_permute(a, dims):
     # Check if exactly 2 dims are swapped (i.e., it's a transpose)

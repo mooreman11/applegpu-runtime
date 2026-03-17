@@ -52,8 +52,10 @@ def test_lstm_backward():
 def test_gru_forward():
     """GRU forward pass produces valid output shapes.
 
-    Note: batch_first=False avoids aten::transpose_ (in-place) which isn't
-    yet supported on GPU. GRU input is (seq_len, batch, features).
+    Uses batch_first=False because GRU's batch_first=True applies transpose_
+    inside PyTorch's C++ implementation, bypassing __torch_dispatch__. This is
+    actually the native GRU format (seq, batch, features) — batch_first just
+    adds transposes around it.
     """
     model = nn.GRU(input_size=32, hidden_size=64, num_layers=2, batch_first=False)
     model = gpu.to_applegpu(model)
