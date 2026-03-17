@@ -1080,6 +1080,7 @@ kernel void conv1d{s}(
     constant uint& kernel_size [[buffer(8)]],
     constant uint& stride [[buffer(9)]],
     constant uint& padding [[buffer(10)]],
+    constant uint& groups [[buffer(11)]],
     uint3 gid [[thread_position_in_grid]]
 ) {{
     uint o = gid.x;
@@ -1087,8 +1088,14 @@ kernel void conv1d{s}(
     uint b = gid.z;
     if (o >= out_length || oc >= out_channels || b >= batch) return;
 
+    uint out_channels_per_group = out_channels / groups;
+    uint in_channels_per_group = in_channels / groups;
+    uint group = oc / out_channels_per_group;
+    uint ic_start = group * in_channels_per_group;
+
     float sum = 0.0f;
-    for (uint ic = 0; ic < in_channels; ic++) {{
+    for (uint ic = 0; ic < in_channels_per_group; ic++) {{
+        uint ic_abs = ic_start + ic;
         for (uint k = 0; k < kernel_size; k++) {{
             int in_pos = int(o * stride + k) - int(padding);
             if (in_pos >= 0 && uint(in_pos) < in_length) {{
@@ -1100,8 +1107,8 @@ kernel void conv1d{s}(
 }}
 "#,
         t = t, s = s,
-        load_i = load("input[b * in_channels * in_length + ic * in_length + in_pos]"),
-        load_w = load("weight[oc * in_channels * kernel_size + ic * kernel_size + k]"),
+        load_i = load("input[b * in_channels * in_length + ic_abs * in_length + in_pos]"),
+        load_w = load("weight[oc * in_channels_per_group * kernel_size + ic * kernel_size + k]"),
         store_sum = store("sum"),
     )
 }
@@ -1134,6 +1141,7 @@ kernel void conv2d{s}(
     constant uint& stride_w [[buffer(13)]],
     constant uint& pad_h [[buffer(14)]],
     constant uint& pad_w [[buffer(15)]],
+    constant uint& groups [[buffer(16)]],
     uint3 gid [[thread_position_in_grid]]
 ) {{
     uint ow = gid.x;
@@ -1143,8 +1151,14 @@ kernel void conv2d{s}(
     uint oh = combined / out_channels;
     if (ow >= out_w || oh >= out_h || b >= batch) return;
 
+    uint out_channels_per_group = out_channels / groups;
+    uint in_channels_per_group = in_channels / groups;
+    uint group = oc / out_channels_per_group;
+    uint ic_start = group * in_channels_per_group;
+
     float sum = 0.0f;
-    for (uint ic = 0; ic < in_channels; ic++) {{
+    for (uint ic = 0; ic < in_channels_per_group; ic++) {{
+        uint ic_abs = ic_start + ic;
         for (uint i = 0; i < kh; i++) {{
             for (uint j = 0; j < kw; j++) {{
                 int ih = int(oh * stride_h + i) - int(pad_h);
@@ -1159,8 +1173,8 @@ kernel void conv2d{s}(
 }}
 "#,
         t = t, s = s,
-        load_i = load("input[b * in_channels * in_h * in_w + ic * in_h * in_w + ih * in_w + iw]"),
-        load_w = load("weight[oc * in_channels * kh * kw + ic * kh * kw + i * kw + j]"),
+        load_i = load("input[b * in_channels * in_h * in_w + ic_abs * in_h * in_w + ih * in_w + iw]"),
+        load_w = load("weight[oc * in_channels_per_group * kh * kw + ic * kh * kw + i * kw + j]"),
         store_sum = store("sum"),
     )
 }
@@ -1504,6 +1518,7 @@ kernel void conv1d_backward_input{s}(
     constant uint& kernel_len [[buffer(8)]],
     constant uint& stride [[buffer(9)]],
     constant uint& pad [[buffer(10)]],
+    constant uint& groups [[buffer(11)]],
     uint3 gid [[thread_position_in_grid]]
 ) {{
     uint il = gid.x;
@@ -1511,15 +1526,22 @@ kernel void conv1d_backward_input{s}(
     uint b = gid.z;
     if (il >= in_len || ic >= in_channels || b >= batch) return;
 
+    uint in_channels_per_group = in_channels / groups;
+    uint out_channels_per_group = out_channels / groups;
+    uint group = ic / in_channels_per_group;
+    uint oc_start = group * out_channels_per_group;
+    uint ic_local = ic - group * in_channels_per_group;
+
     float sum = 0.0f;
-    for (uint oc = 0; oc < out_channels; oc++) {{
+    for (uint oc_off = 0; oc_off < out_channels_per_group; oc_off++) {{
+        uint oc = oc_start + oc_off;
         for (uint k = 0; k < kernel_len; k++) {{
             int pos = int(il) + int(pad) - int(k);
             if (pos < 0 || pos % int(stride) != 0) continue;
             uint ol = uint(pos) / stride;
             if (ol >= out_len) continue;
             uint go_idx = b * out_channels * out_len + oc * out_len + ol;
-            uint w_idx = oc * in_channels * kernel_len + ic * kernel_len + k;
+            uint w_idx = oc * in_channels_per_group * kernel_len + ic_local * kernel_len + k;
             sum += {load_go} * {load_w};
         }}
     }}
@@ -1562,6 +1584,7 @@ kernel void conv2d_backward_input{s}(
     constant uint& stride_w [[buffer(13)]],
     constant uint& pad_h [[buffer(14)]],
     constant uint& pad_w [[buffer(15)]],
+    constant uint& groups [[buffer(16)]],
     uint3 gid [[thread_position_in_grid]]
 ) {{
     uint iw = gid.x;
@@ -1571,8 +1594,15 @@ kernel void conv2d_backward_input{s}(
     uint ih = combined / in_channels;
     if (iw >= in_w || ih >= in_h || b >= batch) return;
 
+    uint in_channels_per_group = in_channels / groups;
+    uint out_channels_per_group = out_channels / groups;
+    uint group = ic / in_channels_per_group;
+    uint oc_start = group * out_channels_per_group;
+    uint ic_local = ic - group * in_channels_per_group;
+
     float sum = 0.0f;
-    for (uint oc = 0; oc < out_channels; oc++) {{
+    for (uint oc_off = 0; oc_off < out_channels_per_group; oc_off++) {{
+        uint oc = oc_start + oc_off;
         for (uint i = 0; i < kh; i++) {{
             for (uint j = 0; j < kw; j++) {{
                 int oh_candidate = int(ih + pad_h) - int(i);
@@ -1593,7 +1623,79 @@ kernel void conv2d_backward_input{s}(
 "#,
         t = t, s = s,
         load_go = load("grad_output[b * out_channels * out_h * out_w + oc * out_h * out_w + oh * out_w + ow]"),
-        load_w = load("weight[oc * in_channels * kh * kw + ic * kh * kw + i * kw + j]"),
+        load_w = load("weight[oc * in_channels_per_group * kh * kw + ic_local * kh * kw + i * kw + j]"),
+        store_sum = store("sum"),
+    )
+}
+
+/// Generate conv2d_backward_weight kernel source. Float-only.
+/// Each thread computes one weight gradient element grad_weight[oc, ic, kh_idx, kw_idx]
+/// by iterating over all batch x spatial positions. No atomics needed.
+/// Grid: (kw, kh * out_channels, in_channels)
+pub fn conv2d_backward_weight_kernel_source(dtype: DType) -> String {
+    let t = metal_type(dtype);
+    let s = dtype_suffix(dtype);
+    let acc = needs_float_acc(dtype);
+    let load_go = |e: &str| if acc { format!("float({})", e) } else { e.to_string() };
+    let load_in = |e: &str| if acc { format!("float({})", e) } else { e.to_string() };
+    let store = |e: &str| if acc { format!("{}({})", t, e) } else { e.to_string() };
+    format!(
+        r#"#include <metal_stdlib>
+using namespace metal;
+
+kernel void conv2d_backward_weight{s}(
+    device const {t}* grad_output [[buffer(0)]],
+    device const {t}* input [[buffer(1)]],
+    device {t}* grad_weight [[buffer(2)]],
+    constant uint& batch [[buffer(3)]],
+    constant uint& in_channels [[buffer(4)]],
+    constant uint& out_channels [[buffer(5)]],
+    constant uint& in_h [[buffer(6)]],
+    constant uint& in_w [[buffer(7)]],
+    constant uint& out_h [[buffer(8)]],
+    constant uint& out_w [[buffer(9)]],
+    constant uint& kh [[buffer(10)]],
+    constant uint& kw [[buffer(11)]],
+    constant uint& stride_h [[buffer(12)]],
+    constant uint& stride_w [[buffer(13)]],
+    constant uint& pad_h [[buffer(14)]],
+    constant uint& pad_w [[buffer(15)]],
+    constant uint& groups [[buffer(16)]],
+    uint3 gid [[thread_position_in_grid]]
+) {{
+    uint kw_idx = gid.x;
+    uint combined = gid.y;
+    uint ic = gid.z;  // ic within group (in_channels_per_group)
+    uint oc = combined % out_channels;
+    uint kh_idx = combined / out_channels;
+    uint in_channels_per_group = in_channels / groups;
+    if (kw_idx >= kw || kh_idx >= kh || ic >= in_channels_per_group || oc >= out_channels) return;
+
+    uint group = oc / (out_channels / groups);
+    uint ic_abs = group * in_channels_per_group + ic;
+
+    float sum = 0.0f;
+    for (uint b = 0; b < batch; b++) {{
+        for (uint oh = 0; oh < out_h; oh++) {{
+            for (uint ow = 0; ow < out_w; ow++) {{
+                uint ih = oh * stride_h + kh_idx;
+                uint iw = ow * stride_w + kw_idx;
+                if (ih >= pad_h && iw >= pad_w) {{
+                    ih -= pad_h;
+                    iw -= pad_w;
+                    if (ih < in_h && iw < in_w) {{
+                        sum += {load_go} * {load_in};
+                    }}
+                }}
+            }}
+        }}
+    }}
+    grad_weight[oc * in_channels_per_group * kh * kw + ic * kh * kw + kh_idx * kw + kw_idx] = {store_sum};
+}}
+"#,
+        t = t, s = s,
+        load_go = load_go("grad_output[b * out_channels * out_h * out_w + oc * out_h * out_w + oh * out_w + ow]"),
+        load_in = load_in("input[b * in_channels * in_h * in_w + ic_abs * in_h * in_w + ih * in_w + iw]"),
         store_sum = store("sum"),
     )
 }

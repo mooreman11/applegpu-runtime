@@ -505,7 +505,7 @@ impl LazyRuntime {
             return Ok(out);
         }
 
-        if let crate::graph::OpKind::Conv2dBackwardInput { stride, padding } = node.op {
+        if let crate::graph::OpKind::Conv2dBackwardInput { stride, padding, groups } = node.op {
             let out_buf = self.pool.acquire(device, out_size)?;
             let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
             let grad_output = self.get_tensor(node.inputs[0])?;
@@ -515,7 +515,7 @@ impl LazyRuntime {
             let out_dims = node.out_shape.dims();
             let uint_params: Vec<u32> = vec![
                 go_dims[0] as u32,   // batch
-                w_dims[1] as u32,    // in_channels
+                out_dims[1] as u32,  // in_channels (total)
                 go_dims[1] as u32,   // out_channels
                 out_dims[2] as u32,  // in_h
                 out_dims[3] as u32,  // in_w
@@ -527,8 +527,9 @@ impl LazyRuntime {
                 stride.1 as u32,     // stride_w
                 padding.0 as u32,    // pad_h
                 padding.1 as u32,    // pad_w
+                groups as u32,       // groups
             ];
-            let grid_y = out_dims[2] as u32 * w_dims[1] as u32;
+            let grid_y = out_dims[2] as u32 * out_dims[1] as u32;
             let (k_src, k_fn) = KernelRegistry::resolve_kernel("conv2d_backward_input", dtype);
             REGISTRY.dispatch_cnn_3d(
                 device, &k_src, &k_fn,
@@ -538,7 +539,43 @@ impl LazyRuntime {
             return Ok(out);
         }
 
-        if let crate::graph::OpKind::Conv1dBackwardInput { stride, padding } = node.op {
+        if let crate::graph::OpKind::Conv2dBackwardWeight { stride, padding, groups } = node.op {
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+            let grad_output = self.get_tensor(node.inputs[0])?;
+            let input = self.get_tensor(node.inputs[1])?;
+            let go_dims = grad_output.meta.layout.shape.dims();
+            let in_dims = input.meta.layout.shape.dims();
+            let out_dims = node.out_shape.dims(); // [OC, IC_per_group, KH, KW]
+            let uint_params: Vec<u32> = vec![
+                go_dims[0] as u32,   // batch
+                in_dims[1] as u32,   // in_channels (total)
+                go_dims[1] as u32,   // out_channels
+                in_dims[2] as u32,   // in_h
+                in_dims[3] as u32,   // in_w
+                go_dims[2] as u32,   // out_h
+                go_dims[3] as u32,   // out_w
+                out_dims[2] as u32,  // kh
+                out_dims[3] as u32,  // kw
+                stride.0 as u32,     // stride_h
+                stride.1 as u32,     // stride_w
+                padding.0 as u32,    // pad_h
+                padding.1 as u32,    // pad_w
+                groups as u32,       // groups
+            ];
+            // Grid: (kw, kh * out_channels, in_channels_per_group)
+            let in_channels_per_group = out_dims[1];
+            let grid_y = out_dims[2] as u32 * go_dims[1] as u32; // kh * out_channels
+            let (k_src, k_fn) = KernelRegistry::resolve_kernel("conv2d_backward_weight", dtype);
+            REGISTRY.dispatch_cnn_3d(
+                device, &k_src, &k_fn,
+                &[&grad_output.buffer, &input.buffer], &out.buffer,
+                &uint_params, &[], (out_dims[3] as u32, grid_y, in_channels_per_group as u32),
+            )?;
+            return Ok(out);
+        }
+
+        if let crate::graph::OpKind::Conv1dBackwardInput { stride, padding, groups } = node.op {
             let out_buf = self.pool.acquire(device, out_size)?;
             let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
             let grad_output = self.get_tensor(node.inputs[0])?;
@@ -561,6 +598,7 @@ impl LazyRuntime {
                 kernel_len as u32,
                 stride as u32,
                 padding as u32,
+                groups as u32,
             ];
             let (k_src, k_fn) = KernelRegistry::resolve_kernel("conv1d_backward_input", dtype);
             REGISTRY.dispatch_cnn_3d(
@@ -938,7 +976,7 @@ impl LazyRuntime {
 
         // ── CNN ops ────────────────────────────────────────────────────────
 
-        if let crate::graph::OpKind::Conv1d { stride, padding } = node.op {
+        if let crate::graph::OpKind::Conv1d { stride, padding, groups } = node.op {
             let out_buf = self.pool.acquire(device, out_size)?;
             let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
             let input = self.get_tensor(node.inputs[0])?;
@@ -955,6 +993,7 @@ impl LazyRuntime {
                 w_dims[2] as u32,   // kernel_size
                 stride as u32,
                 padding as u32,
+                groups as u32,
             ];
             let (k_src, k_fn) = KernelRegistry::resolve_kernel("conv1d", dtype);
             REGISTRY.dispatch_cnn_3d(
@@ -965,7 +1004,7 @@ impl LazyRuntime {
             return Ok(out);
         }
 
-        if let crate::graph::OpKind::Conv2d { stride, padding } = node.op {
+        if let crate::graph::OpKind::Conv2d { stride, padding, groups } = node.op {
             let out_buf = self.pool.acquire(device, out_size)?;
             let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
             let input = self.get_tensor(node.inputs[0])?;
@@ -987,6 +1026,7 @@ impl LazyRuntime {
                 stride.1 as u32,    // stride_w
                 padding.0 as u32,   // pad_h
                 padding.1 as u32,   // pad_w
+                groups as u32,      // groups
             ];
             // Grid: (out_w, out_h * out_channels, batch)
             let grid_y = out_dims[2] as u32 * w_dims[0] as u32;
@@ -1470,21 +1510,22 @@ impl LazyRuntime {
             return REGISTRY.dispatch_layer_norm_backward_typed_nb(device, dtype, queue, &grad_output.buffer, &input.buffer, &gamma.buffer, &out.buffer, total_rows, cols, eps);
         }
 
-        if let crate::graph::OpKind::Conv2dBackwardInput { stride, padding } = node.op {
+        if let crate::graph::OpKind::Conv2dBackwardInput { stride, padding, groups } = node.op {
             let grad_output = self.get_tensor(node.inputs[0])?;
             let weight = self.get_tensor(node.inputs[1])?;
             let go_dims = grad_output.meta.layout.shape.dims();
             let w_dims = weight.meta.layout.shape.dims();
             let out_dims = node.out_shape.dims();
             let uint_params: Vec<u32> = vec![
-                go_dims[0] as u32, w_dims[1] as u32, go_dims[1] as u32,
+                go_dims[0] as u32, out_dims[1] as u32, go_dims[1] as u32,
                 out_dims[2] as u32, out_dims[3] as u32,
                 go_dims[2] as u32, go_dims[3] as u32,
                 w_dims[2] as u32, w_dims[3] as u32,
                 stride.0 as u32, stride.1 as u32,
                 padding.0 as u32, padding.1 as u32,
+                groups as u32,
             ];
-            let grid_y = out_dims[2] as u32 * w_dims[1] as u32;
+            let grid_y = out_dims[2] as u32 * out_dims[1] as u32;
             let (k_src, k_fn) = KernelRegistry::resolve_kernel("conv2d_backward_input", dtype);
             return REGISTRY.dispatch_cnn_3d_nb(
                 device, &k_src, &k_fn, queue,
@@ -1493,7 +1534,32 @@ impl LazyRuntime {
             );
         }
 
-        if let crate::graph::OpKind::Conv1dBackwardInput { stride, padding } = node.op {
+        if let crate::graph::OpKind::Conv2dBackwardWeight { stride, padding, groups } = node.op {
+            let grad_output = self.get_tensor(node.inputs[0])?;
+            let input = self.get_tensor(node.inputs[1])?;
+            let go_dims = grad_output.meta.layout.shape.dims();
+            let in_dims = input.meta.layout.shape.dims();
+            let out_dims = node.out_shape.dims(); // [OC, IC_per_group, KH, KW]
+            let in_channels_per_group = out_dims[1];
+            let uint_params: Vec<u32> = vec![
+                go_dims[0] as u32, in_dims[1] as u32, go_dims[1] as u32,
+                in_dims[2] as u32, in_dims[3] as u32,
+                go_dims[2] as u32, go_dims[3] as u32,
+                out_dims[2] as u32, out_dims[3] as u32,
+                stride.0 as u32, stride.1 as u32,
+                padding.0 as u32, padding.1 as u32,
+                groups as u32,
+            ];
+            let grid_y = out_dims[2] as u32 * go_dims[1] as u32;
+            let (k_src, k_fn) = KernelRegistry::resolve_kernel("conv2d_backward_weight", dtype);
+            return REGISTRY.dispatch_cnn_3d_nb(
+                device, &k_src, &k_fn, queue,
+                &[&grad_output.buffer, &input.buffer], &out.buffer,
+                &uint_params, &[], (out_dims[3] as u32, grid_y, in_channels_per_group as u32),
+            );
+        }
+
+        if let crate::graph::OpKind::Conv1dBackwardInput { stride, padding, groups } = node.op {
             let grad_output = self.get_tensor(node.inputs[0])?;
             let weight = self.get_tensor(node.inputs[1])?;
             let go_dims = grad_output.meta.layout.shape.dims();
@@ -1514,6 +1580,7 @@ impl LazyRuntime {
                 kernel_len as u32,
                 stride as u32,
                 padding as u32,
+                groups as u32,
             ];
             let (k_src, k_fn) = KernelRegistry::resolve_kernel("conv1d_backward_input", dtype);
             return REGISTRY.dispatch_cnn_3d_nb(
@@ -1818,7 +1885,7 @@ impl LazyRuntime {
 
         // ── CNN ops (non-blocking) ──────────────────────────────────────
 
-        if let crate::graph::OpKind::Conv1d { stride, padding } = node.op {
+        if let crate::graph::OpKind::Conv1d { stride, padding, groups } = node.op {
             let input = self.get_tensor(node.inputs[0])?;
             let weight = self.get_tensor(node.inputs[1])?;
             let in_dims = input.meta.layout.shape.dims();
@@ -1828,6 +1895,7 @@ impl LazyRuntime {
                 in_dims[0] as u32, in_dims[1] as u32, w_dims[0] as u32,
                 in_dims[2] as u32, out_dims[2] as u32, w_dims[2] as u32,
                 stride as u32, padding as u32,
+                groups as u32,
             ];
             let (k_src, k_fn) = KernelRegistry::resolve_kernel("conv1d", dtype);
             return REGISTRY.dispatch_cnn_3d_nb(
@@ -1837,7 +1905,7 @@ impl LazyRuntime {
             );
         }
 
-        if let crate::graph::OpKind::Conv2d { stride, padding } = node.op {
+        if let crate::graph::OpKind::Conv2d { stride, padding, groups } = node.op {
             let input = self.get_tensor(node.inputs[0])?;
             let weight = self.get_tensor(node.inputs[1])?;
             let in_dims = input.meta.layout.shape.dims();
@@ -1850,6 +1918,7 @@ impl LazyRuntime {
                 w_dims[2] as u32, w_dims[3] as u32,
                 stride.0 as u32, stride.1 as u32,
                 padding.0 as u32, padding.1 as u32,
+                groups as u32,
             ];
             let grid_y = out_dims[2] as u32 * w_dims[0] as u32;
             let (k_src, k_fn) = KernelRegistry::resolve_kernel("conv2d", dtype);

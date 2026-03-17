@@ -1309,15 +1309,15 @@ def _op_embedding(weight, indices, padding_idx=-1, scale_grad_by_freq=False, spa
 
 @register_op(torch.ops.aten.convolution.default)
 def _convolution(input, weight, bias, stride, padding, dilation, transposed, output_padding, groups):
-    # Only support non-transposed, dilation=1, groups=1
-    if transposed or any(d != 1 for d in dilation) or groups != 1:
+    # Only support non-transposed, dilation=1
+    if transposed or any(d != 1 for d in dilation):
         return NotImplemented
 
     ndim = len(stride)
     if ndim == 1:
-        result = _wrap(gpu.conv1d(_unwrap(input), _unwrap(weight), stride[0], padding[0]))
+        result = _wrap(gpu.conv1d(_unwrap(input), _unwrap(weight), stride[0], padding[0], groups))
     elif ndim == 2:
-        result = _wrap(gpu.conv2d(_unwrap(input), _unwrap(weight), stride[0], stride[1], padding[0], padding[1]))
+        result = _wrap(gpu.conv2d(_unwrap(input), _unwrap(weight), stride[0], stride[1], padding[0], padding[1], groups))
     else:
         return NotImplemented
 
@@ -1562,26 +1562,15 @@ def _op_conv_backward(grad_output, input, weight, bias_sizes, stride, padding, d
 
     if output_mask[0]:
         if is_conv1d:
-            if groups == 1:
-                # Conv1d grad_input on Metal GPU
-                go_gpu = _unwrap(grad_output)
-                w_gpu = _unwrap(weight)
-                in_shape_actual = input.shape if isinstance(input, ApplegpuTensor) else input.shape
-                grad_input = _wrap(gpu.conv1d_backward_input(
-                    go_gpu, w_gpu,
-                    in_channels=in_shape_actual[1], in_len=in_shape_actual[2],
-                    stride=stride[0], padding=padding[0]),
-                    torch_dtype=grad_output.dtype)
-            else:
-                # Groups > 1: CPU fallback
-                go_cpu = grad_output.to_torch_cpu() if isinstance(grad_output, ApplegpuTensor) else grad_output
-                in_cpu = input.to_torch_cpu() if isinstance(input, ApplegpuTensor) else input
-                w_cpu = weight.to_torch_cpu() if isinstance(weight, ApplegpuTensor) else weight
-                gi_cpu = torch.ops.aten.convolution_backward(
-                    go_cpu, in_cpu, w_cpu, bias_sizes, stride, padding, dilation,
-                    transposed, output_padding, groups, [True, False, False]
-                )[0]
-                grad_input = ApplegpuTensor.from_torch(gi_cpu)
+            # Conv1d grad_input on Metal GPU
+            go_gpu = _unwrap(grad_output)
+            w_gpu = _unwrap(weight)
+            in_shape_actual = input.shape if isinstance(input, ApplegpuTensor) else input.shape
+            grad_input = _wrap(gpu.conv1d_backward_input(
+                go_gpu, w_gpu,
+                in_channels=in_shape_actual[1], in_len=in_shape_actual[2],
+                stride=stride[0], padding=padding[0], groups=groups),
+                torch_dtype=grad_output.dtype)
         else:
             # Conv2d grad_input on Metal
             in_h, in_w = in_shape[-2], in_shape[-1]
@@ -1589,22 +1578,33 @@ def _op_conv_backward(grad_output, input, weight, bias_sizes, stride, padding, d
             ph, pw = padding[0], padding[1] if len(padding) > 1 else padding[0]
             grad_input = _wrap(gpu.conv2d_backward_input(
                 _unwrap(grad_output), _unwrap(weight),
-                int(in_h), int(in_w), int(sh), int(sw), int(ph), int(pw)
+                int(in_h), int(in_w), int(sh), int(sw), int(ph), int(pw), groups
             ))
 
     if output_mask[1]:
-        go_cpu = grad_output.to_torch_cpu() if isinstance(grad_output, ApplegpuTensor) else grad_output
-        in_cpu = input.to_torch_cpu() if isinstance(input, ApplegpuTensor) else input
-        w_cpu = weight.to_torch_cpu() if isinstance(weight, ApplegpuTensor) else weight
         if is_conv1d:
+            # Conv1d grad_weight: CPU fallback (no Metal kernel for conv1d backward weight)
+            go_cpu = grad_output.to_torch_cpu() if isinstance(grad_output, ApplegpuTensor) else grad_output
+            in_cpu = input.to_torch_cpu() if isinstance(input, ApplegpuTensor) else input
+            w_cpu = weight.to_torch_cpu() if isinstance(weight, ApplegpuTensor) else weight
             gw_cpu = torch.ops.aten.convolution_backward(
                 go_cpu, in_cpu, w_cpu, bias_sizes, stride, padding, dilation,
                 transposed, output_padding, groups, [False, True, False]
             )[1]
             grad_weight = ApplegpuTensor.from_torch(gw_cpu)
         else:
-            grad_weight_cpu = torch.nn.grad.conv2d_weight(in_cpu, w_cpu.shape, go_cpu, stride=stride, padding=padding, dilation=dilation, groups=groups)
-            grad_weight = ApplegpuTensor.from_torch(grad_weight_cpu)
+            # Conv2d grad_weight on Metal GPU
+            w_shape = weight.shape if isinstance(weight, ApplegpuTensor) else weight.shape
+            go_gpu = _unwrap(grad_output)
+            in_gpu = _unwrap(input)
+            sh, sw = stride[0], stride[1] if len(stride) > 1 else stride[0]
+            ph, pw = padding[0], padding[1] if len(padding) > 1 else padding[0]
+            in_channels_total = in_shape[1]
+            grad_weight = _wrap(gpu.conv2d_backward_weight(
+                go_gpu, in_gpu,
+                int(w_shape[2]), int(w_shape[3]),
+                int(w_shape[0]), int(in_channels_total),
+                int(sh), int(sw), int(ph), int(pw), groups))
 
     if output_mask[2] and bias_sizes is not None:
         go_cpu = grad_output.to_torch_cpu() if isinstance(grad_output, ApplegpuTensor) else grad_output

@@ -112,8 +112,8 @@ pub enum OpKind {
     // Select rows/columns by 1D index tensor
     IndexSelect { dim: usize },
     // CNN ops
-    Conv1d { stride: usize, padding: usize },
-    Conv2d { stride: (usize, usize), padding: (usize, usize) },
+    Conv1d { stride: usize, padding: usize, groups: usize },
+    Conv2d { stride: (usize, usize), padding: (usize, usize), groups: usize },
     BatchNorm { eps: f32 },
     MaxPool2d { kernel_size: (usize, usize), stride: (usize, usize), padding: (usize, usize) },
     MaxPool2dWithIndices { kernel_size: (usize, usize), stride: (usize, usize), padding: (usize, usize), indices_id: u64 },
@@ -121,8 +121,9 @@ pub enum OpKind {
     // Backward ops
     SoftmaxBackward,
     LayerNormBackward { eps: f32 },
-    Conv2dBackwardInput { stride: (usize, usize), padding: (usize, usize) },
-    Conv1dBackwardInput { stride: usize, padding: usize },
+    Conv2dBackwardInput { stride: (usize, usize), padding: (usize, usize), groups: usize },
+    Conv2dBackwardWeight { stride: (usize, usize), padding: (usize, usize), groups: usize },
+    Conv1dBackwardInput { stride: usize, padding: usize, groups: usize },
     EmbeddingBackward,
     BatchNormBackward { eps: f32 },
     ThresholdBackward { threshold: f32 },
@@ -153,6 +154,10 @@ pub enum OpKind {
     Quantize { scale: f32, zero_point: i32, target_dtype: DType },
     // Dequantize: int8/uint8 → float with scale and zero_point
     Dequantize { scale: f32, zero_point: i32, target_dtype: DType },
+    // Scatter write: copy values into output at indices (no accumulation)
+    ScatterWrite,
+    // Scatter add: atomically add values into output at indices
+    ScatterAdd,
 }
 
 impl OpKind {
@@ -210,6 +215,7 @@ impl OpKind {
             OpKind::SoftmaxBackward => "softmax_backward",
             OpKind::LayerNormBackward { .. } => "layer_norm_backward",
             OpKind::Conv2dBackwardInput { .. } => "conv2d_backward_input",
+            OpKind::Conv2dBackwardWeight { .. } => "conv2d_backward_weight",
             OpKind::Conv1dBackwardInput { .. } => "conv1d_backward_input",
             OpKind::EmbeddingBackward => "embedding_backward",
             OpKind::BatchNormBackward { .. } => "batch_norm_backward",
@@ -240,6 +246,8 @@ impl OpKind {
             OpKind::Cast { .. } => "cast",
             OpKind::Quantize { .. } => "quantize",
             OpKind::Dequantize { .. } => "dequantize",
+            OpKind::ScatterWrite => "scatter_write",
+            OpKind::ScatterAdd => "scatter_add",
         }
     }
 
@@ -414,6 +422,10 @@ impl OpKind {
 
     pub fn is_conv2d_backward_input(&self) -> bool {
         matches!(self, OpKind::Conv2dBackwardInput { .. })
+    }
+
+    pub fn is_conv2d_backward_weight(&self) -> bool {
+        matches!(self, OpKind::Conv2dBackwardWeight { .. })
     }
 
     pub fn is_conv1d_backward_input(&self) -> bool {

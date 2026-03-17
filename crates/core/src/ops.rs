@@ -43,7 +43,8 @@ pub fn validate_op_dtype(op: &OpKind, dtype: DType) -> Result<()> {
         OpKind::AddBias | OpKind::Embedding |
         OpKind::Mean | OpKind::Var { .. } |
         OpKind::SoftmaxBackward | OpKind::LayerNormBackward { .. } |
-        OpKind::Conv2dBackwardInput { .. } | OpKind::Conv1dBackwardInput { .. } |
+        OpKind::Conv2dBackwardInput { .. } | OpKind::Conv2dBackwardWeight { .. } |
+        OpKind::Conv1dBackwardInput { .. } |
         OpKind::EmbeddingBackward |
         OpKind::BatchNormBackward { .. } |
         OpKind::ThresholdBackward { .. } |
@@ -79,7 +80,8 @@ pub fn validate_op_dtype(op: &OpKind, dtype: DType) -> Result<()> {
 
         // All except Bool
         OpKind::Gather { .. } | OpKind::IndexSelect { .. } |
-        OpKind::Sum | OpKind::Argmax => {
+        OpKind::Sum | OpKind::Argmax |
+        OpKind::ScatterWrite | OpKind::ScatterAdd => {
             if matches!(dtype, DType::Bool) {
                 return Err(GpuError::UnsupportedDtype(format!(
                     "{:?} does not support bool dtype", op
@@ -738,9 +740,10 @@ pub fn conv2d_backward_input(
     in_w: usize,
     stride: (usize, usize),
     padding: (usize, usize),
+    groups: usize,
 ) -> Result<u64> {
     let grad_dtype = rt.dtype(grad_output_id)?;
-    validate_op_dtype(&OpKind::Conv2dBackwardInput { stride, padding }, grad_dtype)?;
+    validate_op_dtype(&OpKind::Conv2dBackwardInput { stride, padding, groups }, grad_dtype)?;
     let w_dtype = rt.dtype(weight_id)?;
     if grad_dtype != w_dtype {
         return Err(GpuError::InvalidTensor(format!(
@@ -758,7 +761,7 @@ pub fn conv2d_backward_input(
     }
     if w_shape.len() != 4 {
         return Err(GpuError::InvalidTensor(format!(
-            "conv2d_backward_input weight must be 4D [OC,IC,KH,KW], got {:?}", w_shape
+            "conv2d_backward_input weight must be 4D [OC,IC_per_group,KH,KW], got {:?}", w_shape
         )));
     }
     if grad_shape[1] != w_shape[0] {
@@ -768,14 +771,81 @@ pub fn conv2d_backward_input(
     }
 
     let batch = grad_shape[0];
-    let in_channels = w_shape[1];
+    let in_channels = w_shape[1] * groups;
 
     let out_id = next_id();
     rt.record_op(OpNode {
         id: out_id,
-        op: OpKind::Conv2dBackwardInput { stride, padding },
+        op: OpKind::Conv2dBackwardInput { stride, padding, groups },
         inputs: vec![grad_output_id, weight_id],
         out_shape: Shape::new(vec![batch, in_channels, in_h, in_w])?,
+        out_dtype: grad_dtype,
+        container_id: ContainerId::DEFAULT,
+    });
+    Ok(out_id)
+}
+
+/// Conv2d backward weight: computes grad_weight from grad_output and input.
+/// grad_output: [batch, out_channels, out_h, out_w]
+/// input: [batch, in_channels, in_h, in_w]
+/// output: [out_channels, in_channels, kh, kw]
+pub fn conv2d_backward_weight(
+    rt: &mut LazyRuntime,
+    grad_output_id: u64,
+    input_id: u64,
+    kh: usize,
+    kw: usize,
+    out_channels: usize,
+    in_channels: usize,
+    stride: (usize, usize),
+    padding: (usize, usize),
+    groups: usize,
+) -> Result<u64> {
+    let grad_dtype = rt.dtype(grad_output_id)?;
+    validate_op_dtype(&OpKind::Conv2dBackwardWeight { stride, padding, groups }, grad_dtype)?;
+    let in_dtype = rt.dtype(input_id)?;
+    if grad_dtype != in_dtype {
+        return Err(GpuError::InvalidTensor(format!(
+            "conv2d_backward_weight dtype mismatch: grad {:?} vs input {:?}", grad_dtype, in_dtype
+        )));
+    }
+
+    let grad_shape = rt.shape(grad_output_id)?;
+    let in_shape = rt.shape(input_id)?;
+
+    if grad_shape.len() != 4 {
+        return Err(GpuError::InvalidTensor(format!(
+            "conv2d_backward_weight grad_output must be 4D [B,OC,OH,OW], got {:?}", grad_shape
+        )));
+    }
+    if in_shape.len() != 4 {
+        return Err(GpuError::InvalidTensor(format!(
+            "conv2d_backward_weight input must be 4D [B,IC,IH,IW], got {:?}", in_shape
+        )));
+    }
+    if grad_shape[0] != in_shape[0] {
+        return Err(GpuError::InvalidTensor(format!(
+            "conv2d_backward_weight batch mismatch: grad {} vs input {}", grad_shape[0], in_shape[0]
+        )));
+    }
+    if grad_shape[1] != out_channels {
+        return Err(GpuError::InvalidTensor(format!(
+            "conv2d_backward_weight out_channels mismatch: grad {} vs expected {}", grad_shape[1], out_channels
+        )));
+    }
+    if in_shape[1] != in_channels {
+        return Err(GpuError::InvalidTensor(format!(
+            "conv2d_backward_weight in_channels mismatch: input {} vs expected {}", in_shape[1], in_channels
+        )));
+    }
+
+    let in_channels_per_group = in_channels / groups;
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op: OpKind::Conv2dBackwardWeight { stride, padding, groups },
+        inputs: vec![grad_output_id, input_id],
+        out_shape: Shape::new(vec![out_channels, in_channels_per_group, kh, kw])?,
         out_dtype: grad_dtype,
         container_id: ContainerId::DEFAULT,
     });
@@ -794,9 +864,10 @@ pub fn conv1d_backward_input(
     in_len: usize,
     stride: usize,
     padding: usize,
+    groups: usize,
 ) -> Result<u64> {
     let grad_dtype = rt.dtype(grad_output_id)?;
-    validate_op_dtype(&OpKind::Conv1dBackwardInput { stride, padding }, grad_dtype)?;
+    validate_op_dtype(&OpKind::Conv1dBackwardInput { stride, padding, groups }, grad_dtype)?;
     let w_dtype = rt.dtype(weight_id)?;
     if grad_dtype != w_dtype {
         return Err(GpuError::InvalidTensor(format!(
@@ -814,7 +885,7 @@ pub fn conv1d_backward_input(
     }
     if w_shape.len() != 3 {
         return Err(GpuError::InvalidTensor(format!(
-            "conv1d_backward_input weight must be 3D [OC,IC,KL], got {:?}", w_shape
+            "conv1d_backward_input weight must be 3D [OC,IC_per_group,KL], got {:?}", w_shape
         )));
     }
     if grad_shape[1] != w_shape[0] {
@@ -828,7 +899,7 @@ pub fn conv1d_backward_input(
     let out_id = next_id();
     rt.record_op(OpNode {
         id: out_id,
-        op: OpKind::Conv1dBackwardInput { stride, padding },
+        op: OpKind::Conv1dBackwardInput { stride, padding, groups },
         inputs: vec![grad_output_id, weight_id],
         out_shape: Shape::new(vec![batch, in_channels, in_len])?,
         out_dtype: grad_dtype,
@@ -1724,9 +1795,9 @@ pub fn index_select(rt: &mut LazyRuntime, input_id: u64, dim: usize, index_id: u
 /// 1D convolution.
 /// input: [batch, in_channels, length], weight: [out_channels, in_channels, kernel_size]
 /// output: [batch, out_channels, out_length]
-pub fn conv1d(rt: &mut LazyRuntime, input_id: u64, weight_id: u64, stride: usize, padding: usize) -> Result<u64> {
+pub fn conv1d(rt: &mut LazyRuntime, input_id: u64, weight_id: u64, stride: usize, padding: usize, groups: usize) -> Result<u64> {
     let in_dtype = rt.dtype(input_id)?;
-    validate_op_dtype(&OpKind::Conv1d { stride, padding }, in_dtype)?;
+    validate_op_dtype(&OpKind::Conv1d { stride, padding, groups }, in_dtype)?;
     let w_dtype = rt.dtype(weight_id)?;
     if in_dtype != w_dtype {
         return Err(GpuError::InvalidTensor(format!(
@@ -1744,12 +1815,25 @@ pub fn conv1d(rt: &mut LazyRuntime, input_id: u64, weight_id: u64, stride: usize
     }
     if w_shape.len() != 3 {
         return Err(GpuError::InvalidTensor(format!(
-            "conv1d weight must be 3D [OC,IC,K], got {:?}", w_shape
+            "conv1d weight must be 3D [OC,IC_per_group,K], got {:?}", w_shape
         )));
     }
-    if in_shape[1] != w_shape[1] {
+    if groups == 0 {
+        return Err(GpuError::InvalidTensor("conv1d: groups must be > 0".to_string()));
+    }
+    if in_shape[1] % groups != 0 {
         return Err(GpuError::InvalidTensor(format!(
-            "conv1d in_channels mismatch: input {} vs weight {}", in_shape[1], w_shape[1]
+            "conv1d: in_channels {} not divisible by groups {}", in_shape[1], groups
+        )));
+    }
+    if w_shape[0] % groups != 0 {
+        return Err(GpuError::InvalidTensor(format!(
+            "conv1d: out_channels {} not divisible by groups {}", w_shape[0], groups
+        )));
+    }
+    if w_shape[1] != in_shape[1] / groups {
+        return Err(GpuError::InvalidTensor(format!(
+            "conv1d in_channels_per_group mismatch: weight {} vs expected {}", w_shape[1], in_shape[1] / groups
         )));
     }
 
@@ -1768,7 +1852,7 @@ pub fn conv1d(rt: &mut LazyRuntime, input_id: u64, weight_id: u64, stride: usize
     let out_id = next_id();
     rt.record_op(OpNode {
         id: out_id,
-        op: OpKind::Conv1d { stride, padding },
+        op: OpKind::Conv1d { stride, padding, groups },
         inputs: vec![input_id, weight_id],
         out_shape: Shape::new(vec![batch, out_channels, out_length])?,
         out_dtype: in_dtype,
@@ -1780,9 +1864,9 @@ pub fn conv1d(rt: &mut LazyRuntime, input_id: u64, weight_id: u64, stride: usize
 /// 2D convolution.
 /// input: [batch, in_channels, height, width], weight: [out_channels, in_channels, kh, kw]
 /// output: [batch, out_channels, out_h, out_w]
-pub fn conv2d(rt: &mut LazyRuntime, input_id: u64, weight_id: u64, stride: (usize, usize), padding: (usize, usize)) -> Result<u64> {
+pub fn conv2d(rt: &mut LazyRuntime, input_id: u64, weight_id: u64, stride: (usize, usize), padding: (usize, usize), groups: usize) -> Result<u64> {
     let in_dtype = rt.dtype(input_id)?;
-    validate_op_dtype(&OpKind::Conv2d { stride, padding }, in_dtype)?;
+    validate_op_dtype(&OpKind::Conv2d { stride, padding, groups }, in_dtype)?;
     let w_dtype = rt.dtype(weight_id)?;
     if in_dtype != w_dtype {
         return Err(GpuError::InvalidTensor(format!(
@@ -1800,12 +1884,25 @@ pub fn conv2d(rt: &mut LazyRuntime, input_id: u64, weight_id: u64, stride: (usiz
     }
     if w_shape.len() != 4 {
         return Err(GpuError::InvalidTensor(format!(
-            "conv2d weight must be 4D [OC,IC,KH,KW], got {:?}", w_shape
+            "conv2d weight must be 4D [OC,IC_per_group,KH,KW], got {:?}", w_shape
         )));
     }
-    if in_shape[1] != w_shape[1] {
+    if groups == 0 {
+        return Err(GpuError::InvalidTensor("conv2d: groups must be > 0".to_string()));
+    }
+    if in_shape[1] % groups != 0 {
         return Err(GpuError::InvalidTensor(format!(
-            "conv2d in_channels mismatch: input {} vs weight {}", in_shape[1], w_shape[1]
+            "conv2d: in_channels {} not divisible by groups {}", in_shape[1], groups
+        )));
+    }
+    if w_shape[0] % groups != 0 {
+        return Err(GpuError::InvalidTensor(format!(
+            "conv2d: out_channels {} not divisible by groups {}", w_shape[0], groups
+        )));
+    }
+    if w_shape[1] != in_shape[1] / groups {
+        return Err(GpuError::InvalidTensor(format!(
+            "conv2d in_channels_per_group mismatch: weight {} vs expected {}", w_shape[1], in_shape[1] / groups
         )));
     }
 
@@ -1827,7 +1924,7 @@ pub fn conv2d(rt: &mut LazyRuntime, input_id: u64, weight_id: u64, stride: (usiz
     let out_id = next_id();
     rt.record_op(OpNode {
         id: out_id,
-        op: OpKind::Conv2d { stride, padding },
+        op: OpKind::Conv2d { stride, padding, groups },
         inputs: vec![input_id, weight_id],
         out_shape: Shape::new(vec![batch, out_channels, out_h, out_w])?,
         out_dtype: in_dtype,
@@ -4025,7 +4122,7 @@ mod tests {
         rt.insert_tensor(input).unwrap();
         rt.insert_tensor(weight).unwrap();
 
-        let out_id = conv1d(&mut rt, in_id, w_id, 1, 0).unwrap();
+        let out_id = conv1d(&mut rt, in_id, w_id, 1, 0, 1).unwrap();
         assert_eq!(rt.shape(out_id).unwrap(), vec![1, 1, 3]);
 
         rt.eval(&device, out_id).unwrap();
@@ -4048,7 +4145,7 @@ mod tests {
         rt.insert_tensor(input).unwrap();
         rt.insert_tensor(weight).unwrap();
 
-        let out_id = conv1d(&mut rt, in_id, w_id, 2, 0).unwrap();
+        let out_id = conv1d(&mut rt, in_id, w_id, 2, 0, 1).unwrap();
         assert_eq!(rt.shape(out_id).unwrap(), vec![1, 1, 2]);
 
         rt.eval(&device, out_id).unwrap();
@@ -4074,7 +4171,7 @@ mod tests {
         rt.insert_tensor(input).unwrap();
         rt.insert_tensor(weight).unwrap();
 
-        let out_id = conv1d(&mut rt, in_id, w_id, 1, 0).unwrap();
+        let out_id = conv1d(&mut rt, in_id, w_id, 1, 0, 1).unwrap();
         assert_eq!(rt.shape(out_id).unwrap(), vec![1, 1, 2]);
 
         rt.eval(&device, out_id).unwrap();
@@ -4094,7 +4191,7 @@ mod tests {
         let w_id = weight.meta.id;
         rt.insert_tensor(input_2d).unwrap();
         rt.insert_tensor(weight).unwrap();
-        assert!(conv1d(&mut rt, in_id, w_id, 1, 0).is_err());
+        assert!(conv1d(&mut rt, in_id, w_id, 1, 0, 1).is_err());
 
         // in_channels mismatch
         let input = Tensor::from_f32(&device, vec![1, 2, 5], &[1.0; 10]).unwrap();
@@ -4103,7 +4200,7 @@ mod tests {
         let w_id = weight2.meta.id;
         rt.insert_tensor(input).unwrap();
         rt.insert_tensor(weight2).unwrap();
-        assert!(conv1d(&mut rt, in_id, w_id, 1, 0).is_err());
+        assert!(conv1d(&mut rt, in_id, w_id, 1, 0, 1).is_err());
     }
 
     #[test]
@@ -4127,7 +4224,7 @@ mod tests {
         rt.insert_tensor(input).unwrap();
         rt.insert_tensor(weight).unwrap();
 
-        let out_id = conv2d(&mut rt, in_id, w_id, (1, 1), (0, 0)).unwrap();
+        let out_id = conv2d(&mut rt, in_id, w_id, (1, 1), (0, 0), 1).unwrap();
         assert_eq!(rt.shape(out_id).unwrap(), vec![1, 1, 2, 2]);
 
         rt.eval(&device, out_id).unwrap();
@@ -4148,7 +4245,7 @@ mod tests {
         rt.insert_tensor(input).unwrap();
         rt.insert_tensor(weight).unwrap();
 
-        let out_id = conv2d(&mut rt, in_id, w_id, (1, 1), (0, 0)).unwrap();
+        let out_id = conv2d(&mut rt, in_id, w_id, (1, 1), (0, 0), 1).unwrap();
         rt.eval(&device, out_id).unwrap();
         let result = rt.read_f32(out_id).unwrap();
         assert_eq!(result, &[4.0, 4.0, 4.0, 4.0]);
@@ -4166,7 +4263,7 @@ mod tests {
         let w_id = weight.meta.id;
         rt.insert_tensor(input_3d).unwrap();
         rt.insert_tensor(weight).unwrap();
-        assert!(conv2d(&mut rt, in_id, w_id, (1, 1), (0, 0)).is_err());
+        assert!(conv2d(&mut rt, in_id, w_id, (1, 1), (0, 0), 1).is_err());
     }
 
     #[test]
@@ -4579,7 +4676,7 @@ mod tests {
         rt.insert_tensor(grad_output).unwrap();
         rt.insert_tensor(weight).unwrap();
 
-        let gi_id = conv2d_backward_input(&mut rt, go_id, w_id, 3, 3, (1, 1), (0, 0)).unwrap();
+        let gi_id = conv2d_backward_input(&mut rt, go_id, w_id, 3, 3, (1, 1), (0, 0), 1).unwrap();
         assert_eq!(rt.shape(gi_id).unwrap(), vec![1, 1, 3, 3]);
 
         rt.eval(&device, gi_id).unwrap();
@@ -4613,7 +4710,7 @@ mod tests {
         rt.insert_tensor(grad_output).unwrap();
         rt.insert_tensor(weight).unwrap();
 
-        let gi_id = conv2d_backward_input(&mut rt, go_id, w_id, 3, 3, (1, 1), (0, 0)).unwrap();
+        let gi_id = conv2d_backward_input(&mut rt, go_id, w_id, 3, 3, (1, 1), (0, 0), 1).unwrap();
         rt.eval(&device, gi_id).unwrap();
         let result = rt.read_f32(gi_id).unwrap();
         let expected = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0];
@@ -4634,7 +4731,7 @@ mod tests {
         let w_id = w.meta.id;
         rt.insert_tensor(go_3d).unwrap();
         rt.insert_tensor(w).unwrap();
-        assert!(conv2d_backward_input(&mut rt, go_id, w_id, 3, 3, (1, 1), (0, 0)).is_err());
+        assert!(conv2d_backward_input(&mut rt, go_id, w_id, 3, 3, (1, 1), (0, 0), 1).is_err());
     }
 
     // ── Conv1d backward tests ─────────────────────────────────────────
@@ -4655,7 +4752,7 @@ mod tests {
         rt.insert_tensor(grad_output).unwrap();
         rt.insert_tensor(weight).unwrap();
 
-        let gi_id = conv1d_backward_input(&mut rt, go_id, w_id, 1, 4, 1, 0).unwrap();
+        let gi_id = conv1d_backward_input(&mut rt, go_id, w_id, 1, 4, 1, 0, 1).unwrap();
         assert_eq!(rt.shape(gi_id).unwrap(), vec![1, 1, 4]);
 
         rt.eval(&device, gi_id).unwrap();
@@ -4684,7 +4781,7 @@ mod tests {
         rt.insert_tensor(grad_output).unwrap();
         rt.insert_tensor(weight).unwrap();
 
-        let gi_id = conv1d_backward_input(&mut rt, go_id, w_id, 1, 4, 1, 0).unwrap();
+        let gi_id = conv1d_backward_input(&mut rt, go_id, w_id, 1, 4, 1, 0, 1).unwrap();
         rt.eval(&device, gi_id).unwrap();
         let result = rt.read_f32(gi_id).unwrap();
         let expected = [1.0, 0.0, 0.0, 0.0];
@@ -4705,7 +4802,7 @@ mod tests {
         let w_id = w.meta.id;
         rt.insert_tensor(go_2d).unwrap();
         rt.insert_tensor(w).unwrap();
-        assert!(conv1d_backward_input(&mut rt, go_id, w_id, 1, 4, 1, 0).is_err());
+        assert!(conv1d_backward_input(&mut rt, go_id, w_id, 1, 4, 1, 0, 1).is_err());
     }
 
     // ── Embedding backward tests ─────────────────────────────────────────

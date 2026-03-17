@@ -147,8 +147,8 @@ pub trait Backend: Send + Sync {
     fn add_bias(&self, input: u64, bias: u64) -> BackendResult<u64>;
 
     // CNN ops
-    fn conv1d(&self, input: u64, weight: u64, stride: usize, padding: usize) -> BackendResult<u64>;
-    fn conv2d(&self, input: u64, weight: u64, stride: (usize, usize), padding: (usize, usize)) -> BackendResult<u64>;
+    fn conv1d(&self, input: u64, weight: u64, stride: usize, padding: usize, groups: usize) -> BackendResult<u64>;
+    fn conv2d(&self, input: u64, weight: u64, stride: (usize, usize), padding: (usize, usize), groups: usize) -> BackendResult<u64>;
     fn batch_norm(&self, input: u64, mean: u64, var: u64, weight: u64, bias: u64, eps: f32) -> BackendResult<u64>;
     fn max_pool2d(&self, input: u64, kernel: (usize, usize), stride: (usize, usize), padding: (usize, usize)) -> BackendResult<u64>;
     fn max_pool2d_with_indices(&self, input: u64, kernel: (usize, usize), stride: (usize, usize), padding: (usize, usize)) -> BackendResult<(u64, u64)>;
@@ -157,8 +157,9 @@ pub trait Backend: Send + Sync {
     // Backward ops
     fn softmax_backward(&self, grad: u64, output: u64) -> BackendResult<u64>;
     fn layer_norm_backward(&self, grad: u64, input: u64, gamma: u64, eps: f32) -> BackendResult<u64>;
-    fn conv2d_backward_input(&self, grad: u64, weight: u64, in_h: usize, in_w: usize, stride: (usize, usize), padding: (usize, usize)) -> BackendResult<u64>;
-    fn conv1d_backward_input(&self, grad: u64, weight: u64, in_channels: usize, in_len: usize, stride: usize, padding: usize) -> BackendResult<u64>;
+    fn conv2d_backward_input(&self, grad: u64, weight: u64, in_h: usize, in_w: usize, stride: (usize, usize), padding: (usize, usize), groups: usize) -> BackendResult<u64>;
+    fn conv2d_backward_weight(&self, grad: u64, input: u64, kh: usize, kw: usize, out_channels: usize, in_channels: usize, stride: (usize, usize), padding: (usize, usize), groups: usize) -> BackendResult<u64>;
+    fn conv1d_backward_input(&self, grad: u64, weight: u64, in_channels: usize, in_len: usize, stride: usize, padding: usize, groups: usize) -> BackendResult<u64>;
     fn embedding_backward(&self, grad: u64, indices: u64, num_weights: usize) -> BackendResult<u64>;
     fn batch_norm_backward(&self, grad: u64, weight: u64, var: u64, eps: f32) -> BackendResult<u64>;
     fn threshold_backward(&self, grad_output: u64, input: u64, threshold: f32) -> BackendResult<u64>;
