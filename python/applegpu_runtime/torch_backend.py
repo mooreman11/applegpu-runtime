@@ -1534,8 +1534,8 @@ def _op_layer_norm_backward(grad_output, input, normalized_shape, mean, rstd, we
 def _op_conv_backward(grad_output, input, weight, bias_sizes, stride, padding, dilation, transposed, output_padding, groups, output_mask):
     """Conv backward — supports both conv1d (3D) and conv2d (4D).
 
-    TODO: conv1d grad_input uses CPU fallback (no dedicated Metal kernel).
-    conv2d grad_weight uses CPU fallback (weight gradient is a correlation,
+    conv1d and conv2d grad_input use native Metal GPU kernels.
+    TODO: conv2d grad_weight uses CPU fallback (weight gradient is a correlation,
     harder to parallelize than the input gradient which is a transposed conv).
     grad_bias uses CPU sum (could use existing gpu.sum reduction).
     """
@@ -1643,6 +1643,9 @@ def _op_max_pool2d_backward(grad_output, input, kernel_size, stride, padding, di
     """max_pool2d backward — scatter gradients to max positions via Metal GPU."""
     in_shape = input.shape if isinstance(input, ApplegpuTensor) else input.shape
     idx_gpu = _unwrap(indices)
+    # PyTorch MaxPool2d returns Int64 indices; our Metal kernel requires Int32
+    if idx_gpu.dtype == "int64":
+        idx_gpu = gpu.cast(idx_gpu, "int32")
     go_gpu = _unwrap(grad_output)
     result = gpu.max_pool2d_backward(go_gpu, idx_gpu,
                                       batch=in_shape[0], channels=in_shape[1],

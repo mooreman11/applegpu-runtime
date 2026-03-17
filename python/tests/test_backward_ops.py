@@ -168,3 +168,99 @@ class TestMaxPool2dBackward:
             gpu.from_numpy(indices.numpy().astype(np.int32)),
             batch=2, channels=3, in_h=8, in_w=8))
         np.testing.assert_allclose(result, expected, atol=1e-5)
+
+
+class TestTrainingIntegration:
+    """Verify backward ops work in a real training loop."""
+
+    def test_mlp_training_step(self):
+        """MLP with ReLU + GELU + tanh + sigmoid — exercises all 4 element-wise backward ops."""
+        from applegpu_runtime.torch_backend import enable, to_applegpu, set_eager_mode
+        enable()
+        set_eager_mode(True)
+
+        model = torch.nn.Sequential(
+            torch.nn.Linear(8, 16),
+            torch.nn.ReLU(),        # threshold_backward
+            torch.nn.Linear(16, 16),
+            torch.nn.GELU(approximate="tanh"),  # gelu_backward
+            torch.nn.Linear(16, 16),
+            torch.nn.Tanh(),         # tanh_backward
+            torch.nn.Linear(16, 4),
+            torch.nn.Sigmoid(),      # sigmoid_backward
+        )
+        to_applegpu(model)
+
+        x = torch.randn(2, 8)
+        x_gpu = to_applegpu(x)
+        target = torch.zeros(2, 4)
+        target_gpu = to_applegpu(target)
+
+        y = model(x_gpu)
+        loss = ((y - target_gpu) ** 2).mean()
+        loss_val = loss.to_torch_cpu().item()
+        loss.backward()
+
+        # Verify gradients exist and are non-zero
+        for name, param in model.named_parameters():
+            assert param.grad is not None, f"No gradient for {name}"
+            grad_cpu = param.grad.to_torch_cpu() if hasattr(param.grad, 'to_torch_cpu') else param.grad
+            assert grad_cpu.abs().sum() > 0, f"Zero gradient for {name}"
+
+        assert loss_val > 0, "Loss should be positive"
+        set_eager_mode(False)
+
+    def test_cnn_training_step(self):
+        """CNN with max_pool2d — exercises max_pool2d_backward."""
+        from applegpu_runtime.torch_backend import enable, to_applegpu, set_eager_mode
+        enable()
+        set_eager_mode(True)
+
+        model = torch.nn.Sequential(
+            torch.nn.Conv2d(1, 4, 3, padding=1),
+            torch.nn.ReLU(),
+            torch.nn.MaxPool2d(2, stride=2),  # max_pool2d_backward
+            torch.nn.Flatten(),
+            torch.nn.Linear(4 * 4 * 4, 2),
+        )
+        to_applegpu(model)
+
+        x = torch.randn(2, 1, 8, 8)
+        x_gpu = to_applegpu(x)
+        target = torch.zeros(2, 2)
+        target_gpu = to_applegpu(target)
+
+        y = model(x_gpu)
+        loss = ((y - target_gpu) ** 2).mean()
+        loss.backward()
+
+        for name, param in model.named_parameters():
+            assert param.grad is not None, f"No gradient for {name}"
+
+        set_eager_mode(False)
+
+    def test_conv1d_training_step(self):
+        """Conv1d encoder — exercises conv1d_backward_input."""
+        from applegpu_runtime.torch_backend import enable, to_applegpu, set_eager_mode
+        enable()
+        set_eager_mode(True)
+
+        model = torch.nn.Sequential(
+            torch.nn.Conv1d(8, 16, 3, padding=1),  # conv1d_backward_input
+            torch.nn.ReLU(),
+            torch.nn.Conv1d(16, 4, 3, padding=1),
+            torch.nn.ReLU(),
+        )
+        to_applegpu(model)
+
+        x = torch.randn(2, 8, 32)
+        x_gpu = to_applegpu(x)
+
+        y = model(x_gpu)
+        loss = y.mean()
+        loss.backward()
+
+        for name, param in model.named_parameters():
+            assert param.grad is not None, f"No gradient for {name}"
+
+        set_eager_mode(False)
