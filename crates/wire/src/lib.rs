@@ -183,6 +183,7 @@ pub enum WireOpKind {
     ScalarMul(f32),
     Gelu,
     Sigmoid,
+    Var { correction: u32 },
     // 15–20
     LayerNorm { eps: f32 },
     Embedding,
@@ -311,6 +312,7 @@ impl WireOpKind {
             WireOpKind::Cos => 66,
             WireOpKind::LogSoftmax => 67,
             WireOpKind::Sigmoid => 68,
+            WireOpKind::Var { .. } => 69,
         }
     }
 
@@ -361,6 +363,7 @@ impl WireOpKind {
             }
             WireOpKind::Concat { dim } => write_u32(w, *dim as u32),
             WireOpKind::Pow { exponent } => write_f32(w, *exponent),
+            WireOpKind::Var { correction } => write_u32(w, *correction),
             WireOpKind::Clamp { min_val, max_val } => {
                 write_f32(w, *min_val)?;
                 write_f32(w, *max_val)
@@ -577,6 +580,7 @@ impl WireOpKind {
             66 => Ok(WireOpKind::Cos),
             67 => Ok(WireOpKind::LogSoftmax),
             68 => Ok(WireOpKind::Sigmoid),
+            69 => Ok(WireOpKind::Var { correction: read_u32(r)? }),
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("Unknown op discriminant: {}", disc),

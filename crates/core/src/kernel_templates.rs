@@ -528,6 +528,54 @@ kernel void mean{s}(
     )
 }
 
+/// Generate variance kernel source. Reduces along last dimension.
+/// correction is baked into the kernel (0 = population, 1 = sample/Bessel's).
+/// Uses the same dispatch signature as mean/sum (rows, cols).
+pub fn var_kernel_source_with_correction(dtype: DType, correction: u32) -> String {
+    let t = metal_type(dtype);
+    let s = dtype_suffix(dtype);
+    let acc = needs_float_acc(dtype);
+    // Bake correction into function name for caching: var_c0 or var_c1
+    let fn_suffix = format!("{s}_c{correction}");
+    format!(
+        r#"#include <metal_stdlib>
+using namespace metal;
+
+kernel void var{fn_suffix}(
+    device const {t}* input [[buffer(0)]],
+    device {t}* output [[buffer(1)]],
+    constant uint& total_rows [[buffer(2)]],
+    constant uint& cols [[buffer(3)]],
+    uint row [[thread_position_in_grid]]
+) {{
+    if (row >= total_rows) return;
+    uint offset = row * cols;
+    float mean_val = 0.0f;
+    for (uint j = 0; j < cols; j++) {{
+        mean_val += {load};
+    }}
+    mean_val /= float(cols);
+    float var_val = 0.0f;
+    for (uint j = 0; j < cols; j++) {{
+        float diff = {load} - mean_val;
+        var_val += diff * diff;
+    }}
+    float denom = float(cols) - {correction}.0f;
+    if (denom <= 0.0f) denom = 1.0f;
+    output[row] = {store};
+}}
+"#,
+        t = t, fn_suffix = fn_suffix, correction = correction,
+        load = if acc { "float(input[offset + j])".to_string() } else { "input[offset + j]".to_string() },
+        store = if acc { format!("{}(var_val / denom)", t) } else { "var_val / denom".to_string() },
+    )
+}
+
+/// Convenience: generate var kernel with default correction=1 (Bessel's).
+pub fn var_kernel_source(dtype: DType) -> String {
+    var_kernel_source_with_correction(dtype, 1)
+}
+
 /// Generate N-D add_bias kernel source. Adds 1D bias along dim 1 (channels).
 /// Works for any N-D input (N >= 2):
 ///   - 2D [rows, cols]: channel_stride=1, num_channels=cols -> bias[id % cols]

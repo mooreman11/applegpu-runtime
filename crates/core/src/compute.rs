@@ -1460,6 +1460,7 @@ impl KernelRegistry {
             "argmax" => kt::argmax_kernel_source(dtype),
             "sum" => kt::sum_kernel_source(dtype),
             "mean" => kt::mean_kernel_source(dtype),
+            "var" => kt::var_kernel_source(dtype),
             "add_bias" => kt::add_bias_kernel_source(dtype),
             "where" => kt::where_kernel_source(dtype),
             "masked_fill" => kt::masked_fill_kernel_source(dtype),
@@ -2024,6 +2025,31 @@ impl KernelRegistry {
         let (source, func) = Self::resolve_kernel("mean", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_softmax(buf_input, buf_output, rows, cols)
+    }
+
+    pub fn dispatch_var_typed(
+        &self, device: &Device, dtype: DType, buf_input: &Buffer, buf_output: &Buffer,
+        rows: usize, cols: usize, correction: u32,
+    ) -> Result<()> {
+        use crate::kernel_templates as kt;
+        let source = kt::var_kernel_source_with_correction(dtype, correction);
+        let s = kt::dtype_suffix(dtype);
+        let func = format!("var{s}_c{correction}");
+        let pipeline = self.get_or_create(device, &source, &func)?;
+        pipeline.dispatch_softmax(buf_input, buf_output, rows, cols)
+    }
+
+    pub fn dispatch_var_typed_nb(
+        &self, device: &Device, dtype: DType, queue: *mut std::ffi::c_void,
+        buf_input: &Buffer, buf_output: &Buffer,
+        rows: usize, cols: usize, correction: u32,
+    ) -> Result<*mut std::ffi::c_void> {
+        use crate::kernel_templates as kt;
+        let source = kt::var_kernel_source_with_correction(dtype, correction);
+        let s = kt::dtype_suffix(dtype);
+        let func = format!("var{s}_c{correction}");
+        let pipeline = self.get_or_create(device, &source, &func)?;
+        pipeline.dispatch_softmax_nb(queue, buf_input, buf_output, rows, cols)
     }
 
     pub fn dispatch_argmax_typed(

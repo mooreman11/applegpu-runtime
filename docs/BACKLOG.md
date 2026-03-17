@@ -146,40 +146,41 @@ _Containerization, multi-dtype completion, wire protocol v3, CI/packaging._
 - [x] Run.swift fixes — APPLEGPU_FORCE_TCP, async fix, configurable bridge IP
 - [x] VsockRelay.swift deprecated, image normalization, entitlements
 
----
-
-## Up Next
-
-### PRIORITY 1: Whisper Speech-to-Text (in progress)
-_Model skeleton complete, forward pass has a bug producing wrong logits._
+### Whisper Speech-to-Text
 - [x] Model skeleton + HuggingFace weight loading (168 tensors for tiny)
 - [x] Audio encoder — Conv1d + GELU + attention blocks + LayerNorm
 - [x] Text decoder — dual KV cache (self-attn grows, cross-attn static)
 - [x] Greedy decoding with forced prefix tokens + special token suppression
 - [x] Causal mask fix — use `attention_causal` only for prefix step (q_len > 1)
-- [ ] **Debug forward pass** — logits produce garbage (repeated punctuation). Need layer-by-layer comparison against PyTorch reference.
-- [ ] Integration test with real speech audio
-- [ ] Example script (`whisper_transcribe.py`) — created but untested end-to-end
+- [x] Encoder positional embedding fix — use HF learned weights, not sinusoidal
+- [x] Tokenizer fix — multilingual flag based on model name
+- [x] N-D slice/concat fix — generalized 2D-only dispatch to handle 3D+ tensors (lazy.rs)
+- [x] End-to-end transcription verified (TTS audio → correct text)
+- [x] Regression test suite (10 tests: encoder, decoder, causal mask, slice/concat, e2e)
 
-### PRIORITY 2: PyPI Publishing
+---
+
+## Up Next
+
+### PRIORITY 1: PyPI Publishing
 - [ ] Create PyPI account + API token
 - [ ] Publish wheels to real PyPI
 - [ ] Add `PYPI_TOKEN` GitHub secret for automated releases
 
-### PRIORITY 3: Vsock Socket Relay (blocked)
+### PRIORITY 2: Vsock Socket Relay (blocked)
 _Blocked by apple/containerization framework socket staging bug (errno 20 ENOTDIR)._
 - [ ] Fix socket staging — try low-level `LinuxContainer(rootfs:vmm:)` API or `dialVsock` manual relay
 - [ ] Remove TCP bridge once vsock path is proven
 - [ ] Delete VsockRelay.swift (kept with deprecation)
 - [ ] Socket helper unit tests
 
-### PRIORITY 4: More Models + Polish
+### PRIORITY 3: More Models + Polish
 - [ ] Stable Diffusion — requires `group_norm` (new kernel)
 - [ ] Fine-tuned model export — save trained weights
 - [ ] Native `model.to("applegpu")` — proper PrivateUse1 storage backend
 - [ ] Binary signing/notarization — Apple Developer ID
 
-### PRIORITY 5: Performance Optimization
+### PRIORITY 4: Performance Optimization
 - [ ] `torch.compile()` support — register as compile backend
 - [ ] Async eval — `gpu.eval_async(tensor)` returns GpuFuture
 - [ ] Fine-grained locking — split `Mutex<LazyRuntime>` per-component

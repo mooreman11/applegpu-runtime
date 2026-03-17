@@ -977,7 +977,7 @@ impl LazyRuntime {
             return Ok(out);
         }
 
-        if node.op.is_sum() || node.op.is_mean() {
+        if node.op.is_sum() || node.op.is_mean() || node.op.is_var() {
             let out_buf = self.pool.acquire(device, out_size)?;
             let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
             let input = self.get_tensor(node.inputs[0])?;
@@ -986,6 +986,8 @@ impl LazyRuntime {
             let total_rows: usize = dims[..dims.len() - 1].iter().product::<usize>().max(1);
             if node.op.is_sum() {
                 REGISTRY.dispatch_sum_typed(device, dtype, &input.buffer, &out.buffer, total_rows, cols)?;
+            } else if let crate::graph::OpKind::Var { correction } = node.op {
+                REGISTRY.dispatch_var_typed(device, dtype, &input.buffer, &out.buffer, total_rows, cols, correction)?;
             } else {
                 REGISTRY.dispatch_mean_typed(device, dtype, &input.buffer, &out.buffer, total_rows, cols)?;
             }
@@ -1647,13 +1649,15 @@ impl LazyRuntime {
             return REGISTRY.dispatch_argmax_typed_nb(device, input_dtype, queue, &input.buffer, &out.buffer, rows, cols);
         }
 
-        if node.op.is_sum() || node.op.is_mean() {
+        if node.op.is_sum() || node.op.is_mean() || node.op.is_var() {
             let input = self.get_tensor(node.inputs[0])?;
             let dims = input.meta.layout.shape.dims();
             let cols = dims[dims.len() - 1];
             let total_rows: usize = dims[..dims.len() - 1].iter().product::<usize>().max(1);
             if node.op.is_sum() {
                 return REGISTRY.dispatch_sum_typed_nb(device, dtype, queue, &input.buffer, &out.buffer, total_rows, cols);
+            } else if let crate::graph::OpKind::Var { correction } = node.op {
+                return REGISTRY.dispatch_var_typed_nb(device, dtype, queue, &input.buffer, &out.buffer, total_rows, cols, correction);
             } else {
                 return REGISTRY.dispatch_mean_typed_nb(device, dtype, queue, &input.buffer, &out.buffer, total_rows, cols);
             }

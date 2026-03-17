@@ -389,6 +389,20 @@ def _op_sigmoid(a):
     return _wrap(gpu.sigmoid(_unwrap(a)))
 
 
+@register_op(torch.ops.aten.var.correction)
+def _op_var(a, dim=None, *, correction=1, keepdim=False):
+    """Variance reduction along last dim."""
+    corr = int(correction) if correction is not None else 1
+    return _wrap(gpu.var(_unwrap(a), corr))
+
+
+@register_op(torch.ops.aten.std.correction)
+def _op_std(a, dim=None, *, correction=1, keepdim=False):
+    """Standard deviation reduction along last dim."""
+    corr = int(correction) if correction is not None else 1
+    return _wrap(gpu.std_dev(_unwrap(a), corr))
+
+
 @register_op(torch.ops.aten.abs.default)
 def _op_abs(a):
     return _wrap(gpu.abs(_unwrap(a)))

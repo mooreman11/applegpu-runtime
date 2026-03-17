@@ -563,6 +563,14 @@ impl Backend for SocketBackend {
     fn sigmoid(&self, a: u64) -> BackendResult<u64> {
         self.record_unary(a, WireOpKind::Sigmoid)
     }
+    fn var(&self, a: u64, correction: u32) -> BackendResult<u64> {
+        self.record_unary(a, WireOpKind::Var { correction })
+    }
+    fn std_dev(&self, a: u64, correction: u32) -> BackendResult<u64> {
+        // std = sqrt(var) — record var then sqrt
+        let var_id = self.record_unary(a, WireOpKind::Var { correction })?;
+        self.record_unary(var_id, WireOpKind::Sqrt)
+    }
     fn exp(&self, a: u64) -> BackendResult<u64> {
         self.record_unary(a, WireOpKind::Exp)
     }

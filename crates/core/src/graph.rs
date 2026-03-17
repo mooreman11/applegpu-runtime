@@ -89,6 +89,8 @@ pub enum OpKind {
     Sum,
     // Mean reduction along last dim
     Mean,
+    // Variance reduction along last dim (with Bessel's correction parameter)
+    Var { correction: u32 },
     // Element-wise absolute value
     Abs,
     // Element-wise sign (-1, 0, 1)
@@ -175,6 +177,7 @@ impl OpKind {
             OpKind::Argmax => "argmax",
             OpKind::Sum => "sum",
             OpKind::Mean => "mean",
+            OpKind::Var { .. } => "var",
             OpKind::Abs => "elementwise_abs",
             OpKind::Sign => "elementwise_sign",
             OpKind::Pow { .. } => "pow",
@@ -305,6 +308,10 @@ impl OpKind {
 
     pub fn is_mean(&self) -> bool {
         matches!(self, OpKind::Mean)
+    }
+
+    pub fn is_var(&self) -> bool {
+        matches!(self, OpKind::Var { .. })
     }
 
     pub fn is_abs(&self) -> bool {

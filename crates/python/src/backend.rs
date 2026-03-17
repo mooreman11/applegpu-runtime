@@ -66,6 +66,8 @@ pub trait Backend: Send + Sync {
     fn relu(&self, a: u64) -> BackendResult<u64>;
     fn gelu(&self, a: u64) -> BackendResult<u64>;
     fn sigmoid(&self, a: u64) -> BackendResult<u64>;
+    fn var(&self, a: u64, correction: u32) -> BackendResult<u64>;
+    fn std_dev(&self, a: u64, correction: u32) -> BackendResult<u64>;
     fn exp(&self, a: u64) -> BackendResult<u64>;
     fn log(&self, a: u64) -> BackendResult<u64>;
     fn sqrt(&self, a: u64) -> BackendResult<u64>;
