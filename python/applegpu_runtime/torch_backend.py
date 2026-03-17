@@ -1444,15 +1444,38 @@ def _op_unsafe_split(a, split_size, dim=0):
 
 @register_op(torch.ops.aten.linalg_vector_norm.default)
 def _op_linalg_vector_norm(a, ord=2.0, dim=None, keepdim=False, dtype=None):
-    """Vector norm reduction. Falls back to CPU.
+    """Vector norm reduction. L1/L2 composed on GPU, others CPU fallback.
 
-    TODO: CPU fallback. For L2 norm (most common), a Metal kernel computing
-    sum of squares then sqrt would work. Called once per training step for
-    gradient clipping — not a hot-path bottleneck.
+    TODO: L∞ norm needs an amax reduction kernel (see GitHub issue for backlog).
     """
-    a_cpu = a.to_torch_cpu() if isinstance(a, ApplegpuTensor) else a
-    result = torch.ops.aten.linalg_vector_norm.default(a_cpu, ord, dim, keepdim, dtype=dtype)
-    return ApplegpuTensor.from_torch(result)
+    if not isinstance(a, ApplegpuTensor):
+        return torch.ops.aten.linalg_vector_norm.default(a, ord, dim, keepdim, dtype=dtype)
+
+    # L2: sqrt(sum(x^2))
+    if ord == 2.0 or ord == 2:
+        squared = _wrap(gpu.mul(_unwrap(a), _unwrap(a)))
+        if dim is not None:
+            dims = [dim] if isinstance(dim, int) else list(dim)
+            summed = _op_sum(squared, dims, keepdim=keepdim)
+        else:
+            summed = _op_sum_default(squared)
+        return _wrap(gpu.sqrt(_unwrap(summed)))
+
+    # L1: sum(|x|)
+    elif ord == 1.0 or ord == 1:
+        abs_a = _wrap(gpu.abs(_unwrap(a)))
+        if dim is not None:
+            dims = [dim] if isinstance(dim, int) else list(dim)
+            return _op_sum(abs_a, dims, keepdim=keepdim)
+        else:
+            return _op_sum_default(abs_a)
+
+    # L∞ and exotic norms: CPU fallback
+    # TODO: L∞ needs amax reduction kernel — see GitHub backlog
+    else:
+        a_cpu = a.to_torch_cpu()
+        result = torch.ops.aten.linalg_vector_norm.default(a_cpu, ord, dim, keepdim, dtype=dtype)
+        return ApplegpuTensor.from_torch(result)
 
 
 @register_op(torch.ops.aten._unique2.default)
