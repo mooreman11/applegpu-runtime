@@ -1181,6 +1181,12 @@ fn gelu_backward(grad_output: &GpuTensor, input: &GpuTensor) -> PyResult<GpuTens
     wrap_tensor(BACKEND.gelu_backward(grad_output.id, input.id))
 }
 
+#[pyfunction]
+#[pyo3(signature = (grad_output, indices, batch, channels, in_h, in_w))]
+fn max_pool2d_backward(grad_output: &GpuTensor, indices: &GpuTensor, batch: usize, channels: usize, in_h: usize, in_w: usize) -> PyResult<GpuTensor> {
+    wrap_tensor(BACKEND.max_pool2d_backward(grad_output.id, indices.id, batch, channels, in_h, in_w))
+}
+
 #[pymodule]
 fn applegpu_runtime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<GpuTensor>()?;
@@ -1293,5 +1299,6 @@ fn applegpu_runtime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(tanh_backward, m)?)?;
     m.add_function(wrap_pyfunction!(sigmoid_backward, m)?)?;
     m.add_function(wrap_pyfunction!(gelu_backward, m)?)?;
+    m.add_function(wrap_pyfunction!(max_pool2d_backward, m)?)?;
     Ok(())
 }

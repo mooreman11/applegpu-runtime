@@ -1180,6 +1180,10 @@ impl Backend for SocketBackend {
         Err("gelu_backward not yet implemented over socket backend".to_string())
     }
 
+    fn max_pool2d_backward(&self, _grad_output: u64, _indices: u64, _batch: usize, _channels: usize, _in_h: usize, _in_w: usize) -> BackendResult<u64> {
+        Err("max_pool2d_backward not yet implemented over socket backend".to_string())
+    }
+
     // -----------------------------------------------------------------------
     // Resource management — local tracking only
     // -----------------------------------------------------------------------

@@ -130,6 +130,7 @@ fn op_to_discriminant(op: &OpKind) -> u32 {
         OpKind::SigmoidBackward => 72,
         OpKind::GeluBackward => 73,
         OpKind::Conv1dBackwardInput { .. } => 74,
+        OpKind::MaxPool2dBackward => 75,
     }
 }
 
@@ -379,6 +380,7 @@ fn discriminant_to_op(d: u32, r: &mut impl Read) -> io::Result<OpKind> {
             let padding = read_u32(r)? as usize;
             Ok(OpKind::Conv1dBackwardInput { stride, padding })
         }
+        75 => Ok(OpKind::MaxPool2dBackward),
         _ => Err(io::Error::new(io::ErrorKind::InvalidData, format!("Unknown op type: {}", d))),
     }
 }
@@ -775,6 +777,7 @@ impl From<&OpKind> for WireOpKind {
             OpKind::TanhBackward => WireOpKind::TanhBackward,
             OpKind::SigmoidBackward => WireOpKind::SigmoidBackward,
             OpKind::GeluBackward => WireOpKind::GeluBackward,
+            OpKind::MaxPool2dBackward => WireOpKind::MaxPool2dBackward,
         }
     }
 }
@@ -887,6 +890,7 @@ pub fn wire_op_to_core(wire: &WireOpKind) -> OpKind {
         WireOpKind::TanhBackward => OpKind::TanhBackward,
         WireOpKind::SigmoidBackward => OpKind::SigmoidBackward,
         WireOpKind::GeluBackward => OpKind::GeluBackward,
+        WireOpKind::MaxPool2dBackward => OpKind::MaxPool2dBackward,
     }
 }
 

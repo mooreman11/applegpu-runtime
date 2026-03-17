@@ -247,6 +247,8 @@ pub enum WireOpKind {
     SigmoidBackward,
     // 73: gelu backward
     GeluBackward,
+    // 75: max_pool2d backward
+    MaxPool2dBackward,
 }
 
 impl WireOpKind {
@@ -327,6 +329,7 @@ impl WireOpKind {
             WireOpKind::SigmoidBackward => 72,
             WireOpKind::GeluBackward => 73,
             WireOpKind::Conv1dBackwardInput { .. } => 74,
+            WireOpKind::MaxPool2dBackward => 75,
         }
     }
 
@@ -440,7 +443,8 @@ impl WireOpKind {
                 w.write_all(&[*target_dtype])
             }
             WireOpKind::ThresholdBackward { threshold } => write_f32(w, *threshold),
-            WireOpKind::TanhBackward | WireOpKind::SigmoidBackward | WireOpKind::GeluBackward => Ok(()),
+            WireOpKind::TanhBackward | WireOpKind::SigmoidBackward | WireOpKind::GeluBackward |
+            WireOpKind::MaxPool2dBackward => Ok(()),
         }
     }
 
@@ -610,6 +614,7 @@ impl WireOpKind {
                 let padding = read_u32(r)? as usize;
                 Ok(WireOpKind::Conv1dBackwardInput { stride, padding })
             }
+            75 => Ok(WireOpKind::MaxPool2dBackward),
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("Unknown op discriminant: {}", disc),

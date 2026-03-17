@@ -1527,6 +1527,52 @@ kernel void embedding_backward{s}(
     )
 }
 
+/// Generate max_pool2d_backward kernel source. Uses atomic float add.
+/// Scatters grad_output values back to grad_input at positions indicated by indices.
+pub fn max_pool2d_backward_kernel_source(dtype: DType) -> String {
+    let t = metal_type(dtype);
+    let s = dtype_suffix(dtype);
+    format!(
+        r#"#include <metal_stdlib>
+using namespace metal;
+
+inline void atomic_add_float(device float* addr, float val) {{
+    float expected = *addr;
+    while (true) {{
+        float desired = expected + val;
+        device atomic_uint* addr_uint = (device atomic_uint*)addr;
+        uint expected_uint = as_type<uint>(expected);
+        uint desired_uint = as_type<uint>(desired);
+        if (atomic_compare_exchange_weak_explicit(addr_uint, &expected_uint, desired_uint,
+                memory_order_relaxed, memory_order_relaxed)) {{
+            break;
+        }}
+        expected = as_type<float>(expected_uint);
+    }}
+}}
+
+kernel void max_pool2d_backward{s}(
+    device const {t}* grad_output [[buffer(0)]],
+    device const int* indices [[buffer(1)]],
+    device float* grad_input [[buffer(2)]],
+    constant uint& numel_out [[buffer(3)]],
+    constant uint& in_hw [[buffer(4)]],
+    constant uint& out_hw [[buffer(5)]],
+    uint id [[thread_position_in_grid]]
+) {{
+    if (id >= numel_out) return;
+    uint bc = id / out_hw;
+    int idx = indices[id];
+    if (idx < 0 || uint(idx) >= in_hw) return;
+    uint gi_pos = bc * in_hw + uint(idx);
+    float go_val = float(grad_output[id]);
+    atomic_add_float(&grad_input[gi_pos], go_val);
+}}
+"#,
+        t = t, s = s,
+    )
+}
+
 /// Generate batch_norm_backward kernel source. Float-only.
 pub fn batch_norm_backward_kernel_source(dtype: DType) -> String {
     let t = metal_type(dtype);

@@ -128,6 +128,7 @@ pub enum OpKind {
     TanhBackward,
     SigmoidBackward,
     GeluBackward,
+    MaxPool2dBackward,
     // Comparison ops (output is always Bool)
     Lt, Gt, Le, Ge, Eq, Ne,
     // Bitwise ops (integer + Bool)
@@ -208,6 +209,7 @@ impl OpKind {
             OpKind::TanhBackward => "tanh_backward",
             OpKind::SigmoidBackward => "sigmoid_backward",
             OpKind::GeluBackward => "gelu_backward",
+            OpKind::MaxPool2dBackward => "max_pool2d_backward",
             OpKind::Lt => "lt",
             OpKind::Gt => "gt",
             OpKind::Le => "le",
@@ -422,6 +424,10 @@ impl OpKind {
 
     pub fn is_gelu_backward(&self) -> bool {
         matches!(self, OpKind::GeluBackward)
+    }
+
+    pub fn is_max_pool2d_backward(&self) -> bool {
+        matches!(self, OpKind::MaxPool2dBackward)
     }
 }
 

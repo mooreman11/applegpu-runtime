@@ -487,6 +487,28 @@ impl LazyRuntime {
             return Ok(out);
         }
 
+        if node.op.is_max_pool2d_backward() {
+            let out_buf = self.pool.acquire(device, out_size)?;
+            // Zero-initialize output for atomic accumulation — REQUIRED for correctness
+            out_buf.zero()?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+            let grad_output = self.get_tensor(node.inputs[0])?;
+            let indices = self.get_tensor(node.inputs[1])?;
+            let out_dims = node.out_shape.dims();
+            let in_hw = out_dims[2] * out_dims[3];
+            let go_dims = grad_output.meta.layout.shape.dims();
+            let out_hw = go_dims[2] * go_dims[3];
+            let numel_out: usize = go_dims.iter().product();
+            let uint_params: Vec<u32> = vec![numel_out as u32, in_hw as u32, out_hw as u32];
+            let (k_src, k_fn) = KernelRegistry::resolve_kernel("max_pool2d_backward", dtype);
+            REGISTRY.dispatch_cnn_3d(
+                device, &k_src, &k_fn,
+                &[&grad_output.buffer, &indices.buffer], &out.buffer,
+                &uint_params, &[], (numel_out as u32, 1, 1),
+            )?;
+            return Ok(out);
+        }
+
         if let crate::graph::OpKind::BatchNormBackward { eps } = node.op {
             let out_buf = self.pool.acquire(device, out_size)?;
             let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
@@ -1369,6 +1391,25 @@ impl LazyRuntime {
                 device, &k_src, &k_fn, queue,
                 &[&grad_output.buffer, &indices.buffer], &out.buffer,
                 &uint_params, &[], (embed_dim as u32, seq_len as u32, 1),
+            );
+        }
+
+        if node.op.is_max_pool2d_backward() {
+            // Zero-initialize output for atomic accumulation — REQUIRED for correctness
+            out.buffer.zero()?;
+            let grad_output = self.get_tensor(node.inputs[0])?;
+            let indices = self.get_tensor(node.inputs[1])?;
+            let out_dims = node.out_shape.dims();
+            let in_hw = out_dims[2] * out_dims[3];
+            let go_dims = grad_output.meta.layout.shape.dims();
+            let out_hw = go_dims[2] * go_dims[3];
+            let numel_out: usize = go_dims.iter().product();
+            let uint_params: Vec<u32> = vec![numel_out as u32, in_hw as u32, out_hw as u32];
+            let (k_src, k_fn) = KernelRegistry::resolve_kernel("max_pool2d_backward", dtype);
+            return REGISTRY.dispatch_cnn_3d_nb(
+                device, &k_src, &k_fn, queue,
+                &[&grad_output.buffer, &indices.buffer], &out.buffer,
+                &uint_params, &[], (numel_out as u32, 1, 1),
             );
         }
 

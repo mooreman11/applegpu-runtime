@@ -124,3 +124,47 @@ class TestConv1dBackwardInput:
             gpu.from_numpy(grad.detach().numpy()), gpu.from_numpy(w.numpy()),
             in_channels=4, in_len=32, stride=2, padding=1))
         np.testing.assert_allclose(result, expected, atol=1e-4)
+
+
+class TestMaxPool2dBackward:
+    def test_matches_pytorch(self):
+        """Non-overlapping pools (stride == kernel_size) — basic scatter."""
+        x = torch.randn(1, 2, 4, 4, requires_grad=True)
+        pool = torch.nn.MaxPool2d(2, stride=2, return_indices=True)
+        y, indices = pool(x)
+        grad = torch.randn_like(y)
+        y.backward(grad)
+        expected = x.grad.numpy()
+        result = _to_numpy(gpu.max_pool2d_backward(
+            gpu.from_numpy(grad.detach().numpy()),
+            gpu.from_numpy(indices.numpy().astype(np.int32)),
+            batch=1, channels=2, in_h=4, in_w=4))
+        np.testing.assert_allclose(result, expected, atol=1e-5)
+
+    def test_overlapping_pools(self):
+        """stride < kernel_size — multiple outputs can map to same input (needs atomics)."""
+        x = torch.randn(1, 1, 6, 6, requires_grad=True)
+        pool = torch.nn.MaxPool2d(3, stride=2, padding=0, return_indices=True)
+        y, indices = pool(x)
+        grad = torch.ones_like(y)
+        y.backward(grad)
+        expected = x.grad.numpy()
+        result = _to_numpy(gpu.max_pool2d_backward(
+            gpu.from_numpy(grad.detach().numpy()),
+            gpu.from_numpy(indices.numpy().astype(np.int32)),
+            batch=1, channels=1, in_h=6, in_w=6))
+        np.testing.assert_allclose(result, expected, atol=1e-5)
+
+    def test_batched_multichannel(self):
+        """Multi-batch, multi-channel with overlapping pools."""
+        x = torch.randn(2, 3, 8, 8, requires_grad=True)
+        pool = torch.nn.MaxPool2d(3, stride=2, padding=1, return_indices=True)
+        y, indices = pool(x)
+        grad = torch.randn_like(y)
+        y.backward(grad)
+        expected = x.grad.numpy()
+        result = _to_numpy(gpu.max_pool2d_backward(
+            gpu.from_numpy(grad.detach().numpy()),
+            gpu.from_numpy(indices.numpy().astype(np.int32)),
+            batch=2, channels=3, in_h=8, in_w=8))
+        np.testing.assert_allclose(result, expected, atol=1e-5)

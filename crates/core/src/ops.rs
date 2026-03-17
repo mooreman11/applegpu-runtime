@@ -48,7 +48,7 @@ pub fn validate_op_dtype(op: &OpKind, dtype: DType) -> Result<()> {
         OpKind::BatchNormBackward { .. } |
         OpKind::ThresholdBackward { .. } |
         OpKind::TanhBackward | OpKind::SigmoidBackward |
-        OpKind::GeluBackward => {
+        OpKind::GeluBackward | OpKind::MaxPool2dBackward => {
             if !dtype.is_float() {
                 return Err(GpuError::UnsupportedDtype(format!(
                     "{:?} requires a float dtype, got {}", op, dtype.name()
@@ -1027,6 +1027,42 @@ pub fn gelu_backward(rt: &mut LazyRuntime, grad_output_id: u64, input_id: u64) -
         op: OpKind::GeluBackward,
         inputs: vec![grad_output_id, input_id],
         out_shape: Shape::new(shape)?,
+        out_dtype: dtype,
+        container_id: ContainerId::DEFAULT,
+    });
+    Ok(out_id)
+}
+
+/// max_pool2d backward: scatter gradients to max positions using atomic adds.
+/// grad_output: [batch, channels, out_h, out_w]
+/// indices: [batch, channels, out_h, out_w] (Int32) — flat spatial index (ih*in_w + iw)
+/// output: [batch, channels, in_h, in_w] (zero-initialized, then accumulated)
+pub fn max_pool2d_backward(
+    rt: &mut LazyRuntime,
+    grad_output_id: u64,
+    indices_id: u64,
+    batch: usize,
+    channels: usize,
+    in_h: usize,
+    in_w: usize,
+) -> Result<u64> {
+    let dtype = rt.dtype(grad_output_id)?;
+    validate_op_dtype(&OpKind::MaxPool2dBackward, dtype)?;
+
+    let indices_dtype = rt.dtype(indices_id)?;
+    if indices_dtype != DType::Int32 {
+        return Err(GpuError::InvalidTensor(format!(
+            "max_pool2d_backward indices must be Int32, got {:?}", indices_dtype
+        )));
+    }
+
+    let out_shape = vec![batch, channels, in_h, in_w];
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op: OpKind::MaxPool2dBackward,
+        inputs: vec![grad_output_id, indices_id],
+        out_shape: Shape::new(out_shape)?,
         out_dtype: dtype,
         container_id: ContainerId::DEFAULT,
     });
@@ -4813,5 +4849,69 @@ mod tests {
         assert!((data[0] - 0.5).abs() < 0.01, "gelu'(0): got {}", data[0]);
         assert!((data[1] - 1.083).abs() < 0.02, "gelu'(1): got {}", data[1]);
         assert!((data[2] - (-0.083)).abs() < 0.02, "gelu'(-1): got {}", data[2]);
+    }
+
+    // ── max_pool2d backward tests ────────────────────────────────────────
+
+    #[test]
+    fn test_max_pool2d_backward_basic() {
+        // Non-overlapping 2x2 pool on 1x1x4x4 input
+        // indices tell where the max came from (flat spatial index)
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        // grad_output: [1, 1, 2, 2] = [[1, 2], [3, 4]]
+        let grad = Tensor::from_f32(&device, vec![1, 1, 2, 2],
+            &[1.0, 2.0, 3.0, 4.0]).unwrap();
+        // indices: max positions as flat spatial index (ih*in_w + iw)
+        // Pool(0,0)->max at (0,1)=1, Pool(0,1)->max at (0,3)=3,
+        // Pool(1,0)->max at (2,0)=8, Pool(1,1)->max at (3,3)=15
+        let indices = Tensor::from_i32(&device, vec![1, 1, 2, 2],
+            &[1, 3, 8, 15]).unwrap();
+        let go_id = grad.meta.id;
+        let idx_id = indices.meta.id;
+        rt.insert_tensor(grad).unwrap();
+        rt.insert_tensor(indices).unwrap();
+
+        let out_id = max_pool2d_backward(&mut rt, go_id, idx_id, 1, 1, 4, 4).unwrap();
+        assert_eq!(rt.shape(out_id).unwrap(), vec![1, 1, 4, 4]);
+
+        rt.eval(&device, out_id).unwrap();
+        let result = rt.read_f32(out_id).unwrap();
+        // Expected: zeros everywhere except at positions 1, 3, 8, 15
+        let mut expected = vec![0.0f32; 16];
+        expected[1] = 1.0;
+        expected[3] = 2.0;
+        expected[8] = 3.0;
+        expected[15] = 4.0;
+        for (i, (&got, &exp)) in result.iter().zip(expected.iter()).enumerate() {
+            assert!((got - exp).abs() < 1e-5, "index {}: got {} expected {}", i, got, exp);
+        }
+    }
+
+    #[test]
+    fn test_max_pool2d_backward_overlapping() {
+        // When multiple output positions scatter to the same input, values should accumulate
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+
+        // grad_output: [1, 1, 2, 2], all 1.0
+        let grad = Tensor::from_f32(&device, vec![1, 1, 2, 2],
+            &[1.0, 1.0, 1.0, 1.0]).unwrap();
+        // Two output positions both point to the same input position 5
+        let indices = Tensor::from_i32(&device, vec![1, 1, 2, 2],
+            &[5, 5, 0, 8]).unwrap();
+        let go_id = grad.meta.id;
+        let idx_id = indices.meta.id;
+        rt.insert_tensor(grad).unwrap();
+        rt.insert_tensor(indices).unwrap();
+
+        let out_id = max_pool2d_backward(&mut rt, go_id, idx_id, 1, 1, 3, 3).unwrap();
+        rt.eval(&device, out_id).unwrap();
+        let result = rt.read_f32(out_id).unwrap();
+        // Position 5 should get 1.0 + 1.0 = 2.0 (atomic accumulation)
+        assert!((result[5] - 2.0).abs() < 1e-5, "pos 5: got {} expected 2.0", result[5]);
+        assert!((result[0] - 1.0).abs() < 1e-5, "pos 0: got {} expected 1.0", result[0]);
+        assert!((result[8] - 1.0).abs() < 1e-5, "pos 8: got {} expected 1.0", result[8]);
     }
 }

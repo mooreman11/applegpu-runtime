@@ -109,6 +109,7 @@ from applegpu_runtime.applegpu_runtime import (
     tanh_backward,
     sigmoid_backward,
     gelu_backward,
+    max_pool2d_backward,
 )
 
 __version__ = version()
@@ -344,4 +345,5 @@ __all__ = [
     "tanh_backward",
     "sigmoid_backward",
     "gelu_backward",
+    "max_pool2d_backward",
 ]

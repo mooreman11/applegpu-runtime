@@ -1640,20 +1640,14 @@ def _op_batch_norm_backward(grad_output, input, weight, running_mean, running_va
 
 @register_op(torch.ops.aten.max_pool2d_with_indices_backward.default)
 def _op_max_pool2d_backward(grad_output, input, kernel_size, stride, padding, dilation, ceil_mode, indices):
-    """max_pool2d backward — scatter gradients to max positions via CPU.
-
-    TODO: CPU fallback. A Metal scatter kernel using the saved indices
-    would eliminate the transfer. When stride < kernel_size, pools overlap
-    and multiple output positions can map to the same input position —
-    requires atomic_add_float (CAS-loop, same pattern as embedding_backward).
-    """
-    go_cpu = grad_output.to_torch_cpu() if isinstance(grad_output, ApplegpuTensor) else grad_output
-    in_cpu = input.to_torch_cpu() if isinstance(input, ApplegpuTensor) else input
-    idx_cpu = indices.to_torch_cpu() if isinstance(indices, ApplegpuTensor) else indices
-    grad_input_cpu = torch.ops.aten.max_pool2d_with_indices_backward(
-        go_cpu, in_cpu, kernel_size, stride, padding, dilation, ceil_mode, idx_cpu,
-    )
-    return ApplegpuTensor.from_torch(grad_input_cpu)
+    """max_pool2d backward — scatter gradients to max positions via Metal GPU."""
+    in_shape = input.shape if isinstance(input, ApplegpuTensor) else input.shape
+    idx_gpu = _unwrap(indices)
+    go_gpu = _unwrap(grad_output)
+    result = gpu.max_pool2d_backward(go_gpu, idx_gpu,
+                                      batch=in_shape[0], channels=in_shape[1],
+                                      in_h=in_shape[2], in_w=in_shape[3])
+    return _wrap(result, torch_dtype=grad_output.dtype)
 
 
 # ============================================================
