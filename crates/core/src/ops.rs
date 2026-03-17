@@ -41,7 +41,7 @@ pub fn validate_op_dtype(op: &OpKind, dtype: DType) -> Result<()> {
         OpKind::Conv1d { .. } | OpKind::Conv2d { .. } |
         OpKind::MaxPool2d { .. } | OpKind::MaxPool2dWithIndices { .. } | OpKind::AvgPool2d { .. } |
         OpKind::AddBias | OpKind::Embedding |
-        OpKind::Mean | OpKind::Var { .. } |
+        OpKind::Mean | OpKind::Var { .. } | OpKind::Amax |
         OpKind::SoftmaxBackward | OpKind::LayerNormBackward { .. } |
         OpKind::Conv2dBackwardInput { .. } | OpKind::Conv2dBackwardWeight { .. } |
         OpKind::Conv1dBackwardInput { .. } |
@@ -1485,6 +1485,29 @@ pub fn var(rt: &mut LazyRuntime, input_id: u64, correction: u32) -> Result<u64> 
 pub fn std_dev(rt: &mut LazyRuntime, input_id: u64, correction: u32) -> Result<u64> {
     let var_id = var(rt, input_id, correction)?;
     lazy_unary_op(rt, var_id, OpKind::Sqrt)
+}
+
+/// Absolute max reduction along last dimension: max(|x|).
+/// Used for L-infinity vector norm.
+pub fn amax(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
+    let shape = rt.shape(input_id)?;
+    let dtype = rt.dtype(input_id)?;
+    validate_op_dtype(&OpKind::Amax, dtype)?;
+    if shape.is_empty() {
+        return Err(GpuError::InvalidTensor("amax requires at least 1D tensor".into()));
+    }
+    let mut out_shape = shape[..shape.len() - 1].to_vec();
+    if out_shape.is_empty() { out_shape = vec![1]; }
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op: OpKind::Amax,
+        inputs: vec![input_id],
+        out_shape: Shape::new(out_shape)?,
+        out_dtype: dtype,
+        container_id: ContainerId::DEFAULT,
+    });
+    Ok(out_id)
 }
 
 /// Scaled dot-product attention: softmax(Q @ K^T / sqrt(d_k)) @ V

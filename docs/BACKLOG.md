@@ -116,7 +116,7 @@ _Containerization, multi-dtype completion, wire protocol v3, CI/packaging._
 - [x] Quantize/dequantize (int8/uint8 with scale+zero_point)
 
 ### Wire Protocol v3
-- [x] 65 op types (up from 46), dtype-aware serialization
+- [x] 83 op types (up from 46), dtype-aware serialization
 - [x] All Plan 2/3 ops wired through SocketBackend + gpu-service
 - [x] Int32 compute fix over containers (was hardcoded Float32)
 
@@ -158,30 +158,40 @@ _Containerization, multi-dtype completion, wire protocol v3, CI/packaging._
 - [x] End-to-end transcription verified (TTS audio → correct text)
 - [x] Regression test suite (10 tests: encoder, decoder, causal mask, slice/concat, e2e)
 
+### GPU Backward Ops + Training Ops (PRs #25, #26)
+- [x] 14 backward ops on Metal: threshold, tanh, sigmoid, gelu, gelu_exact, gelu_tanh, softmax, layer_norm, conv2d_input, conv2d_weight, conv1d_input, embedding, batch_norm, max_pool2d
+- [x] Forward max_pool2d_with_indices — GPU-side indices output (#16)
+- [x] Exact GELU — `approximate="none"` forward + backward (#18)
+- [x] Grouped convolution — groups > 1 for conv1d/conv2d (#19)
+- [x] Conv2d grad_weight on GPU (#17)
+- [x] GPU index/scatter kernels — scatter_write, scatter_add (#21)
+- [x] GPU blit_copy — GPU→GPU memory transfer
+- [x] Wire protocol expanded to 84 op types (discriminants 0-83)
+
+### PyTorch Aten Ops Expansion (Issues #10-#14)
+- [x] sigmoid + sigmoid_backward on Metal (#11)
+- [x] var/std with Bessel's correction on Metal
+- [x] sin/cos aten dispatch (#15)
+- [x] 110+ registered aten ops (up from 40+)
+- [x] New aten ops: stack, linspace, normal_, index.Tensor, index_put_, linalg_vector_norm, _unique2, unbind, unsafe_split, var.correction, std.correction
+- [x] Docker Compose GPU sidecar pattern (#13)
+- [x] Optimizer/scheduler validation — Adam/AdamW/SGD + ReduceLROnPlateau (#14)
+- [x] Training lifecycle tests
+
 ---
 
 ## Up Next
 
-### PRIORITY 1: Metal Backward Ops (spec written)
-_Eliminate all GPU→CPU→GPU roundtrips during training. Spec: `docs/superpowers/specs/2026-03-17-metal-backward-ops-design.md`_
-- [ ] threshold_backward — `grad * (input > threshold)` (ReLU)
-- [ ] tanh_backward — `grad * (1 - output²)`
-- [ ] sigmoid_backward — `grad * output * (1 - output)`
-- [ ] gelu_backward — tanh-approximation derivative
-- [ ] conv1d_backward_input — transposed 1D convolution
-- [ ] max_pool2d_backward — atomic scatter to max indices
-- [ ] Wire protocol (serial.rs) — 6 new discriminant codes
-
-### PRIORITY 2: Stable Diffusion / `group_norm`
+### PRIORITY 1: Stable Diffusion / `group_norm`
 - [ ] `group_norm` kernel — single new Metal kernel
 - [ ] Stable Diffusion model wrapper + weight loading
 - [ ] End-to-end image generation test
 
-### PRIORITY 3: `fill`/`zeros`/`ones` Compute Kernels
+### PRIORITY 2: `fill`/`zeros`/`ones` Compute Kernels
 - [ ] Metal kernels for tensor creation (all dtypes)
 - [ ] Eliminates CPU fallback in model initialization paths
 
-### PRIORITY 4: PyPI Publishing
+### PRIORITY 3: PyPI Publishing
 - [ ] Create PyPI account + API token
 - [ ] Publish wheels to real PyPI
 - [ ] Add `PYPI_TOKEN` GitHub secret for automated releases
@@ -198,13 +208,14 @@ _Blocked by apple/containerization framework socket staging bug (errno 20 ENOTDI
 ## Further Backlog
 
 ### GPU Op Gaps (GitHub issues)
-- [ ] Forward max_pool2d with GPU-side indices output (#16)
-- [ ] Conv/layer_norm/batch_norm grad_weight/grad_bias on GPU (#17)
-- [ ] Exact GELU mode — `approximate="none"` for forward + backward (#18)
-- [ ] Grouped convolution (groups > 1) for conv1d/conv2d (#19)
-- [ ] GPU→GPU blit copy — eliminate CPU roundtrip in copy_ (#20)
-- [ ] GPU index/gather and index_put/scatter kernels (#21)
-- [ ] GPU linalg_vector_norm kernel for gradient clipping (#22)
+- [x] Forward max_pool2d with GPU-side indices output (#16) — PR #25
+- [x] Conv2d grad_weight on GPU (#17) — PR #26
+- [x] Exact GELU mode — `approximate="none"` for forward + backward (#18) — PR #25
+- [x] Grouped convolution (groups > 1) for conv1d/conv2d (#19) — PR #26
+- [x] GPU→GPU blit copy — eliminate CPU roundtrip in copy_ (#20) — eager blit encoder, not graph op
+- [x] GPU index/gather and index_put/scatter kernels (#21) — PR #26
+- [x] GPU linalg_vector_norm kernel for gradient clipping (#22) — L1/L2/L-inf all on GPU
+- [x] GPU amax reduction kernel for L-inf vector norm (#23)
 - [ ] GPU linspace kernel — `start + id * step` per thread (cold path, low priority)
 - [ ] GPU RNG kernel — Philox counter-based PRNG for normal_() (cold path, low priority)
 - [ ] GPU unique kernel — parallel sort + stream compaction (low priority)

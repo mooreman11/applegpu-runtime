@@ -1335,7 +1335,7 @@ impl LazyRuntime {
             return Ok(out);
         }
 
-        if node.op.is_sum() || node.op.is_mean() || node.op.is_var() {
+        if node.op.is_sum() || node.op.is_mean() || node.op.is_var() || node.op.is_amax() {
             let out_buf = self.pool.acquire(device, out_size)?;
             let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
             let input = self.get_tensor(node.inputs[0])?;
@@ -1346,6 +1346,8 @@ impl LazyRuntime {
                 REGISTRY.dispatch_sum_typed(device, dtype, &input.buffer, &out.buffer, total_rows, cols)?;
             } else if let crate::graph::OpKind::Var { correction } = node.op {
                 REGISTRY.dispatch_var_typed(device, dtype, &input.buffer, &out.buffer, total_rows, cols, correction)?;
+            } else if node.op.is_amax() {
+                REGISTRY.dispatch_amax_typed(device, dtype, &input.buffer, &out.buffer, total_rows, cols)?;
             } else {
                 REGISTRY.dispatch_mean_typed(device, dtype, &input.buffer, &out.buffer, total_rows, cols)?;
             }
@@ -2214,7 +2216,7 @@ impl LazyRuntime {
             return REGISTRY.dispatch_argmax_typed_nb(device, input_dtype, queue, &input.buffer, &out.buffer, rows, cols);
         }
 
-        if node.op.is_sum() || node.op.is_mean() || node.op.is_var() {
+        if node.op.is_sum() || node.op.is_mean() || node.op.is_var() || node.op.is_amax() {
             let input = self.get_tensor(node.inputs[0])?;
             let dims = input.meta.layout.shape.dims();
             let cols = dims[dims.len() - 1];
@@ -2223,6 +2225,8 @@ impl LazyRuntime {
                 return REGISTRY.dispatch_sum_typed_nb(device, dtype, queue, &input.buffer, &out.buffer, total_rows, cols);
             } else if let crate::graph::OpKind::Var { correction } = node.op {
                 return REGISTRY.dispatch_var_typed_nb(device, dtype, queue, &input.buffer, &out.buffer, total_rows, cols, correction);
+            } else if node.op.is_amax() {
+                return REGISTRY.dispatch_amax_typed_nb(device, dtype, queue, &input.buffer, &out.buffer, total_rows, cols);
             } else {
                 return REGISTRY.dispatch_mean_typed_nb(device, dtype, queue, &input.buffer, &out.buffer, total_rows, cols);
             }
@@ -2499,6 +2503,8 @@ impl LazyRuntime {
         };
 
         // Send to GPU service
+        // TODO: migrate to applegpu-client crate's GpuClient::eval()
+        #[allow(deprecated)]
         let response = crate::ipc::eval_remote(socket_path, &request)?;
 
         match response {

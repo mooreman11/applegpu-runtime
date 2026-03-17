@@ -73,7 +73,7 @@ output = model(x)              # matmul + bias + relu on Metal
 result = output.to_torch_cpu() # back to CPU when needed
 ```
 
-**Validated models:** GPT-2 (small/medium/large), ResNet-18, BERT
+**Validated models:** GPT-2 (small/medium/large), ResNet-18, BERT, Whisper (tiny)
 
 ## GPT-2 Text Generation
 
@@ -123,17 +123,17 @@ out = gpu.attention_causal(q, k, v)  # batched causal attention
 
 ## Capabilities
 
-### 61 GPU Operations (all dtypes except Float64, all N-D)
+### 84 GPU Operations (all dtypes except Float64, all N-D)
 
 | Category | Ops |
 |----------|-----|
-| Element-wise (15) | add, sub, mul, div, neg, relu, gelu, exp, log, sqrt, abs, sign, pow, clamp, tanh |
-| Reduction (5) | softmax, softmax_causal, argmax, sum, mean |
+| Element-wise (19) | add, sub, mul, div, neg, relu, gelu, gelu_exact, exp, log, sqrt, abs, sign, pow, clamp, tanh, sin, cos, sigmoid |
+| Reduction (8) | softmax, log_softmax, softmax_causal, argmax, sum, mean, var, amax |
 | Matrix/Transformer (5) | matmul (batched), layer_norm, embedding, attention, attention_causal |
 | Shape (6) | reshape, slice, concat, add_bias, transpose, transpose_dims |
 | Conditional (4) | where, masked_fill, triu, tril |
-| Indexing (2) | gather, index_select |
-| CNN (5) | conv1d, conv2d, batch_norm, max_pool2d, avg_pool2d |
+| Indexing (4) | gather, index_select, scatter_write, scatter_add |
+| CNN (6) | conv1d, conv2d (grouped), batch_norm, max_pool2d, max_pool2d_with_indices, avg_pool2d |
 | Comparison (6) | lt, gt, le, ge, eq, ne |
 | Bitwise (6) | bitwise_and, bitwise_or, bitwise_xor, bitwise_not, shl, shr |
 | Utility (3) | mod, elem_min, elem_max |
@@ -141,14 +141,14 @@ out = gpu.attention_causal(q, k, v)  # batched causal attention
 | Quantize (2) | quantize, dequantize |
 | Type (1) | cast |
 
-Plus 5 backward ops on Metal: softmax_backward, layer_norm_backward, conv2d_backward_input, embedding_backward, batch_norm_backward.
+Plus 14 backward ops on Metal: softmax, layer_norm, conv2d_input, conv2d_weight, conv1d_input, embedding, batch_norm, threshold (ReLU), tanh, sigmoid, gelu, gelu_exact, gelu_tanh, max_pool2d. Also: blit_copy (GPU→GPU transfer), scalar_mul, std_dev (var+sqrt).
 
 All ops support N-D tensors (up to 8 dimensions) with NumPy-style broadcasting and kernel fusion. Kernel sources are generated from templates — a single code path handles all 10 dtypes.
 
 ### Infrastructure
 
-- **PyTorch device backend** — `ApplegpuTensor` with `__torch_dispatch__`, 40+ aten ops routed to Metal, CPU fallback with warnings
-- **Training support** — autograd, SGD/Adam/AdamW, gradient clipping, GPT-2 fine-tuning, ResNet training
+- **PyTorch device backend** — `ApplegpuTensor` with `__torch_dispatch__`, 110+ aten ops routed to Metal, CPU fallback with warnings
+- **Training support** — autograd, SGD/Adam/AdamW, gradient clipping, GPT-2 fine-tuning, ResNet training, LSTM/GRU gate decomposition
 - **Fast tensor transfer** — `from_torch` 385x faster via direct `data_ptr()` (0.55ms vs 212ms for 1M elements)
 - **Zero-copy transfers** — `from_numpy_shared` / `from_torch_shared` for page-aligned data, `aligned_numpy` allocator
 - **Concurrent Metal queues** — parallel graph analysis with `parallel_levels()`, MTLEvent sync, up to 4 queues
@@ -162,7 +162,7 @@ All ops support N-D tensors (up to 8 dimensions) with NumPy-style broadcasting a
 - **Kernel fusion** — auto-detect element-wise chains, generate fused MSL at runtime
 - **Two backends** — MetalBackend (direct Metal, macOS) and SocketBackend (wire protocol, Linux containers)
 - **Container GPU access** — `gpu-container run` CLI, auto-start gpu-service, TCP bridge, multi-client with fair scheduling
-- **Wire protocol** — 65 op types, dtype-aware serialization, ReadTensor support, FusedElementwise rejection (security)
+- **Wire protocol** — 84 op types, dtype-aware serialization, ReadTensor support, FusedElementwise rejection (security)
 
 ## Container GPU Access
 
@@ -231,14 +231,15 @@ No TCP bridge, no port forwarding, no special networking required.
 
 ### Training
 
+- **14 backward ops on Metal** — threshold, tanh, sigmoid, gelu, gelu_exact, gelu_tanh, softmax, layer_norm, conv2d_input, conv2d_weight, conv1d_input, embedding, batch_norm, max_pool2d
 - **PyTorch autograd** — backward ops flow natively through `__torch_dispatch__`
 - **Optimizers** — SGD, Adam, AdamW all work with loss decrease
-- **Gradient clipping** — `torch.nn.utils.clip_grad_norm_` supported
+- **Gradient clipping** — `torch.nn.utils.clip_grad_norm_` supported (L1/L2/L-inf on GPU)
 - **Validated training** — MLP, transformer (GELU+LN), ResNet-18, GPT-2 fine-tuning
 
 ### Test Coverage
 
-~700 tests across all layers (351 Rust + 18 Swift + 334 Python)
+~750 tests across all layers (423 Rust + 3 Swift + 326 Python)
 
 ## Examples
 
@@ -246,7 +247,9 @@ See [`examples/`](examples/) for standalone demo scripts:
 - `gpt2_generate.py` — text generation with sampling
 - `resnet_inference.py` — CNN classification with benchmarking
 - `bert_inference.py` — transformer encoder inference
+- `whisper_transcribe.py` — speech-to-text transcription
 - `pytorch_device_backend.py` — MLP, broadcasting, multi-dtype
+- `docker-compose-gpu.yml` — Docker Compose GPU sidecar pattern
 
 ## Development
 

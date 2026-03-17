@@ -51,7 +51,7 @@ make check
 
 ## Key Files
 
-- `crates/core/src/ops.rs` — High-level tensor operations (add, sub, mul, div, neg, relu, exp, log, sqrt, matmul)
+- `crates/core/src/ops.rs` — High-level tensor operations (83 ops including forward, backward, scatter, grouped conv)
 - `crates/core/src/compute.rs` — KernelRegistry, ComputePipeline, MSL kernel sources
 - `crates/core/src/buffer.rs` — Safe Rust Buffer wrapper around MTLBuffer (zero-copy shared memory)
 - `crates/core/src/tensor.rs` — DType, Shape, TensorMeta, Tensor (buffer-backed)
@@ -91,7 +91,7 @@ This project uses **TDD**. Write tests first, then implement.
 
 ## Toolchain
 
-- **Rust**: cargo (workspace with two crates: `applegpu-core` and `applegpu-python`)
+- **Rust**: cargo (workspace with crates: `applegpu-core`, `applegpu-wire`, `applegpu-python`, `applegpu-client`, `applegpu-service`)
 - **Swift**: SwiftPM (package in `swift/`, produces static library `libAppleGPUBridge.a`)
 - **Python**: uv + maturin (pyproject.toml at root, `uv sync` handles everything)
 - Backend selection: `gpu.init_backend()` or `APPLEGPU_BACKEND=mlx|vm` env var

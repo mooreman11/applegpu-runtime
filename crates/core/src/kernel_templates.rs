@@ -629,6 +629,39 @@ pub fn var_kernel_source(dtype: DType) -> String {
     var_kernel_source_with_correction(dtype, 1)
 }
 
+/// Amax reduction: max(|x|) along last dimension.
+/// Used for L-infinity vector norm.
+pub fn amax_kernel_source(dtype: DType) -> String {
+    let t = metal_type(dtype);
+    let s = dtype_suffix(dtype);
+    let acc = needs_float_acc(dtype);
+    format!(
+        r#"#include <metal_stdlib>
+using namespace metal;
+
+kernel void amax{s}(
+    device const {t}* input [[buffer(0)]],
+    device {t}* output [[buffer(1)]],
+    constant uint& total_rows [[buffer(2)]],
+    constant uint& cols [[buffer(3)]],
+    uint row [[thread_position_in_grid]]
+) {{
+    if (row >= total_rows) return;
+    uint offset = row * cols;
+    float max_val = 0.0f;
+    for (uint j = 0; j < cols; j++) {{
+        float v = abs({load});
+        max_val = max(max_val, v);
+    }}
+    output[row] = {store};
+}}
+"#,
+        s = s, t = t,
+        load = if acc { "float(input[offset + j])".to_string() } else { "input[offset + j]".to_string() },
+        store = if acc { format!("{t}(max_val)") } else { "max_val".to_string() },
+    )
+}
+
 /// Generate N-D add_bias kernel source. Adds 1D bias along dim 1 (channels).
 /// Works for any N-D input (N >= 2):
 ///   - 2D [rows, cols]: channel_stride=1, num_channels=cols -> bias[id % cols]
@@ -2846,5 +2879,13 @@ mod tests {
         assert!(src.contains("channel_stride"));
         assert!(src.contains("(id / channel_stride) % num_channels"));
         assert!(src.contains("uint id [[thread_position_in_grid]]"));
+    }
+
+    #[test]
+    fn test_amax_kernel_source_f32() {
+        let src = amax_kernel_source(DType::Float32);
+        assert!(src.contains("kernel void amax_f32"));
+        assert!(src.contains("abs("));
+        assert!(src.contains("max(max_val"));
     }
 }
