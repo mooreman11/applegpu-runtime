@@ -441,7 +441,11 @@ def _op_clamp(a, min=None, max=None):
 
 @register_op(torch.ops.aten.threshold_backward.default)
 def _op_threshold_backward(grad_output, self_tensor, threshold):
-    """Backward for relu: grad * (self > threshold)."""
+    """Backward for relu: grad * (self > threshold).
+
+    TODO: CPU fallback. Metal kernel: `out[id] = (input[id] > threshold) ? grad[id] : 0`.
+    Simple element-wise — could reuse the comparison + mul pattern on GPU.
+    """
     self_cpu = self_tensor.to_torch_cpu() if isinstance(self_tensor, ApplegpuTensor) else self_tensor
     grad_cpu = grad_output.to_torch_cpu() if isinstance(grad_output, ApplegpuTensor) else grad_output
     mask = (self_cpu > threshold).float()
@@ -451,7 +455,12 @@ def _op_threshold_backward(grad_output, self_tensor, threshold):
 
 @register_op(torch.ops.aten.gelu_backward.default)
 def _op_gelu_backward(grad_output, self_tensor, approximate="none"):
-    """Backward for gelu."""
+    """Backward for gelu.
+
+    TODO: CPU fallback. Metal kernel would compute the GELU derivative
+    (tanh approximation gradient) per element. Formula is complex but
+    entirely element-wise — good candidate for a dedicated kernel.
+    """
     import math
     x_cpu = self_tensor.to_torch_cpu() if isinstance(self_tensor, ApplegpuTensor) else self_tensor
     grad_cpu = grad_output.to_torch_cpu() if isinstance(grad_output, ApplegpuTensor) else grad_output
@@ -468,7 +477,11 @@ def _op_gelu_backward(grad_output, self_tensor, approximate="none"):
 
 @register_op(torch.ops.aten.tanh_backward.default)
 def _op_tanh_backward(grad_output, output):
-    """Backward for tanh: grad * (1 - output^2)."""
+    """Backward for tanh: grad * (1 - output^2).
+
+    TODO: CPU fallback. Metal kernel: `out[id] = grad[id] * (1 - output[id] * output[id])`.
+    Trivial element-wise — just needs mul and sub ops composed on GPU.
+    """
     out_cpu = output.to_torch_cpu() if isinstance(output, ApplegpuTensor) else output
     grad_cpu = grad_output.to_torch_cpu() if isinstance(grad_output, ApplegpuTensor) else grad_output
     result = grad_cpu * (1 - out_cpu ** 2)
@@ -477,7 +490,11 @@ def _op_tanh_backward(grad_output, output):
 
 @register_op(torch.ops.aten.sigmoid_backward.default)
 def _op_sigmoid_backward(grad_output, output):
-    """Backward for sigmoid: grad * output * (1 - output)."""
+    """Backward for sigmoid: grad * output * (1 - output).
+
+    TODO: CPU fallback. Metal kernel: `out[id] = grad[id] * output[id] * (1 - output[id])`.
+    Trivial element-wise — could compose from existing mul/sub ops on GPU.
+    """
     out_cpu = output.to_torch_cpu() if isinstance(output, ApplegpuTensor) else output
     grad_cpu = grad_output.to_torch_cpu() if isinstance(grad_output, ApplegpuTensor) else grad_output
     result = grad_cpu * out_cpu * (1 - out_cpu)
@@ -1080,7 +1097,11 @@ def _op_scalar_tensor(val, dtype=None, layout=None, device=None, pin_memory=None
 
 @register_op(torch.ops.aten.copy_.default)
 def _op_copy_(dst, src, non_blocking=False):
-    """In-place copy of src into dst."""
+    """In-place copy of src into dst.
+
+    TODO: GPU→GPU copy goes through CPU (to_torch_cpu → from_torch). A Metal
+    blit encoder (MTLBlitCommandEncoder.copy) would do GPU→GPU directly.
+    """
     if isinstance(src, ApplegpuTensor):
         cpu_data = src.to_torch_cpu()
         new_gpu = gpu.from_torch(cpu_data)
@@ -1406,7 +1427,12 @@ def _op_softmax_backward(grad_output, output, dim, input_dtype):
 
 @register_op(torch.ops.aten.native_layer_norm_backward.default)
 def _op_layer_norm_backward(grad_output, input, normalized_shape, mean, rstd, weight, bias, output_mask):
-    """Layer norm backward — native Metal kernel for grad_input, CPU for grad_weight/grad_beta."""
+    """Layer norm backward — native Metal kernel for grad_input, CPU for grad_weight/grad_beta.
+
+    TODO: grad_weight and grad_bias use CPU fallback (sum over batch dims).
+    These are small tensors (size = hidden_dim) so the CPU path is not a
+    bottleneck, but a Metal reduction kernel could eliminate the transfer.
+    """
     go_gpu = _unwrap(grad_output)
     input_gpu = _unwrap(input)
     weight_gpu = _unwrap(weight) if weight is not None else None
@@ -1445,7 +1471,13 @@ def _op_layer_norm_backward(grad_output, input, normalized_shape, mean, rstd, we
 
 @register_op(torch.ops.aten.convolution_backward.default)
 def _op_conv_backward(grad_output, input, weight, bias_sizes, stride, padding, dilation, transposed, output_padding, groups, output_mask):
-    """Conv backward — supports both conv1d (3D) and conv2d (4D)."""
+    """Conv backward — supports both conv1d (3D) and conv2d (4D).
+
+    TODO: conv1d grad_input uses CPU fallback (no dedicated Metal kernel).
+    conv2d grad_weight uses CPU fallback (weight gradient is a correlation,
+    harder to parallelize than the input gradient which is a transposed conv).
+    grad_bias uses CPU sum (could use existing gpu.sum reduction).
+    """
     grad_input = None
     grad_weight = None
     grad_bias = None
@@ -1536,7 +1568,12 @@ def _op_batch_norm_backward(grad_output, input, weight, running_mean, running_va
 
 @register_op(torch.ops.aten.max_pool2d_with_indices_backward.default)
 def _op_max_pool2d_backward(grad_output, input, kernel_size, stride, padding, dilation, ceil_mode, indices):
-    """max_pool2d backward — scatter gradients to max positions via CPU."""
+    """max_pool2d backward — scatter gradients to max positions via CPU.
+
+    TODO: CPU fallback. A Metal scatter kernel using the saved indices
+    would eliminate the transfer. Each output position maps to exactly one
+    input position (stored in `indices`), so no atomics needed.
+    """
     go_cpu = grad_output.to_torch_cpu() if isinstance(grad_output, ApplegpuTensor) else grad_output
     in_cpu = input.to_torch_cpu() if isinstance(input, ApplegpuTensor) else input
     idx_cpu = indices.to_torch_cpu() if isinstance(indices, ApplegpuTensor) else indices
