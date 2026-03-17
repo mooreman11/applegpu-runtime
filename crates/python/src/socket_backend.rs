@@ -560,6 +560,9 @@ impl Backend for SocketBackend {
     fn gelu(&self, a: u64) -> BackendResult<u64> {
         self.record_unary(a, WireOpKind::Gelu)
     }
+    fn sigmoid(&self, a: u64) -> BackendResult<u64> {
+        self.record_unary(a, WireOpKind::Sigmoid)
+    }
     fn exp(&self, a: u64) -> BackendResult<u64> {
         self.record_unary(a, WireOpKind::Exp)
     }

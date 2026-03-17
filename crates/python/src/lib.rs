@@ -238,6 +238,7 @@ impl GpuTensor {
     fn sin(&self) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.sin(self.id)) }
     fn cos(&self) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.cos(self.id)) }
     fn gelu(&self) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.gelu(self.id)) }
+    fn sigmoid(&self) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.sigmoid(self.id)) }
     fn sqrt(&self) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.sqrt(self.id)) }
     fn abs(&self) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.abs(self.id)) }
     fn sign(&self) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.sign(self.id)) }
@@ -886,6 +887,9 @@ fn cos(t: &GpuTensor) -> PyResult<GpuTensor> { t.cos() }
 fn gelu(t: &GpuTensor) -> PyResult<GpuTensor> { t.gelu() }
 
 #[pyfunction]
+fn sigmoid(t: &GpuTensor) -> PyResult<GpuTensor> { t.sigmoid() }
+
+#[pyfunction]
 #[pyo3(signature = (input, gamma, beta, eps=1e-5))]
 fn layer_norm(input: &GpuTensor, gamma: &GpuTensor, beta: &GpuTensor, eps: f32) -> PyResult<GpuTensor> {
     input.layer_norm(gamma, beta, eps)
@@ -1187,6 +1191,7 @@ fn applegpu_runtime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(sin, m)?)?;
     m.add_function(wrap_pyfunction!(cos, m)?)?;
     m.add_function(wrap_pyfunction!(gelu, m)?)?;
+    m.add_function(wrap_pyfunction!(sigmoid, m)?)?;
     m.add_function(wrap_pyfunction!(layer_norm, m)?)?;
     m.add_function(wrap_pyfunction!(embedding, m)?)?;
     m.add_function(wrap_pyfunction!(gather, m)?)?;

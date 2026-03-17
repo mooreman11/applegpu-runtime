@@ -306,6 +306,39 @@ kernel void gelu{s}(
     )
 }
 
+pub fn sigmoid_kernel_source(dtype: DType) -> String {
+    let t = metal_type(dtype);
+    let s = dtype_suffix(dtype);
+    let store = if dtype == DType::Float32 {
+        "output[id] = 1.0f / (1.0f + exp(-x));".to_string()
+    } else {
+        format!("output[id] = {t}(1.0f / (1.0f + exp(-x)));", t = t)
+    };
+    format!(
+        r#"#include <metal_stdlib>
+using namespace metal;
+{nd}
+kernel void sigmoid{s}(
+    device const {t}* input [[buffer(0)]],
+    device {t}* output [[buffer(1)]],
+    constant uint* in_strides [[buffer(2)]],
+    constant uint* out_shape [[buffer(3)]],
+    constant uint& ndim [[buffer(4)]],
+    constant uint& numel [[buffer(5)]],
+    uint id [[thread_position_in_grid]]
+) {{
+    if (id >= numel) return;
+    uint in_off = nd_index_to_offset(id, out_shape, in_strides, ndim);
+    float x = {load};
+    {store}
+}}
+"#,
+        nd = ND_INDEX_HELPER, t = t, s = s,
+        load = to_float("input[in_off]", dtype),
+        store = store,
+    )
+}
+
 // ── Task 8b: Reduction ops ──────────────────────────────────────────────────
 
 /// Generate softmax kernel source. Uses float accumulation for half types.

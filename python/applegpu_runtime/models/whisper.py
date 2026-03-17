@@ -54,11 +54,9 @@ class WhisperModel:
             arr = tensor.detach().cpu().numpy().astype(np.float32)
             self.weights[key] = gpu.from_numpy(arr)
 
-        # Precompute sinusoidal positional embeddings for encoder
-        n_ctx = self.config["n_ctx"]
-        n_state = self.config["n_state"]
-        pos_emb = self._sinusoids(n_ctx, n_state)
-        self.weights["encoder.positional_embedding"] = gpu.from_numpy(pos_emb)
+        # HF stores encoder positional embeddings as learned weights under
+        # "encoder.embed_positions.weight" — alias for easier access in encode().
+        self.weights["encoder.positional_embedding"] = self.weights["encoder.embed_positions.weight"]
 
     @staticmethod
     def _sinusoids(length, channels):
@@ -256,7 +254,8 @@ class WhisperModel:
             language = self.detect_language(encoder_output)
 
         # 4. Build prefix tokens
-        tokenizer = whisper.tokenizer.get_tokenizer(False, language=language, task=task)
+        multilingual = not self.model_name.endswith(".en")
+        tokenizer = whisper.tokenizer.get_tokenizer(multilingual, language=language, task=task)
         prefix = tokenizer.sot_sequence_including_notimestamps
 
         # 5. Greedy decode
@@ -378,8 +377,14 @@ class WhisperModel:
             kv_cache["k"] = k
             kv_cache["v"] = v
 
-        # Attention
-        out = gpu.attention(q, k, v)
+        # Attention: decoder self-attention needs causal masking on the first
+        # step (prefix, q_len > 1).  After that q_len == 1 and every cached
+        # position should be visible — no mask needed (and the softmax_causal
+        # kernel assumes a square matrix, so it would be wrong here).
+        if kv_cache is not None and q.shape[2] > 1:
+            out = gpu.attention_causal(q, k, v)
+        else:
+            out = gpu.attention(q, k, v)
 
         # Merge heads: [batch, n_head, seq_len, d_head] -> [batch, seq, n_state]
         out = self._merge_heads(out, n_head)

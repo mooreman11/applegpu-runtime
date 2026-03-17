@@ -123,6 +123,7 @@ fn op_to_discriminant(op: &OpKind) -> u32 {
         OpKind::Sin => 65,
         OpKind::Cos => 66,
         OpKind::LogSoftmax => 67,
+        OpKind::Sigmoid => 68,
     }
 }
 
@@ -353,6 +354,7 @@ fn discriminant_to_op(d: u32, r: &mut impl Read) -> io::Result<OpKind> {
         65 => Ok(OpKind::Sin),
         66 => Ok(OpKind::Cos),
         67 => Ok(OpKind::LogSoftmax),
+        68 => Ok(OpKind::Sigmoid),
         _ => Err(io::Error::new(io::ErrorKind::InvalidData, format!("Unknown op type: {}", d))),
     }
 }
@@ -707,6 +709,7 @@ impl From<&OpKind> for WireOpKind {
             OpKind::Sin => WireOpKind::Sin,
             OpKind::Cos => WireOpKind::Cos,
             OpKind::LogSoftmax => WireOpKind::LogSoftmax,
+            OpKind::Sigmoid => WireOpKind::Sigmoid,
             OpKind::SoftmaxBackward => WireOpKind::SoftmaxBackward,
             OpKind::LayerNormBackward { eps } => WireOpKind::LayerNormBackward { eps: *eps },
             OpKind::Conv2dBackwardInput { stride, padding } => WireOpKind::Conv2dBackwardInput { stride: *stride, padding: *padding },
@@ -806,6 +809,7 @@ pub fn wire_op_to_core(wire: &WireOpKind) -> OpKind {
         WireOpKind::Sin => OpKind::Sin,
         WireOpKind::Cos => OpKind::Cos,
         WireOpKind::LogSoftmax => OpKind::LogSoftmax,
+        WireOpKind::Sigmoid => OpKind::Sigmoid,
         WireOpKind::SoftmaxBackward => OpKind::SoftmaxBackward,
         WireOpKind::LayerNormBackward { eps } => OpKind::LayerNormBackward { eps: *eps },
         WireOpKind::Conv2dBackwardInput { stride, padding } => OpKind::Conv2dBackwardInput { stride: *stride, padding: *padding },

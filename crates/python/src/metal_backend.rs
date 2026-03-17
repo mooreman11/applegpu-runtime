@@ -193,6 +193,11 @@ impl Backend for MetalBackend {
         map_err!(applegpu_core::ops::gelu(&mut rt, a))
     }
 
+    fn sigmoid(&self, a: u64) -> BackendResult<u64> {
+        let mut rt = self.runtime.lock().unwrap();
+        map_err!(applegpu_core::ops::sigmoid(&mut rt, a))
+    }
+
     fn exp(&self, a: u64) -> BackendResult<u64> {
         let mut rt = self.runtime.lock().unwrap();
         map_err!(applegpu_core::ops::exp(&mut rt, a))

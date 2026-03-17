@@ -384,6 +384,11 @@ def _op_tanh(a):
     return _wrap(gpu.tanh(_unwrap(a)))
 
 
+@register_op(torch.ops.aten.sigmoid.default)
+def _op_sigmoid(a):
+    return _wrap(gpu.sigmoid(_unwrap(a)))
+
+
 @register_op(torch.ops.aten.abs.default)
 def _op_abs(a):
     return _wrap(gpu.abs(_unwrap(a)))
@@ -453,6 +458,15 @@ def _op_tanh_backward(grad_output, output):
     out_cpu = output.to_torch_cpu() if isinstance(output, ApplegpuTensor) else output
     grad_cpu = grad_output.to_torch_cpu() if isinstance(grad_output, ApplegpuTensor) else grad_output
     result = grad_cpu * (1 - out_cpu ** 2)
+    return ApplegpuTensor.from_torch(result)
+
+
+@register_op(torch.ops.aten.sigmoid_backward.default)
+def _op_sigmoid_backward(grad_output, output):
+    """Backward for sigmoid: grad * output * (1 - output)."""
+    out_cpu = output.to_torch_cpu() if isinstance(output, ApplegpuTensor) else output
+    grad_cpu = grad_output.to_torch_cpu() if isinstance(grad_output, ApplegpuTensor) else grad_output
+    result = grad_cpu * out_cpu * (1 - out_cpu)
     return ApplegpuTensor.from_torch(result)
 
 

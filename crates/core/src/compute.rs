@@ -1453,6 +1453,7 @@ impl KernelRegistry {
             "pow" => kt::pow_kernel_source(dtype),
             "clamp" => kt::clamp_kernel_source(dtype),
             "gelu" => kt::gelu_kernel_source(dtype),
+            "sigmoid" => kt::sigmoid_kernel_source(dtype),
             "softmax" => kt::softmax_kernel_source(dtype),
             "log_softmax" => kt::log_softmax_kernel_source(dtype),
             "softmax_causal" => kt::softmax_causal_kernel_source(dtype),
@@ -1877,6 +1878,20 @@ impl KernelRegistry {
         pipeline.dispatch_unary(buf_input, buf_out, element_count)
     }
 
+    /// Dispatch sigmoid with dtype-aware kernel selection.
+    pub fn dispatch_sigmoid_typed(
+        &self,
+        device: &Device,
+        dtype: DType,
+        buf_input: &Buffer,
+        buf_out: &Buffer,
+        element_count: usize,
+    ) -> Result<()> {
+        let (source, func) = Self::resolve_kernel("sigmoid", dtype);
+        let pipeline = self.get_or_create(device, &source, &func)?;
+        pipeline.dispatch_unary(buf_input, buf_out, element_count)
+    }
+
     /// Dispatch layer normalization with dtype-aware kernel selection.
     pub fn dispatch_layer_norm_typed(
         &self,
@@ -2119,6 +2134,15 @@ impl KernelRegistry {
         buf_input: &Buffer, buf_out: &Buffer, element_count: usize,
     ) -> Result<*mut std::ffi::c_void> {
         let (source, func) = Self::resolve_kernel("gelu", dtype);
+        let pipeline = self.get_or_create(device, &source, &func)?;
+        pipeline.dispatch_unary_nb(queue, buf_input, buf_out, element_count)
+    }
+
+    pub fn dispatch_sigmoid_typed_nb(
+        &self, device: &Device, dtype: DType, queue: *mut std::ffi::c_void,
+        buf_input: &Buffer, buf_out: &Buffer, element_count: usize,
+    ) -> Result<*mut std::ffi::c_void> {
+        let (source, func) = Self::resolve_kernel("sigmoid", dtype);
         let pipeline = self.get_or_create(device, &source, &func)?;
         pipeline.dispatch_unary_nb(queue, buf_input, buf_out, element_count)
     }

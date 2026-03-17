@@ -70,6 +70,7 @@ pub enum OpKind {
     Sin,
     Cos,
     Gelu,
+    Sigmoid,
     LayerNorm { eps: f32 },
     Embedding,
     // Shape ops (data copy, no compute kernel)
@@ -163,6 +164,7 @@ impl OpKind {
             OpKind::Sin => "elementwise_sin",
             OpKind::Cos => "elementwise_cos",
             OpKind::Gelu => "gelu",
+            OpKind::Sigmoid => "sigmoid",
             OpKind::LayerNorm { .. } => "layer_norm",
             OpKind::Embedding => "embedding",
             OpKind::Reshape { .. } => "reshape",
@@ -220,7 +222,7 @@ impl OpKind {
     }
 
     pub fn is_unary(&self) -> bool {
-        matches!(self, OpKind::Neg | OpKind::Relu | OpKind::Exp | OpKind::Log | OpKind::Sqrt | OpKind::Tanh | OpKind::Sin | OpKind::Cos | OpKind::Gelu | OpKind::Abs | OpKind::Sign | OpKind::BitwiseNot | OpKind::LogicalNot)
+        matches!(self, OpKind::Neg | OpKind::Relu | OpKind::Exp | OpKind::Log | OpKind::Sqrt | OpKind::Tanh | OpKind::Sin | OpKind::Cos | OpKind::Gelu | OpKind::Sigmoid | OpKind::Abs | OpKind::Sign | OpKind::BitwiseNot | OpKind::LogicalNot)
     }
 
     pub fn is_matmul(&self) -> bool {
@@ -233,7 +235,7 @@ impl OpKind {
 
     pub fn is_elementwise(&self) -> bool {
         matches!(self, OpKind::Add | OpKind::Sub | OpKind::Mul | OpKind::Div |
-                       OpKind::Neg | OpKind::Relu | OpKind::Exp | OpKind::Log | OpKind::Sqrt | OpKind::Tanh | OpKind::Sin | OpKind::Cos | OpKind::Gelu |
+                       OpKind::Neg | OpKind::Relu | OpKind::Exp | OpKind::Log | OpKind::Sqrt | OpKind::Tanh | OpKind::Sin | OpKind::Cos | OpKind::Gelu | OpKind::Sigmoid |
                        OpKind::Abs | OpKind::Sign)
     }
 
@@ -259,6 +261,10 @@ impl OpKind {
 
     pub fn is_gelu(&self) -> bool {
         matches!(self, OpKind::Gelu)
+    }
+
+    pub fn is_sigmoid(&self) -> bool {
+        matches!(self, OpKind::Sigmoid)
     }
 
     pub fn is_layer_norm(&self) -> bool {

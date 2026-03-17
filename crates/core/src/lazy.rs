@@ -639,6 +639,18 @@ impl LazyRuntime {
             return Ok(out);
         }
 
+        if node.op.is_sigmoid() {
+            let (in_strides, out_shape_u32, ndim, numel) = self.unary_nd_params(node)?;
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+            let input = self.get_tensor(node.inputs[0])?;
+            REGISTRY.dispatch_unary_nd_typed(
+                device, "sigmoid", dtype,
+                &input.buffer, &in_strides, &out.buffer, &out_shape_u32, ndim, numel,
+            )?;
+            return Ok(out);
+        }
+
         if node.op.is_layer_norm() {
             let eps = match node.op { crate::graph::OpKind::LayerNorm { eps } => eps, _ => unreachable!() };
             let out_buf = self.pool.acquire(device, out_size)?;
@@ -876,20 +888,27 @@ impl LazyRuntime {
             return Ok(out);
         }
 
-        if let crate::graph::OpKind::Slice { dim, start, .. } = node.op {
+        if let crate::graph::OpKind::Slice { dim, start, end } = node.op {
             let out_buf = self.pool.acquire(device, out_size)?;
             let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
             let input = self.get_tensor(node.inputs[0])?;
             let in_dims = input.meta.layout.shape.dims();
+            // N-D slice: flatten to 2D for the kernel.
+            // inner = product of dims after the sliced dim
+            let inner: usize = in_dims[dim + 1..].iter().product();
             if dim == 0 {
-                let cols = in_dims[1];
-                let out_rows = node.out_shape.dims()[0];
+                // cols = dims[1] * dims[2] * ... = inner
+                let cols = inner.max(1);
+                let out_rows = end - start;
                 REGISTRY.dispatch_slice_dim0_typed(device, dtype, &input.buffer, &out.buffer, cols, start, out_rows)?;
             } else {
-                let rows = in_dims[0];
-                let in_cols = in_dims[1];
-                let out_cols = node.out_shape.dims()[1];
-                REGISTRY.dispatch_slice_dim1_typed(device, dtype, &input.buffer, &out.buffer, in_cols, out_cols, start, rows)?;
+                // outer = product of dims before the sliced dim
+                let outer: usize = in_dims[..dim].iter().product();
+                let rows = outer.max(1);
+                let in_cols = in_dims[dim] * inner;
+                let out_cols = (end - start) * inner;
+                let start_col = start * inner;
+                REGISTRY.dispatch_slice_dim1_typed(device, dtype, &input.buffer, &out.buffer, in_cols, out_cols, start_col, rows)?;
             }
             return Ok(out);
         }
@@ -900,15 +919,19 @@ impl LazyRuntime {
             let a = self.get_tensor(node.inputs[0])?;
             let b = self.get_tensor(node.inputs[1])?;
             let a_dims = a.meta.layout.shape.dims();
+            let b_dims = b.meta.layout.shape.dims();
+            // N-D concat: flatten to 2D for the kernel.
+            let inner: usize = a_dims[dim + 1..].iter().product();
             if dim == 0 {
                 let rows_a = a_dims[0];
-                let cols = a_dims[1];
+                let cols = inner.max(1);
                 let total_rows = node.out_shape.dims()[0];
                 REGISTRY.dispatch_concat_dim0_typed(device, dtype, &a.buffer, &b.buffer, &out.buffer, rows_a, cols, total_rows)?;
             } else {
-                let rows = a_dims[0];
-                let cols_a = a_dims[1];
-                let cols_b = b.meta.layout.shape.dims()[1];
+                let outer: usize = a_dims[..dim].iter().product();
+                let rows = outer.max(1);
+                let cols_a = a_dims[dim] * inner;
+                let cols_b = b_dims[dim] * inner;
                 REGISTRY.dispatch_concat_dim1_typed(device, dtype, &a.buffer, &b.buffer, &out.buffer, rows, cols_a, cols_b)?;
             }
             return Ok(out);
@@ -1373,6 +1396,15 @@ impl LazyRuntime {
             );
         }
 
+        if node.op.is_sigmoid() {
+            let (in_strides, out_shape_u32, ndim, numel) = self.unary_nd_params(node)?;
+            let input = self.get_tensor(node.inputs[0])?;
+            return REGISTRY.dispatch_unary_nd_typed_nb(
+                device, "sigmoid", dtype, queue,
+                &input.buffer, &in_strides, &out.buffer, &out_shape_u32, ndim, numel,
+            );
+        }
+
         if node.op.is_layer_norm() {
             let eps = match node.op { crate::graph::OpKind::LayerNorm { eps } => eps, _ => unreachable!() };
             let input = self.get_tensor(node.inputs[0])?;
@@ -1548,18 +1580,21 @@ impl LazyRuntime {
             return Ok(cb);
         }
 
-        if let crate::graph::OpKind::Slice { dim, start, .. } = node.op {
+        if let crate::graph::OpKind::Slice { dim, start, end } = node.op {
             let input = self.get_tensor(node.inputs[0])?;
             let in_dims = input.meta.layout.shape.dims();
+            let inner: usize = in_dims[dim + 1..].iter().product();
             if dim == 0 {
-                let cols = in_dims[1];
-                let out_rows = node.out_shape.dims()[0];
+                let cols = inner.max(1);
+                let out_rows = end - start;
                 return REGISTRY.dispatch_slice_dim0_typed_nb(device, dtype, queue, &input.buffer, &out.buffer, cols, start, out_rows);
             } else {
-                let rows = in_dims[0];
-                let in_cols = in_dims[1];
-                let out_cols = node.out_shape.dims()[1];
-                return REGISTRY.dispatch_slice_dim1_typed_nb(device, dtype, queue, &input.buffer, &out.buffer, in_cols, out_cols, start, rows);
+                let outer: usize = in_dims[..dim].iter().product();
+                let rows = outer.max(1);
+                let in_cols = in_dims[dim] * inner;
+                let out_cols = (end - start) * inner;
+                let start_col = start * inner;
+                return REGISTRY.dispatch_slice_dim1_typed_nb(device, dtype, queue, &input.buffer, &out.buffer, in_cols, out_cols, start_col, rows);
             }
         }
 
@@ -1567,15 +1602,18 @@ impl LazyRuntime {
             let a = self.get_tensor(node.inputs[0])?;
             let b = self.get_tensor(node.inputs[1])?;
             let a_dims = a.meta.layout.shape.dims();
+            let b_dims = b.meta.layout.shape.dims();
+            let inner: usize = a_dims[dim + 1..].iter().product();
             if dim == 0 {
                 let rows_a = a_dims[0];
-                let cols = a_dims[1];
+                let cols = inner.max(1);
                 let total_rows = node.out_shape.dims()[0];
                 return REGISTRY.dispatch_concat_dim0_typed_nb(device, dtype, queue, &a.buffer, &b.buffer, &out.buffer, rows_a, cols, total_rows);
             } else {
-                let rows = a_dims[0];
-                let cols_a = a_dims[1];
-                let cols_b = b.meta.layout.shape.dims()[1];
+                let outer: usize = a_dims[..dim].iter().product();
+                let rows = outer.max(1);
+                let cols_a = a_dims[dim] * inner;
+                let cols_b = b_dims[dim] * inner;
                 return REGISTRY.dispatch_concat_dim1_typed_nb(device, dtype, queue, &a.buffer, &b.buffer, &out.buffer, rows, cols_a, cols_b);
             }
         }

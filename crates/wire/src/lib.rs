@@ -182,6 +182,7 @@ pub enum WireOpKind {
     Transpose { dim0: usize, dim1: usize },
     ScalarMul(f32),
     Gelu,
+    Sigmoid,
     // 15–20
     LayerNorm { eps: f32 },
     Embedding,
@@ -309,6 +310,7 @@ impl WireOpKind {
             WireOpKind::Sin => 65,
             WireOpKind::Cos => 66,
             WireOpKind::LogSoftmax => 67,
+            WireOpKind::Sigmoid => 68,
         }
     }
 
@@ -322,7 +324,7 @@ impl WireOpKind {
             | WireOpKind::Gelu | WireOpKind::Embedding | WireOpKind::AddBias
             | WireOpKind::SoftmaxCausal | WireOpKind::Argmax | WireOpKind::Sum
             | WireOpKind::Mean | WireOpKind::Abs | WireOpKind::Sign | WireOpKind::Where
-            | WireOpKind::Tanh | WireOpKind::Sin | WireOpKind::Cos
+            | WireOpKind::Tanh | WireOpKind::Sin | WireOpKind::Cos | WireOpKind::Sigmoid
             | WireOpKind::SoftmaxBackward
             | WireOpKind::EmbeddingBackward
             | WireOpKind::LogSoftmax
@@ -574,6 +576,7 @@ impl WireOpKind {
             65 => Ok(WireOpKind::Sin),
             66 => Ok(WireOpKind::Cos),
             67 => Ok(WireOpKind::LogSoftmax),
+            68 => Ok(WireOpKind::Sigmoid),
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("Unknown op discriminant: {}", disc),

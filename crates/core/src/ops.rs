@@ -34,7 +34,7 @@ pub fn validate_op_dtype(op: &OpKind, dtype: DType) -> Result<()> {
         // Float-only ops
         OpKind::Exp | OpKind::Log | OpKind::Sqrt | OpKind::Tanh |
         OpKind::Sin | OpKind::Cos |
-        OpKind::Relu | OpKind::Gelu |
+        OpKind::Relu | OpKind::Gelu | OpKind::Sigmoid |
         OpKind::Softmax | OpKind::LogSoftmax | OpKind::SoftmaxCausal |
         OpKind::Matmul |
         OpKind::LayerNorm { .. } | OpKind::BatchNorm { .. } |
@@ -598,6 +598,10 @@ pub fn cos(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
 
 pub fn gelu(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
     lazy_unary_op(rt, input_id, OpKind::Gelu)
+}
+
+pub fn sigmoid(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
+    lazy_unary_op(rt, input_id, OpKind::Sigmoid)
 }
 
 pub fn layer_norm(rt: &mut LazyRuntime, input_id: u64, gamma_id: u64, beta_id: u64, eps: f32) -> Result<u64> {
