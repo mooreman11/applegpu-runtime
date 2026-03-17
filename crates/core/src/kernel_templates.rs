@@ -1511,6 +1511,32 @@ kernel void batch_norm_backward{s}(
     )
 }
 
+pub fn threshold_backward_kernel_source(dtype: DType) -> String {
+    let t = metal_type(dtype);
+    let s = dtype_suffix(dtype);
+    let acc = needs_float_acc(dtype);
+    let load_input = if acc { "float(input[id])".to_string() } else { "input[id]".to_string() };
+    let load_grad = if acc { "float(grad_output[id])".to_string() } else { "grad_output[id]".to_string() };
+    let store = if acc { format!("{}(result)", t) } else { "result".to_string() };
+    format!(
+        r#"#include <metal_stdlib>
+using namespace metal;
+
+kernel void threshold_backward{s}(device const {t}* grad_output [[buffer(0)]], device const {t}* input [[buffer(1)]], device {t}* grad_input [[buffer(2)]], constant uint& numel [[buffer(3)]], constant float& threshold [[buffer(4)]], uint id [[thread_position_in_grid]]) {{
+    if (id >= numel) return;
+    float inp = {load_input};
+    float go = {load_grad};
+    float result = (inp > threshold) ? go : 0.0f;
+    grad_input[id] = {store};
+}}
+"#,
+        t = t, s = s,
+        load_input = load_input,
+        load_grad = load_grad,
+        store = store,
+    )
+}
+
 // ── Task 10: Cast op kernel ─────────────────────────────────────────────────
 
 /// Generate cast kernel source (convert from src dtype to dst dtype).

@@ -104,6 +104,7 @@ from applegpu_runtime.applegpu_runtime import (
     conv2d_backward_input,
     embedding_backward,
     batch_norm_backward,
+    threshold_backward,
 )
 
 __version__ = version()
@@ -334,4 +335,5 @@ __all__ = [
     "conv2d_backward_input",
     "embedding_backward",
     "batch_norm_backward",
+    "threshold_backward",
 ]

@@ -125,6 +125,7 @@ fn op_to_discriminant(op: &OpKind) -> u32 {
         OpKind::LogSoftmax => 67,
         OpKind::Sigmoid => 68,
         OpKind::Var { .. } => 69,
+        OpKind::ThresholdBackward { .. } => 70,
     }
 }
 
@@ -361,6 +362,11 @@ fn discriminant_to_op(d: u32, r: &mut impl Read) -> io::Result<OpKind> {
             r.read_exact(&mut buf)?;
             Ok(OpKind::Var { correction: u32::from_le_bytes(buf) })
         }
+        70 => {
+            let mut t_bytes = [0u8; 4];
+            r.read_exact(&mut t_bytes)?;
+            Ok(OpKind::ThresholdBackward { threshold: f32::from_le_bytes(t_bytes) })
+        }
         _ => Err(io::Error::new(io::ErrorKind::InvalidData, format!("Unknown op type: {}", d))),
     }
 }
@@ -491,6 +497,9 @@ impl EvalRequest {
             }
             if let OpKind::BatchNormBackward { eps } = node.op {
                 buf.write_all(&eps.to_le_bytes()).unwrap();
+            }
+            if let OpKind::ThresholdBackward { threshold } = node.op {
+                buf.write_all(&threshold.to_le_bytes()).unwrap();
             }
             if let OpKind::Cast { target_dtype } = node.op {
                 write_u32(&mut buf, target_dtype.to_wire()).unwrap();
@@ -745,6 +754,7 @@ impl From<&OpKind> for WireOpKind {
             OpKind::Dequantize { scale, zero_point, target_dtype } => {
                 WireOpKind::Dequantize { scale: *scale, zero_point: *zero_point, target_dtype: target_dtype.to_wire() as u8 }
             }
+            OpKind::ThresholdBackward { threshold } => WireOpKind::ThresholdBackward { threshold: *threshold },
         }
     }
 }
@@ -852,6 +862,7 @@ pub fn wire_op_to_core(wire: &WireOpKind) -> OpKind {
             let dt = DType::from_wire(*target_dtype as u32).unwrap_or(DType::Float32);
             OpKind::Dequantize { scale: *scale, zero_point: *zero_point, target_dtype: dt }
         }
+        WireOpKind::ThresholdBackward { threshold } => OpKind::ThresholdBackward { threshold: *threshold },
     }
 }
 

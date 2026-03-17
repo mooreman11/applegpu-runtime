@@ -1155,6 +1155,11 @@ fn batch_norm_backward(grad_output: &GpuTensor, weight: &GpuTensor, running_var:
     wrap_tensor(BACKEND.batch_norm_backward(grad_output.id, weight.id, running_var.id, eps))
 }
 
+#[pyfunction]
+fn threshold_backward(grad_output: &GpuTensor, input: &GpuTensor, threshold: f32) -> PyResult<GpuTensor> {
+    wrap_tensor(BACKEND.threshold_backward(grad_output.id, input.id, threshold))
+}
+
 #[pymodule]
 fn applegpu_runtime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<GpuTensor>()?;
@@ -1262,5 +1267,6 @@ fn applegpu_runtime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(conv2d_backward_input, m)?)?;
     m.add_function(wrap_pyfunction!(embedding_backward, m)?)?;
     m.add_function(wrap_pyfunction!(batch_norm_backward, m)?)?;
+    m.add_function(wrap_pyfunction!(threshold_backward, m)?)?;
     Ok(())
 }

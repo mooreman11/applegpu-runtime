@@ -44,7 +44,8 @@ pub fn validate_op_dtype(op: &OpKind, dtype: DType) -> Result<()> {
         OpKind::Mean | OpKind::Var { .. } |
         OpKind::SoftmaxBackward | OpKind::LayerNormBackward { .. } |
         OpKind::Conv2dBackwardInput { .. } | OpKind::EmbeddingBackward |
-        OpKind::BatchNormBackward { .. } => {
+        OpKind::BatchNormBackward { .. } |
+        OpKind::ThresholdBackward { .. } => {
             if !dtype.is_float() {
                 return Err(GpuError::UnsupportedDtype(format!(
                     "{:?} requires a float dtype, got {}", op, dtype.name()
@@ -873,6 +874,30 @@ pub fn batch_norm_backward(
         inputs: vec![grad_output_id, weight_id, running_var_id],
         out_shape: Shape::new(grad_shape)?,
         out_dtype: grad_dtype,
+        container_id: ContainerId::DEFAULT,
+    });
+    Ok(out_id)
+}
+
+/// Threshold backward: grad_output * (input > threshold).
+/// Used for ReLU backward (threshold=0).
+pub fn threshold_backward(rt: &mut LazyRuntime, grad_output_id: u64, input_id: u64, threshold: f32) -> Result<u64> {
+    let dtype = rt.dtype(grad_output_id)?;
+    validate_op_dtype(&OpKind::ThresholdBackward { threshold }, dtype)?;
+    let shape = rt.shape(grad_output_id)?;
+    let in_shape = rt.shape(input_id)?;
+    if shape != in_shape {
+        return Err(GpuError::InvalidTensor(format!(
+            "threshold_backward shape mismatch: grad {:?} vs input {:?}", shape, in_shape
+        )));
+    }
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op: OpKind::ThresholdBackward { threshold },
+        inputs: vec![grad_output_id, input_id],
+        out_shape: Shape::new(shape)?,
+        out_dtype: dtype,
         container_id: ContainerId::DEFAULT,
     });
     Ok(out_id)
@@ -4502,5 +4527,21 @@ mod tests {
         for &v in &result {
             assert!((v - expected).abs() < 1.0, "got {} expected {}", v, expected);
         }
+    }
+
+    #[test]
+    fn test_threshold_backward() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        let grad = Tensor::from_f32(&device, vec![4], &[1.0, 2.0, 3.0, 4.0]).unwrap();
+        let input = Tensor::from_f32(&device, vec![4], &[-1.0, 0.5, -0.5, 2.0]).unwrap();
+        let grad_id = grad.meta.id;
+        let input_id = input.meta.id;
+        rt.insert_tensor(grad).unwrap();
+        rt.insert_tensor(input).unwrap();
+        let out_id = threshold_backward(&mut rt, grad_id, input_id, 0.0).unwrap();
+        rt.eval(&device, out_id).unwrap();
+        let data = rt.read_f32(out_id).unwrap();
+        assert_eq!(data, vec![0.0, 2.0, 0.0, 4.0]);
     }
 }

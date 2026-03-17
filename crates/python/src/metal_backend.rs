@@ -526,6 +526,11 @@ impl Backend for MetalBackend {
         map_err!(applegpu_core::ops::batch_norm_backward(&mut rt, grad, weight, var, eps))
     }
 
+    fn threshold_backward(&self, grad_output: u64, input: u64, threshold: f32) -> BackendResult<u64> {
+        let mut rt = self.runtime.lock().unwrap();
+        map_err!(applegpu_core::ops::threshold_backward(&mut rt, grad_output, input, threshold))
+    }
+
     // Resource management
     fn set_limits(&self, max_tensor_size_mb: usize, max_memory_mb: usize, max_tensors: usize) {
         let mut rt = self.runtime.lock().unwrap();

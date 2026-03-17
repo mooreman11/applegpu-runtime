@@ -123,6 +123,7 @@ pub enum OpKind {
     Conv2dBackwardInput { stride: (usize, usize), padding: (usize, usize) },
     EmbeddingBackward,
     BatchNormBackward { eps: f32 },
+    ThresholdBackward { threshold: f32 },
     // Comparison ops (output is always Bool)
     Lt, Gt, Le, Ge, Eq, Ne,
     // Bitwise ops (integer + Bool)
@@ -198,6 +199,7 @@ impl OpKind {
             OpKind::Conv2dBackwardInput { .. } => "conv2d_backward_input",
             OpKind::EmbeddingBackward => "embedding_backward",
             OpKind::BatchNormBackward { .. } => "batch_norm_backward",
+            OpKind::ThresholdBackward { .. } => "threshold_backward",
             OpKind::Lt => "lt",
             OpKind::Gt => "gt",
             OpKind::Le => "le",
@@ -392,6 +394,10 @@ impl OpKind {
 
     pub fn is_batch_norm_backward(&self) -> bool {
         matches!(self, OpKind::BatchNormBackward { .. })
+    }
+
+    pub fn is_threshold_backward(&self) -> bool {
+        matches!(self, OpKind::ThresholdBackward { .. })
     }
 }
 

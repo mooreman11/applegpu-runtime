@@ -1161,6 +1161,10 @@ impl Backend for SocketBackend {
         Err("batch_norm_backward not yet implemented over socket backend".to_string())
     }
 
+    fn threshold_backward(&self, _grad_output: u64, _input: u64, _threshold: f32) -> BackendResult<u64> {
+        Err("threshold_backward not yet implemented over socket backend".to_string())
+    }
+
     // -----------------------------------------------------------------------
     // Resource management — local tracking only
     // -----------------------------------------------------------------------

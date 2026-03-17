@@ -464,16 +464,9 @@ def _op_clamp(a, min=None, max=None):
 
 @register_op(torch.ops.aten.threshold_backward.default)
 def _op_threshold_backward(grad_output, self_tensor, threshold):
-    """Backward for relu: grad * (self > threshold).
-
-    TODO: CPU fallback. Metal kernel: `out[id] = (input[id] > threshold) ? grad[id] : 0`.
-    Simple element-wise — could reuse the comparison + mul pattern on GPU.
-    """
-    self_cpu = self_tensor.to_torch_cpu() if isinstance(self_tensor, ApplegpuTensor) else self_tensor
-    grad_cpu = grad_output.to_torch_cpu() if isinstance(grad_output, ApplegpuTensor) else grad_output
-    mask = (self_cpu > threshold).float()
-    result = grad_cpu * mask
-    return ApplegpuTensor.from_torch(result)
+    """Backward for relu: grad * (self > threshold) — Metal GPU."""
+    return _wrap(gpu.threshold_backward(_unwrap(grad_output), _unwrap(self_tensor), float(threshold)),
+                 torch_dtype=grad_output.dtype, requires_grad=grad_output.requires_grad)
 
 
 @register_op(torch.ops.aten.gelu_backward.default)
