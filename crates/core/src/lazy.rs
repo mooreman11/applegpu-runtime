@@ -2503,6 +2503,8 @@ impl LazyRuntime {
         };
 
         // Send to GPU service
+        // TODO: migrate to applegpu-client crate's GpuClient::eval()
+        #[allow(deprecated)]
         let response = crate::ipc::eval_remote(socket_path, &request)?;
 
         match response {

@@ -1468,8 +1468,31 @@ def _op_linalg_vector_norm(a, ord=2.0, dim=None, keepdim=False, dtype=None):
             return _op_sum(abs_wrapped, dim, keepdim=keepdim)
         else:
             return _op_sum_default(abs_wrapped)
+    elif ord == float('inf'):
+        # L-inf: max(|x|) — amax kernel applies abs() internally
+        if dim is None:
+            # Global L-inf: flatten, then amax over last (only) dim
+            gpu_a = _unwrap(a)
+            flat = _wrap(gpu.reshape(gpu_a, [-1]))
+            return _wrap(gpu.amax(_unwrap(flat)))
+        elif isinstance(dim, int) and (dim == -1 or dim == len(a.shape) - 1):
+            # Last-dim reduction — direct GPU path
+            result = _wrap(gpu.amax(_unwrap(a)))
+            if keepdim:
+                result_shape = list(a.shape)
+                result_shape[dim] = 1
+                result = result.reshape(result_shape)
+            return result
+        else:
+            # Non-last-dim L-inf — CPU fallback
+            # TODO: GPU kernel supporting arbitrary reduction dim
+            kwargs = {}
+            if dtype is not None:
+                kwargs['dtype'] = dtype
+            return _cpu_fallback(torch.ops.aten.linalg_vector_norm.default,
+                                 (a, ord, dim, keepdim), kwargs)
     else:
-        # Other norms (inf, etc.) — CPU fallback
+        # Other norms — CPU fallback
         kwargs = {}
         if dtype is not None:
             kwargs['dtype'] = dtype

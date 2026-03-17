@@ -42,6 +42,7 @@ pub trait Backend: Send + Sync {
         }
         result
     }
+    #[allow(dead_code)]
     fn insert_tensor_from_raw(&self, data: &[u8], shape: Vec<usize>, dtype: BackendDType) -> BackendResult<u64>;
     fn destroy(&self, id: u64) -> BackendResult<()>;
     fn try_destroy(&self, id: u64);
