@@ -259,6 +259,8 @@ pub enum WireOpKind {
     // 81-82: scatter ops
     ScatterWrite,
     ScatterAdd,
+    // 83: absolute max reduction
+    Amax,
 }
 
 impl WireOpKind {
@@ -347,6 +349,7 @@ impl WireOpKind {
             WireOpKind::GeluTanhBackward => 79,
             WireOpKind::ScatterWrite => 81,
             WireOpKind::ScatterAdd => 82,
+            WireOpKind::Amax => 83,
         }
     }
 
@@ -370,7 +373,8 @@ impl WireOpKind {
             | WireOpKind::BitwiseNot
             | WireOpKind::Mod | WireOpKind::ElemMin | WireOpKind::ElemMax
             | WireOpKind::LogicalNot
-            | WireOpKind::ScatterWrite | WireOpKind::ScatterAdd => Ok(()),
+            | WireOpKind::ScatterWrite | WireOpKind::ScatterAdd
+            | WireOpKind::Amax => Ok(()),
 
             WireOpKind::FusedElementwise { kernel_source, function_name } => {
                 write_u32(w, kernel_source.len() as u32)?;
@@ -683,6 +687,7 @@ impl WireOpKind {
             }
             81 => Ok(WireOpKind::ScatterWrite),
             82 => Ok(WireOpKind::ScatterAdd),
+            83 => Ok(WireOpKind::Amax),
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("Unknown op discriminant: {}", disc),

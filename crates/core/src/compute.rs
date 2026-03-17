@@ -2065,6 +2065,31 @@ impl KernelRegistry {
         pipeline.dispatch_softmax_nb(queue, buf_input, buf_output, rows, cols)
     }
 
+    pub fn dispatch_amax_typed(
+        &self, device: &Device, dtype: DType, buf_input: &Buffer, buf_output: &Buffer,
+        rows: usize, cols: usize,
+    ) -> Result<()> {
+        use crate::kernel_templates as kt;
+        let source = kt::amax_kernel_source(dtype);
+        let s = kt::dtype_suffix(dtype);
+        let func = format!("amax{s}");
+        let pipeline = self.get_or_create(device, &source, &func)?;
+        pipeline.dispatch_softmax(buf_input, buf_output, rows, cols)
+    }
+
+    pub fn dispatch_amax_typed_nb(
+        &self, device: &Device, dtype: DType, queue: *mut std::ffi::c_void,
+        buf_input: &Buffer, buf_output: &Buffer,
+        rows: usize, cols: usize,
+    ) -> Result<*mut std::ffi::c_void> {
+        use crate::kernel_templates as kt;
+        let source = kt::amax_kernel_source(dtype);
+        let s = kt::dtype_suffix(dtype);
+        let func = format!("amax{s}");
+        let pipeline = self.get_or_create(device, &source, &func)?;
+        pipeline.dispatch_softmax_nb(queue, buf_input, buf_output, rows, cols)
+    }
+
     pub fn dispatch_argmax_typed(
         &self, device: &Device, input_dtype: DType, buf_input: &Buffer, buf_output: &Buffer,
         rows: usize, cols: usize,

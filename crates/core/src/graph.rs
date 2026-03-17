@@ -158,6 +158,8 @@ pub enum OpKind {
     ScatterWrite,
     // Scatter add: atomically add values into output at indices
     ScatterAdd,
+    // Absolute max reduction along last dim (for L-inf norm)
+    Amax,
 }
 
 impl OpKind {
@@ -248,6 +250,7 @@ impl OpKind {
             OpKind::Dequantize { .. } => "dequantize",
             OpKind::ScatterWrite => "scatter_write",
             OpKind::ScatterAdd => "scatter_add",
+            OpKind::Amax => "amax",
         }
     }
 
@@ -346,6 +349,10 @@ impl OpKind {
 
     pub fn is_var(&self) -> bool {
         matches!(self, OpKind::Var { .. })
+    }
+
+    pub fn is_amax(&self) -> bool {
+        matches!(self, OpKind::Amax)
     }
 
     pub fn is_abs(&self) -> bool {

@@ -138,6 +138,7 @@ fn op_to_discriminant(op: &OpKind) -> u32 {
         OpKind::Conv2dBackwardWeight { .. } => 80,
         OpKind::ScatterWrite => 81,
         OpKind::ScatterAdd => 82,
+        OpKind::Amax => 83,
     }
 }
 
@@ -417,6 +418,7 @@ fn discriminant_to_op(d: u32, r: &mut impl Read) -> io::Result<OpKind> {
         }
         81 => Ok(OpKind::ScatterWrite),
         82 => Ok(OpKind::ScatterAdd),
+        83 => Ok(OpKind::Amax),
         _ => Err(io::Error::new(io::ErrorKind::InvalidData, format!("Unknown op type: {}", d))),
     }
 }
@@ -808,6 +810,7 @@ impl From<&OpKind> for WireOpKind {
             OpKind::EmbeddingBackward => WireOpKind::EmbeddingBackward,
             OpKind::ScatterWrite => WireOpKind::ScatterWrite,
             OpKind::ScatterAdd => WireOpKind::ScatterAdd,
+            OpKind::Amax => WireOpKind::Amax,
             OpKind::BatchNormBackward { eps } => WireOpKind::BatchNormBackward { eps: *eps },
             OpKind::Lt => WireOpKind::Lt,
             OpKind::Gt => WireOpKind::Gt,
@@ -924,6 +927,7 @@ pub fn wire_op_to_core(wire: &WireOpKind) -> OpKind {
         WireOpKind::EmbeddingBackward => OpKind::EmbeddingBackward,
         WireOpKind::ScatterWrite => OpKind::ScatterWrite,
         WireOpKind::ScatterAdd => OpKind::ScatterAdd,
+        WireOpKind::Amax => OpKind::Amax,
         WireOpKind::BatchNormBackward { eps } => OpKind::BatchNormBackward { eps: *eps },
         WireOpKind::Cast { target_dtype } => {
             let dt = DType::from_wire(*target_dtype as u32)
