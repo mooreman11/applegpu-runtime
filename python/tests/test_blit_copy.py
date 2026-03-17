@@ -63,3 +63,19 @@ def test_copy_op_cpu_to_gpu():
     a_gpu.copy_(b_cpu)
     result = a_gpu.to_torch_cpu()
     assert torch.allclose(result, b_cpu, atol=1e-6)
+
+
+def test_blit_copy_same_tensor_noop():
+    """Copying a tensor to itself is a no-op."""
+    src = gpu.from_numpy(np.array([1.0, 2.0, 3.0], dtype=np.float32))
+    gpu.blit_copy(src, src)  # should not crash
+    result = _to_numpy(src)
+    np.testing.assert_allclose(result, [1.0, 2.0, 3.0])
+
+
+def test_blit_copy_dtype_mismatch_raises():
+    """Blit copy between different dtypes should raise."""
+    src = gpu.from_numpy(np.array([1.0], dtype=np.float32))
+    dst = gpu.from_numpy(np.array([1], dtype=np.int32))
+    with pytest.raises((RuntimeError, ValueError)):
+        gpu.blit_copy(src, dst)

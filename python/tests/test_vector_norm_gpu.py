@@ -56,3 +56,12 @@ def test_l2_single_element():
     x_gpu = to_applegpu(x)
     result = torch.linalg.vector_norm(x_gpu, ord=2).to_torch_cpu().item()
     assert abs(result - 3.0) < 1e-4
+
+
+def test_l1_with_dim():
+    np.random.seed(42)
+    x = torch.randn(3, 4)
+    x_gpu = to_applegpu(x)
+    result_gpu = torch.linalg.vector_norm(x_gpu, ord=1.0, dim=1).to_torch_cpu()
+    result_cpu = torch.linalg.vector_norm(x, ord=1.0, dim=1)
+    np.testing.assert_allclose(result_gpu.numpy(), result_cpu.numpy(), atol=1e-4)

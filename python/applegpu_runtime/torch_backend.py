@@ -1096,8 +1096,9 @@ def _op_copy_(dst, src, non_blocking=False):
         try:
             gpu.blit_copy(_unwrap(src), _unwrap(dst))
             return dst
-        except (RuntimeError, ValueError):
-            pass  # Fall through to CPU path
+        except (RuntimeError, ValueError) as e:
+            import warnings
+            warnings.warn(f"GPU blit copy failed ({e}), falling back to CPU", UserWarning, stacklevel=2)
     # CPU fallback
     src_cpu = src.to_torch_cpu() if isinstance(src, ApplegpuTensor) else src
     new_gpu = gpu.from_torch(src_cpu)
