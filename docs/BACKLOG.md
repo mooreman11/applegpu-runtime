@@ -162,43 +162,72 @@ _Containerization, multi-dtype completion, wire protocol v3, CI/packaging._
 
 ## Up Next
 
-### PRIORITY 1: PyPI Publishing
+### PRIORITY 1: Metal Backward Ops (spec written)
+_Eliminate all GPU→CPU→GPU roundtrips during training. Spec: `docs/superpowers/specs/2026-03-17-metal-backward-ops-design.md`_
+- [ ] threshold_backward — `grad * (input > threshold)` (ReLU)
+- [ ] tanh_backward — `grad * (1 - output²)`
+- [ ] sigmoid_backward — `grad * output * (1 - output)`
+- [ ] gelu_backward — tanh-approximation derivative
+- [ ] conv1d_backward_input — transposed 1D convolution
+- [ ] max_pool2d_backward — atomic scatter to max indices
+- [ ] Wire protocol (serial.rs) — 6 new discriminant codes
+
+### PRIORITY 2: Stable Diffusion / `group_norm`
+- [ ] `group_norm` kernel — single new Metal kernel
+- [ ] Stable Diffusion model wrapper + weight loading
+- [ ] End-to-end image generation test
+
+### PRIORITY 3: `fill`/`zeros`/`ones` Compute Kernels
+- [ ] Metal kernels for tensor creation (all dtypes)
+- [ ] Eliminates CPU fallback in model initialization paths
+
+### PRIORITY 4: PyPI Publishing
 - [ ] Create PyPI account + API token
 - [ ] Publish wheels to real PyPI
 - [ ] Add `PYPI_TOKEN` GitHub secret for automated releases
 
-### PRIORITY 2: Vsock Socket Relay (blocked)
+### Vsock Socket Relay (blocked)
 _Blocked by apple/containerization framework socket staging bug (errno 20 ENOTDIR)._
 - [ ] Fix socket staging — try low-level `LinuxContainer(rootfs:vmm:)` API or `dialVsock` manual relay
 - [ ] Remove TCP bridge once vsock path is proven
 - [ ] Delete VsockRelay.swift (kept with deprecation)
 - [ ] Socket helper unit tests
 
-### PRIORITY 3: More Models + Polish
-- [ ] Stable Diffusion — requires `group_norm` (new kernel)
-- [ ] Fine-tuned model export — save trained weights
-- [ ] Native `model.to("applegpu")` — proper PrivateUse1 storage backend
-- [ ] Binary signing/notarization — Apple Developer ID
-
-### PRIORITY 4: Performance Optimization
-- [ ] `torch.compile()` support — register as compile backend
-- [ ] Async eval — `gpu.eval_async(tensor)` returns GpuFuture
-- [ ] Fine-grained locking — split `Mutex<LazyRuntime>` per-component
-
 ---
 
 ## Further Backlog
+
+### GPU Op Gaps (GitHub issues)
+- [ ] Forward max_pool2d with GPU-side indices output (#16)
+- [ ] Conv/layer_norm/batch_norm grad_weight/grad_bias on GPU (#17)
+- [ ] Exact GELU mode — `approximate="none"` for forward + backward (#18)
+- [ ] Grouped convolution (groups > 1) for conv1d/conv2d (#19)
+- [ ] GPU→GPU blit copy — eliminate CPU roundtrip in copy_ (#20)
+- [ ] GPU index/gather and index_put/scatter kernels (#21)
+- [ ] GPU linalg_vector_norm kernel for gradient clipping (#22)
+- [ ] GPU linspace kernel — `start + id * step` per thread (cold path, low priority)
+- [ ] GPU RNG kernel — Philox counter-based PRNG for normal_() (cold path, low priority)
+- [ ] GPU unique kernel — parallel sort + stream compaction (low priority)
 
 ### Multi-Dtype Remaining
 - [ ] Reduction output dtype overrides — sum(Int32)→Int32, mean(Int32)→Float32, sum(Bool)→Int32 count
 - [ ] Quantized matmul — Int8 weights x Float16 activations with scale factors
 - [ ] `isinf`/`isnan` — float → Bool predicates for numerical debugging
-- [ ] `fill`/`zeros`/`ones` — compute kernels for all dtypes
 - [ ] Fused comparison chains — `(a > 0) & (a < 10)` as single kernel
 - [ ] `where`/`masked_fill` Bool condition enforcement (migration needed)
 - [ ] `is_elementwise()` expansion — mark new ops as fusable
 - [ ] Backward ops multi-dtype — extend backward kernels to BFloat16
 - [ ] Float64 compute kernels — deferred until Apple hardware adds MSL double support
+
+### Models + Polish
+- [ ] Fine-tuned model export — save trained weights
+- [ ] Binary signing/notarization — Apple Developer ID
+
+### Performance Optimization
+- [ ] `torch.compile()` support — register as compile backend
+- [ ] Async eval — `gpu.eval_async(tensor)` returns GpuFuture
+- [ ] Fine-grained locking — split `Mutex<LazyRuntime>` per-component
+- [ ] MTLSharedEvent for concurrent queue sync (lazy.rs TODO)
 
 ### Infrastructure
 - [ ] Unix socket relay / vsock — complete Containerization framework integration (macOS 26 SDK)
@@ -214,7 +243,6 @@ _Blocked by apple/containerization framework socket staging bug (errno 20 ENOTDI
 - [ ] Multi-GPU support _(very low priority)_ — device pool, per-device buffer pools, cross-device transfers
 
 ### Training
-- [ ] **Migrate CPU-fallback backward ops to Metal** — tanh_backward, sigmoid_backward, gelu_backward currently round-trip through CPU. Implement as Metal kernels (sigmoid: `grad * out * (1 - out)`, tanh: `grad * (1 - out^2)`, gelu: derivative formula). Eliminates GPU→CPU→GPU transfers during training.
 - [ ] Int64 compute kernels — batch_norm's num_batches_tracked falls back to CPU
 - [ ] Gradient accumulation — for large batch training across multiple micro-batches
 

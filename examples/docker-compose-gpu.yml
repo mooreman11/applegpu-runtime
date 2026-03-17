@@ -1,0 +1,84 @@
+# Docker Compose pattern for GPU-accelerated ML training on Apple Silicon.
+#
+# gpu-service runs NATIVELY on the macOS host (not in Docker) because it
+# needs direct Metal GPU access. Containers connect via socket bind-mount.
+#
+# Usage:
+#   1. Start gpu-service on the host:
+#      cargo run -p applegpu-service
+#      # or: gpu-service (if installed via Homebrew)
+#
+#   2. Start Docker Compose services:
+#      docker compose -f examples/docker-compose-gpu.yml up
+#
+# The gpu-service auto-creates ~/.applegpu/runtime.sock on startup.
+# All containers share the same gpu-service with fair scheduling.
+
+volumes:
+  # Shared volume is NOT needed — we bind-mount the host socket directly.
+  # This is simpler and avoids Docker volume permission issues.
+  pass: {}
+
+services:
+  # ──────────────────────────────────────────────────────────────────────
+  # Training worker — runs inside Docker, uses Metal GPU via socket
+  # ──────────────────────────────────────────────────────────────────────
+  model-training:
+    image: python:3.11-slim
+    volumes:
+      # Bind-mount the gpu-service Unix socket from the host
+      - ~/.applegpu/runtime.sock:/var/run/applegpu.sock
+    environment:
+      # Tell applegpu_runtime where the socket is
+      - APPLEGPU_SOCKET=/var/run/applegpu.sock
+    command: >
+      bash -c "
+        pip install applegpu-runtime torch &&
+        python -c '
+        import applegpu_runtime as gpu
+
+        # init_backend() auto-detects APPLEGPU_SOCKET env var
+        gpu.init_backend()
+        print(\"GPU backend:\", gpu.device_name())
+
+        # GPU compute works transparently
+        a = gpu.tensor([1.0, 2.0, 3.0, 4.0], shape=[2, 2])
+        b = gpu.tensor([5.0, 6.0, 7.0, 8.0], shape=[2, 2])
+        c = a @ b
+        print(\"matmul result:\", c.to_list())
+
+        # PyTorch integration
+        gpu.enable_torch_backend()
+        import torch
+        model = torch.nn.Linear(4, 2)
+        model = gpu.to_applegpu(model)
+        x = gpu.to_applegpu(torch.randn(1, 4))
+        print(\"PyTorch forward:\", model(x).to_torch_cpu().tolist())
+        '
+      "
+
+  # ──────────────────────────────────────────────────────────────────────
+  # Celery worker — spawns training containers dynamically
+  # ──────────────────────────────────────────────────────────────────────
+  # celery-worker:
+  #   build: .
+  #   volumes:
+  #     - ~/.applegpu/runtime.sock:/var/run/applegpu.sock
+  #     - /var/run/docker.sock:/var/run/docker.sock  # for spawning containers
+  #   environment:
+  #     - APPLEGPU_SOCKET=/var/run/applegpu.sock
+  #   command: celery -A tasks worker --loglevel=info
+  #
+  # When the Celery worker spawns training containers via Docker API,
+  # pass the socket mount:
+  #
+  #   client.containers.run(
+  #       "model-training:latest",
+  #       volumes={
+  #           os.path.expanduser("~/.applegpu/runtime.sock"): {
+  #               "bind": "/var/run/applegpu.sock",
+  #               "mode": "rw"
+  #           }
+  #       },
+  #       environment={"APPLEGPU_SOCKET": "/var/run/applegpu.sock"},
+  #   )

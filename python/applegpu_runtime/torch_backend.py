@@ -1605,8 +1605,9 @@ def _op_max_pool2d_backward(grad_output, input, kernel_size, stride, padding, di
     """max_pool2d backward — scatter gradients to max positions via CPU.
 
     TODO: CPU fallback. A Metal scatter kernel using the saved indices
-    would eliminate the transfer. Each output position maps to exactly one
-    input position (stored in `indices`), so no atomics needed.
+    would eliminate the transfer. When stride < kernel_size, pools overlap
+    and multiple output positions can map to the same input position —
+    requires atomic_add_float (CAS-loop, same pattern as embedding_backward).
     """
     go_cpu = grad_output.to_torch_cpu() if isinstance(grad_output, ApplegpuTensor) else grad_output
     in_cpu = input.to_torch_cpu() if isinstance(input, ApplegpuTensor) else input
