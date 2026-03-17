@@ -560,6 +560,9 @@ impl Backend for SocketBackend {
     fn gelu(&self, a: u64) -> BackendResult<u64> {
         self.record_unary(a, WireOpKind::Gelu)
     }
+    fn gelu_exact(&self, _a: u64) -> BackendResult<u64> {
+        Err("gelu_exact not yet implemented over socket backend".to_string())
+    }
     fn sigmoid(&self, a: u64) -> BackendResult<u64> {
         self.record_unary(a, WireOpKind::Sigmoid)
     }
@@ -1137,6 +1140,9 @@ impl Backend for SocketBackend {
     fn max_pool2d(&self, _input: u64, _kernel: (usize, usize), _stride: (usize, usize), _padding: (usize, usize)) -> BackendResult<u64> {
         Err("max_pool2d not yet implemented over socket backend".to_string())
     }
+    fn max_pool2d_with_indices(&self, _input: u64, _kernel: (usize, usize), _stride: (usize, usize), _padding: (usize, usize)) -> BackendResult<(u64, u64)> {
+        Err("max_pool2d_with_indices not yet implemented over socket backend".to_string())
+    }
     fn avg_pool2d(&self, _input: u64, _kernel: (usize, usize), _stride: (usize, usize), _padding: (usize, usize)) -> BackendResult<u64> {
         Err("avg_pool2d not yet implemented over socket backend".to_string())
     }
@@ -1178,6 +1184,14 @@ impl Backend for SocketBackend {
 
     fn gelu_backward(&self, _grad_output: u64, _input: u64) -> BackendResult<u64> {
         Err("gelu_backward not yet implemented over socket backend".to_string())
+    }
+
+    fn gelu_tanh_backward(&self, _grad_output: u64, _input: u64) -> BackendResult<u64> {
+        Err("gelu_tanh_backward not yet implemented over socket backend".to_string())
+    }
+
+    fn gelu_exact_backward(&self, _grad_output: u64, _input: u64) -> BackendResult<u64> {
+        Err("gelu_exact_backward not yet implemented over socket backend".to_string())
     }
 
     fn max_pool2d_backward(&self, _grad_output: u64, _indices: u64, _batch: usize, _channels: usize, _in_h: usize, _in_w: usize) -> BackendResult<u64> {

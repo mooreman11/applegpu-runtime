@@ -306,6 +306,59 @@ kernel void gelu{s}(
     )
 }
 
+/// Polynomial approximation of erf (Abramowitz & Stegun, max error ~1.5e-7).
+/// Metal Shading Language does not include erf() in its standard library.
+const ERF_APPROX_MSL: &str = r#"
+float erf_approx(float x) {
+    float ax = abs(x);
+    float t = 1.0f / (1.0f + 0.3275911f * ax);
+    float t2 = t * t;
+    float t3 = t2 * t;
+    float t4 = t3 * t;
+    float t5 = t4 * t;
+    float poly = 0.254829592f * t - 0.284496736f * t2 + 1.421413741f * t3
+               - 1.453152027f * t4 + 1.061405429f * t5;
+    float result = 1.0f - poly * exp(-ax * ax);
+    return x >= 0.0f ? result : -result;
+}
+"#;
+
+/// Generate exact GELU kernel source (uses erf approximation). Always uses float intermediate.
+pub fn gelu_exact_kernel_source(dtype: DType) -> String {
+    let t = metal_type(dtype);
+    let s = dtype_suffix(dtype);
+    let (load, store) = if needs_float_acc(dtype) || dtype == DType::Float32 {
+        (to_float("input[in_off]", dtype),
+         if dtype == DType::Float32 { "output[id] = x * 0.5f * (1.0f + erf_approx(x * 0.70710678118f));".to_string() }
+         else { format!("output[id] = {t}(x * 0.5f * (1.0f + erf_approx(x * 0.70710678118f)));", t = t) })
+    } else {
+        (format!("float(input[in_off])"),
+         format!("output[id] = {t}(x * 0.5f * (1.0f + erf_approx(x * 0.70710678118f)));", t = t))
+    };
+    format!(
+        r#"#include <metal_stdlib>
+using namespace metal;
+{erf}
+{nd}
+kernel void gelu_exact{s}(
+    device const {t}* input [[buffer(0)]],
+    device {t}* output [[buffer(1)]],
+    constant uint* in_strides [[buffer(2)]],
+    constant uint* out_shape [[buffer(3)]],
+    constant uint& ndim [[buffer(4)]],
+    constant uint& numel [[buffer(5)]],
+    uint id [[thread_position_in_grid]]
+) {{
+    if (id >= numel) return;
+    uint in_off = nd_index_to_offset(id, out_shape, in_strides, ndim);
+    float x = {load};
+    {store}
+}}
+"#,
+        erf = ERF_APPROX_MSL, nd = ND_INDEX_HELPER, t = t, s = s, load = load, store = store,
+    )
+}
+
 pub fn sigmoid_kernel_source(dtype: DType) -> String {
     let t = metal_type(dtype);
     let s = dtype_suffix(dtype);
@@ -1207,6 +1260,71 @@ kernel void max_pool2d{s}(
     )
 }
 
+/// Generate max_pool2d_with_indices kernel source. Float-only.
+/// Outputs both pooled values AND argmax indices in a single GPU pass.
+/// Buffer layout: buffer(0)=input, buffer(1)=indices_out (writable "input"),
+/// buffer(2)=values_out, buffer(3+)=uint params.
+pub fn max_pool2d_with_indices_kernel_source(dtype: DType) -> String {
+    let t = metal_type(dtype);
+    let s = dtype_suffix(dtype);
+    let acc = needs_float_acc(dtype);
+    let load = |e: &str| if acc { format!("float({})", e) } else { e.to_string() };
+    let store = |e: &str| if acc { format!("{}({})", t, e) } else { e.to_string() };
+    format!(
+        r#"#include <metal_stdlib>
+using namespace metal;
+
+kernel void max_pool2d_idx{s}(
+    device const {t}* input [[buffer(0)]],
+    device int* out_indices [[buffer(1)]],
+    device {t}* output [[buffer(2)]],
+    constant uint& batch [[buffer(3)]],
+    constant uint& channels [[buffer(4)]],
+    constant uint& in_h [[buffer(5)]],
+    constant uint& in_w [[buffer(6)]],
+    constant uint& out_h [[buffer(7)]],
+    constant uint& out_w [[buffer(8)]],
+    constant uint& kh [[buffer(9)]],
+    constant uint& kw [[buffer(10)]],
+    constant uint& stride_h [[buffer(11)]],
+    constant uint& stride_w [[buffer(12)]],
+    constant uint& pad_h [[buffer(13)]],
+    constant uint& pad_w [[buffer(14)]],
+    uint3 gid [[thread_position_in_grid]]
+) {{
+    uint ow = gid.x;
+    uint combined = gid.y;
+    uint b = gid.z;
+    uint c = combined % channels;
+    uint oh = combined / channels;
+    if (ow >= out_w || oh >= out_h || b >= batch) return;
+
+    float max_val = -1e30f;
+    int max_idx = 0;
+    for (uint i = 0; i < kh; i++) {{
+        for (uint j = 0; j < kw; j++) {{
+            int ih = int(oh * stride_h + i) - int(pad_h);
+            int iw = int(ow * stride_w + j) - int(pad_w);
+            if (ih >= 0 && uint(ih) < in_h && iw >= 0 && uint(iw) < in_w) {{
+                float val = {load_v};
+                if (val > max_val) {{
+                    max_val = val;
+                    max_idx = ih * int(in_w) + iw;
+                }}
+            }}
+        }}
+    }}
+    uint out_off = b * channels * out_h * out_w + c * out_h * out_w + oh * out_w + ow;
+    output[out_off] = {store_max};
+    out_indices[out_off] = max_idx;
+}}
+"#,
+        t = t, s = s,
+        load_v = load("input[b * channels * in_h * in_w + c * in_h * in_w + uint(ih) * in_w + uint(iw)]"),
+        store_max = store("max_val"),
+    )
+}
+
 /// Generate avg_pool2d kernel source. Float-only.
 pub fn avg_pool2d_kernel_source(dtype: DType) -> String {
     let t = metal_type(dtype);
@@ -1713,6 +1831,67 @@ kernel void gelu_backward{s}(device const {t}* grad_output [[buffer(0)]], device
     grad_input[id] = {store};
 }}
 "#,
+        t = t, s = s,
+        load_input = load_input,
+        load_grad = load_grad,
+        store = store,
+    )
+}
+
+/// Tanh GELU backward kernel — derivative of tanh approximation GELU.
+/// Same math as gelu_backward but with explicit name for the new dispatch path.
+pub fn gelu_tanh_backward_kernel_source(dtype: DType) -> String {
+    let t = metal_type(dtype);
+    let s = dtype_suffix(dtype);
+    let acc = needs_float_acc(dtype);
+    let load_input = if acc { "float(input[id])".to_string() } else { "input[id]".to_string() };
+    let load_grad = if acc { "float(grad_output[id])".to_string() } else { "grad_output[id]".to_string() };
+    let store = if acc { format!("{}(result)", t) } else { "result".to_string() };
+    format!(
+        r#"#include <metal_stdlib>
+using namespace metal;
+
+kernel void gelu_tanh_backward{s}(device const {t}* grad_output [[buffer(0)]], device const {t}* input [[buffer(1)]], device {t}* grad_input [[buffer(2)]], constant uint& numel [[buffer(3)]], uint id [[thread_position_in_grid]]) {{
+    if (id >= numel) return;
+    float x = {load_input};
+    float go = {load_grad};
+    float inner = clamp(0.7978845608f * (x + 0.044715f * x * x * x), -10.0f, 10.0f);
+    float t = tanh(inner);
+    float dt = 0.7978845608f * (1.0f + 3.0f * 0.044715f * x * x);
+    float result = go * (0.5f * (1.0f + t) + 0.5f * x * (1.0f - t * t) * dt);
+    grad_input[id] = {store};
+}}
+"#,
+        t = t, s = s,
+        load_input = load_input,
+        load_grad = load_grad,
+        store = store,
+    )
+}
+
+/// Exact GELU backward kernel — derivative of exact GELU (uses erf approximation + exp).
+pub fn gelu_exact_backward_kernel_source(dtype: DType) -> String {
+    let t = metal_type(dtype);
+    let s = dtype_suffix(dtype);
+    let acc = needs_float_acc(dtype);
+    let load_input = if acc { "float(input[id])".to_string() } else { "input[id]".to_string() };
+    let load_grad = if acc { "float(grad_output[id])".to_string() } else { "grad_output[id]".to_string() };
+    let store = if acc { format!("{}(result)", t) } else { "result".to_string() };
+    format!(
+        r#"#include <metal_stdlib>
+using namespace metal;
+{erf}
+kernel void gelu_exact_backward{s}(device const {t}* grad_output [[buffer(0)]], device const {t}* input [[buffer(1)]], device {t}* grad_input [[buffer(2)]], constant uint& numel [[buffer(3)]], uint id [[thread_position_in_grid]]) {{
+    if (id >= numel) return;
+    float x = {load_input};
+    float go = {load_grad};
+    float cdf = 0.5f * (1.0f + erf_approx(x * 0.70710678118f));
+    float pdf = 0.3989422804f * exp(-0.5f * x * x);
+    float result = go * (cdf + x * pdf);
+    grad_input[id] = {store};
+}}
+"#,
+        erf = ERF_APPROX_MSL,
         t = t, s = s,
         load_input = load_input,
         load_grad = load_grad,

@@ -131,6 +131,10 @@ fn op_to_discriminant(op: &OpKind) -> u32 {
         OpKind::GeluBackward => 73,
         OpKind::Conv1dBackwardInput { .. } => 74,
         OpKind::MaxPool2dBackward => 75,
+        OpKind::MaxPool2dWithIndices { .. } => 76,
+        OpKind::GeluExact => 77,
+        OpKind::GeluExactBackward => 78,
+        OpKind::GeluTanhBackward => 79,
     }
 }
 
@@ -381,6 +385,18 @@ fn discriminant_to_op(d: u32, r: &mut impl Read) -> io::Result<OpKind> {
             Ok(OpKind::Conv1dBackwardInput { stride, padding })
         }
         75 => Ok(OpKind::MaxPool2dBackward),
+        76 => {
+            let k0 = read_u64(r)? as usize;
+            let k1 = read_u64(r)? as usize;
+            let s0 = read_u64(r)? as usize;
+            let s1 = read_u64(r)? as usize;
+            let p0 = read_u64(r)? as usize;
+            let p1 = read_u64(r)? as usize;
+            let indices_id = read_u64(r)?;
+            Ok(OpKind::MaxPool2dWithIndices {
+                kernel_size: (k0, k1), stride: (s0, s1), padding: (p0, p1), indices_id,
+            })
+        }
         _ => Err(io::Error::new(io::ErrorKind::InvalidData, format!("Unknown op type: {}", d))),
     }
 }
@@ -491,6 +507,15 @@ impl EvalRequest {
                 write_u64(&mut buf, stride.1 as u64).unwrap();
                 write_u64(&mut buf, padding.0 as u64).unwrap();
                 write_u64(&mut buf, padding.1 as u64).unwrap();
+            }
+            if let OpKind::MaxPool2dWithIndices { kernel_size, stride, padding, indices_id } = node.op {
+                write_u64(&mut buf, kernel_size.0 as u64).unwrap();
+                write_u64(&mut buf, kernel_size.1 as u64).unwrap();
+                write_u64(&mut buf, stride.0 as u64).unwrap();
+                write_u64(&mut buf, stride.1 as u64).unwrap();
+                write_u64(&mut buf, padding.0 as u64).unwrap();
+                write_u64(&mut buf, padding.1 as u64).unwrap();
+                write_u64(&mut buf, indices_id).unwrap();
             }
             if let OpKind::AvgPool2d { kernel_size, stride, padding } = node.op {
                 write_u64(&mut buf, kernel_size.0 as u64).unwrap();
@@ -777,7 +802,13 @@ impl From<&OpKind> for WireOpKind {
             OpKind::TanhBackward => WireOpKind::TanhBackward,
             OpKind::SigmoidBackward => WireOpKind::SigmoidBackward,
             OpKind::GeluBackward => WireOpKind::GeluBackward,
+            OpKind::GeluExact => WireOpKind::Gelu, // Wire doesn't distinguish; map to Gelu
+            OpKind::GeluExactBackward => WireOpKind::GeluBackward, // Wire doesn't distinguish
+            OpKind::GeluTanhBackward => WireOpKind::GeluBackward, // Wire doesn't distinguish
             OpKind::MaxPool2dBackward => WireOpKind::MaxPool2dBackward,
+            OpKind::MaxPool2dWithIndices { kernel_size, stride, padding, indices_id } => {
+                WireOpKind::MaxPool2dWithIndices { kernel_size: *kernel_size, stride: *stride, padding: *padding, indices_id: *indices_id }
+            }
         }
     }
 }
@@ -891,6 +922,9 @@ pub fn wire_op_to_core(wire: &WireOpKind) -> OpKind {
         WireOpKind::SigmoidBackward => OpKind::SigmoidBackward,
         WireOpKind::GeluBackward => OpKind::GeluBackward,
         WireOpKind::MaxPool2dBackward => OpKind::MaxPool2dBackward,
+        WireOpKind::MaxPool2dWithIndices { kernel_size, stride, padding, indices_id } => {
+            OpKind::MaxPool2dWithIndices { kernel_size: *kernel_size, stride: *stride, padding: *padding, indices_id: *indices_id }
+        }
     }
 }
 

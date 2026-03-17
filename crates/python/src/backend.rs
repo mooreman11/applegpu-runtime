@@ -65,6 +65,7 @@ pub trait Backend: Send + Sync {
     fn neg(&self, a: u64) -> BackendResult<u64>;
     fn relu(&self, a: u64) -> BackendResult<u64>;
     fn gelu(&self, a: u64) -> BackendResult<u64>;
+    fn gelu_exact(&self, a: u64) -> BackendResult<u64>;
     fn sigmoid(&self, a: u64) -> BackendResult<u64>;
     fn var(&self, a: u64, correction: u32) -> BackendResult<u64>;
     fn std_dev(&self, a: u64, correction: u32) -> BackendResult<u64>;
@@ -150,6 +151,7 @@ pub trait Backend: Send + Sync {
     fn conv2d(&self, input: u64, weight: u64, stride: (usize, usize), padding: (usize, usize)) -> BackendResult<u64>;
     fn batch_norm(&self, input: u64, mean: u64, var: u64, weight: u64, bias: u64, eps: f32) -> BackendResult<u64>;
     fn max_pool2d(&self, input: u64, kernel: (usize, usize), stride: (usize, usize), padding: (usize, usize)) -> BackendResult<u64>;
+    fn max_pool2d_with_indices(&self, input: u64, kernel: (usize, usize), stride: (usize, usize), padding: (usize, usize)) -> BackendResult<(u64, u64)>;
     fn avg_pool2d(&self, input: u64, kernel: (usize, usize), stride: (usize, usize), padding: (usize, usize)) -> BackendResult<u64>;
 
     // Backward ops
@@ -163,6 +165,8 @@ pub trait Backend: Send + Sync {
     fn tanh_backward(&self, grad_output: u64, output: u64) -> BackendResult<u64>;
     fn sigmoid_backward(&self, grad_output: u64, output: u64) -> BackendResult<u64>;
     fn gelu_backward(&self, grad_output: u64, input: u64) -> BackendResult<u64>;
+    fn gelu_tanh_backward(&self, grad_output: u64, input: u64) -> BackendResult<u64>;
+    fn gelu_exact_backward(&self, grad_output: u64, input: u64) -> BackendResult<u64>;
     fn max_pool2d_backward(&self, grad_output: u64, indices: u64, batch: usize, channels: usize, in_h: usize, in_w: usize) -> BackendResult<u64>;
 
     // Direct GPU→GPU copy

@@ -116,6 +116,7 @@ pub enum OpKind {
     Conv2d { stride: (usize, usize), padding: (usize, usize) },
     BatchNorm { eps: f32 },
     MaxPool2d { kernel_size: (usize, usize), stride: (usize, usize), padding: (usize, usize) },
+    MaxPool2dWithIndices { kernel_size: (usize, usize), stride: (usize, usize), padding: (usize, usize), indices_id: u64 },
     AvgPool2d { kernel_size: (usize, usize), stride: (usize, usize), padding: (usize, usize) },
     // Backward ops
     SoftmaxBackward,
@@ -128,6 +129,12 @@ pub enum OpKind {
     TanhBackward,
     SigmoidBackward,
     GeluBackward,
+    // Exact GELU forward (uses erf)
+    GeluExact,
+    // Exact GELU backward (derivative of exact GELU)
+    GeluExactBackward,
+    // Tanh GELU backward (same math as GeluBackward, but explicit name for clarity)
+    GeluTanhBackward,
     MaxPool2dBackward,
     // Comparison ops (output is always Bool)
     Lt, Gt, Le, Ge, Eq, Ne,
@@ -198,6 +205,7 @@ impl OpKind {
             OpKind::Conv2d { .. } => "conv2d",
             OpKind::BatchNorm { .. } => "batch_norm",
             OpKind::MaxPool2d { .. } => "max_pool2d",
+            OpKind::MaxPool2dWithIndices { .. } => "max_pool2d_idx",
             OpKind::AvgPool2d { .. } => "avg_pool2d",
             OpKind::SoftmaxBackward => "softmax_backward",
             OpKind::LayerNormBackward { .. } => "layer_norm_backward",
@@ -209,6 +217,9 @@ impl OpKind {
             OpKind::TanhBackward => "tanh_backward",
             OpKind::SigmoidBackward => "sigmoid_backward",
             OpKind::GeluBackward => "gelu_backward",
+            OpKind::GeluExact => "gelu_exact",
+            OpKind::GeluExactBackward => "gelu_exact_backward",
+            OpKind::GeluTanhBackward => "gelu_tanh_backward",
             OpKind::MaxPool2dBackward => "max_pool2d_backward",
             OpKind::Lt => "lt",
             OpKind::Gt => "gt",
@@ -237,7 +248,7 @@ impl OpKind {
     }
 
     pub fn is_unary(&self) -> bool {
-        matches!(self, OpKind::Neg | OpKind::Relu | OpKind::Exp | OpKind::Log | OpKind::Sqrt | OpKind::Tanh | OpKind::Sin | OpKind::Cos | OpKind::Gelu | OpKind::Sigmoid | OpKind::Abs | OpKind::Sign | OpKind::BitwiseNot | OpKind::LogicalNot)
+        matches!(self, OpKind::Neg | OpKind::Relu | OpKind::Exp | OpKind::Log | OpKind::Sqrt | OpKind::Tanh | OpKind::Sin | OpKind::Cos | OpKind::Gelu | OpKind::GeluExact | OpKind::Sigmoid | OpKind::Abs | OpKind::Sign | OpKind::BitwiseNot | OpKind::LogicalNot)
     }
 
     pub fn is_matmul(&self) -> bool {
@@ -252,6 +263,9 @@ impl OpKind {
         matches!(self, OpKind::Add | OpKind::Sub | OpKind::Mul | OpKind::Div |
                        OpKind::Neg | OpKind::Relu | OpKind::Exp | OpKind::Log | OpKind::Sqrt | OpKind::Tanh | OpKind::Sin | OpKind::Cos | OpKind::Gelu | OpKind::Sigmoid |
                        OpKind::Abs | OpKind::Sign)
+        // Note: GeluExact is NOT fusible because it requires a custom erf_approx function
+        // that would need to be injected into the fused kernel source.
+
     }
 
     pub fn is_softmax(&self) -> bool {
@@ -382,6 +396,10 @@ impl OpKind {
         matches!(self, OpKind::MaxPool2d { .. })
     }
 
+    pub fn is_max_pool2d_with_indices(&self) -> bool {
+        matches!(self, OpKind::MaxPool2dWithIndices { .. })
+    }
+
     pub fn is_avg_pool2d(&self) -> bool {
         matches!(self, OpKind::AvgPool2d { .. })
     }
@@ -424,6 +442,18 @@ impl OpKind {
 
     pub fn is_gelu_backward(&self) -> bool {
         matches!(self, OpKind::GeluBackward)
+    }
+
+    pub fn is_gelu_exact(&self) -> bool {
+        matches!(self, OpKind::GeluExact)
+    }
+
+    pub fn is_gelu_exact_backward(&self) -> bool {
+        matches!(self, OpKind::GeluExactBackward)
+    }
+
+    pub fn is_gelu_tanh_backward(&self) -> bool {
+        matches!(self, OpKind::GeluTanhBackward)
     }
 
     pub fn is_max_pool2d_backward(&self) -> bool {
