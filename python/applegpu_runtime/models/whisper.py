@@ -267,15 +267,27 @@ class WhisperModel:
         logits = self.decode_step(tokens, encoder_output, kv_cache)
         kv_cache.advance(len(tokens))
 
-        for _ in range(max_tokens):
-            # Get logits for last token
-            next_logit = gpu.slice(logits, 1, logits.shape[1] - 1, logits.shape[1])
-            next_logit = gpu.reshape(next_logit, [1, self.config["n_vocab"]])
-            next_token = gpu.argmax(next_logit)
-            next_token.eval()
-            token_id = next_token.to_list()[0]
+        # Special tokens to suppress during generation (all tokens >= 50257)
+        eot_token = 50257
+        suppress_above = eot_token  # suppress all special tokens
 
-            if token_id == 50257:  # <|endoftext|>
+        for _ in range(max_tokens):
+            # Get logits for last position, suppress special tokens on CPU
+            # Slice to last token's logits: [1, 1, vocab] → flatten
+            last_logit = gpu.slice(logits, 1, logits.shape[1] - 1, logits.shape[1])
+            last_logit = gpu.reshape(last_logit, [self.config["n_vocab"]])
+            last_logit.eval()
+            last_logits = last_logit.to_list()  # flat [vocab_size]
+
+            # Suppress special tokens (except EOT which we need to stop)
+            eot_val = last_logits[eot_token]
+            for i in range(suppress_above, len(last_logits)):
+                last_logits[i] = float("-inf")
+            last_logits[eot_token] = eot_val
+
+            token_id = max(range(len(last_logits)), key=lambda i: last_logits[i])
+
+            if token_id == eot_token:
                 break
 
             tokens.append(token_id)
