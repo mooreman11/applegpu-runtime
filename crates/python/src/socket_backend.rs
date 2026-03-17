@@ -1128,10 +1128,10 @@ impl Backend for SocketBackend {
     // CNN ops — not implemented over socket for v0.8.0
     // -----------------------------------------------------------------------
 
-    fn conv1d(&self, _input: u64, _weight: u64, _stride: usize, _padding: usize) -> BackendResult<u64> {
+    fn conv1d(&self, _input: u64, _weight: u64, _stride: usize, _padding: usize, _groups: usize) -> BackendResult<u64> {
         Err("conv1d not yet implemented over socket backend".to_string())
     }
-    fn conv2d(&self, _input: u64, _weight: u64, _stride: (usize, usize), _padding: (usize, usize)) -> BackendResult<u64> {
+    fn conv2d(&self, _input: u64, _weight: u64, _stride: (usize, usize), _padding: (usize, usize), _groups: usize) -> BackendResult<u64> {
         Err("conv2d not yet implemented over socket backend".to_string())
     }
     fn batch_norm(&self, _input: u64, _mean: u64, _var: u64, _weight: u64, _bias: u64, _eps: f32) -> BackendResult<u64> {
@@ -1157,14 +1157,23 @@ impl Backend for SocketBackend {
     fn layer_norm_backward(&self, _grad: u64, _input: u64, _gamma: u64, _eps: f32) -> BackendResult<u64> {
         Err("layer_norm_backward not yet implemented over socket backend".to_string())
     }
-    fn conv2d_backward_input(&self, _grad: u64, _weight: u64, _in_h: usize, _in_w: usize, _stride: (usize, usize), _padding: (usize, usize)) -> BackendResult<u64> {
+    fn conv2d_backward_input(&self, _grad: u64, _weight: u64, _in_h: usize, _in_w: usize, _stride: (usize, usize), _padding: (usize, usize), _groups: usize) -> BackendResult<u64> {
         Err("conv2d_backward_input not yet implemented over socket backend".to_string())
     }
-    fn conv1d_backward_input(&self, _grad: u64, _weight: u64, _in_channels: usize, _in_len: usize, _stride: usize, _padding: usize) -> BackendResult<u64> {
+    fn conv2d_backward_weight(&self, _grad: u64, _input: u64, _kh: usize, _kw: usize, _out_channels: usize, _in_channels: usize, _stride: (usize, usize), _padding: (usize, usize), _groups: usize) -> BackendResult<u64> {
+        Err("conv2d_backward_weight not yet implemented over socket backend".to_string())
+    }
+    fn conv1d_backward_input(&self, _grad: u64, _weight: u64, _in_channels: usize, _in_len: usize, _stride: usize, _padding: usize, _groups: usize) -> BackendResult<u64> {
         Err("conv1d_backward_input not yet implemented over socket backend".to_string())
     }
     fn embedding_backward(&self, _grad: u64, _indices: u64, _num_weights: usize) -> BackendResult<u64> {
         Err("embedding_backward not yet implemented over socket backend".to_string())
+    }
+    fn scatter_write(&self, _input: u64, _indices: u64, _values: u64) -> BackendResult<u64> {
+        Err("scatter_write not yet implemented over socket backend".to_string())
+    }
+    fn scatter_add(&self, _input: u64, _indices: u64, _values: u64) -> BackendResult<u64> {
+        Err("scatter_add not yet implemented over socket backend".to_string())
     }
     fn batch_norm_backward(&self, _grad: u64, _weight: u64, _var: u64, _eps: f32) -> BackendResult<u64> {
         Err("batch_norm_backward not yet implemented over socket backend".to_string())

@@ -209,8 +209,8 @@ pub enum WireOpKind {
     Gather { dim: usize },
     IndexSelect { dim: usize },
     // 35–39
-    Conv1d { stride: usize, padding: usize },
-    Conv2d { stride: (usize, usize), padding: (usize, usize) },
+    Conv1d { stride: usize, padding: usize, groups: usize },
+    Conv2d { stride: (usize, usize), padding: (usize, usize), groups: usize },
     BatchNorm { eps: f32 },
     MaxPool2d { kernel_size: (usize, usize), stride: (usize, usize), padding: (usize, usize) },
     AvgPool2d { kernel_size: (usize, usize), stride: (usize, usize), padding: (usize, usize) },
@@ -218,8 +218,9 @@ pub enum WireOpKind {
     Tanh,
     SoftmaxBackward,
     LayerNormBackward { eps: f32 },
-    Conv2dBackwardInput { stride: (usize, usize), padding: (usize, usize) },
-    Conv1dBackwardInput { stride: usize, padding: usize },
+    Conv2dBackwardInput { stride: (usize, usize), padding: (usize, usize), groups: usize },
+    Conv2dBackwardWeight { stride: (usize, usize), padding: (usize, usize), groups: usize },
+    Conv1dBackwardInput { stride: usize, padding: usize, groups: usize },
     EmbeddingBackward,
     BatchNormBackward { eps: f32 },
     // 46: type conversion
@@ -251,6 +252,13 @@ pub enum WireOpKind {
     MaxPool2dBackward,
     // 76: max_pool2d with indices (dual output)
     MaxPool2dWithIndices { kernel_size: (usize, usize), stride: (usize, usize), padding: (usize, usize), indices_id: u64 },
+    // 77-79: exact GELU and tanh GELU backward
+    GeluExact,
+    GeluExactBackward,
+    GeluTanhBackward,
+    // 81-82: scatter ops
+    ScatterWrite,
+    ScatterAdd,
 }
 
 impl WireOpKind {
@@ -300,6 +308,7 @@ impl WireOpKind {
             WireOpKind::SoftmaxBackward => 41,
             WireOpKind::LayerNormBackward { .. } => 42,
             WireOpKind::Conv2dBackwardInput { .. } => 43,
+            WireOpKind::Conv2dBackwardWeight { .. } => 80,
             WireOpKind::EmbeddingBackward => 44,
             WireOpKind::BatchNormBackward { .. } => 45,
             WireOpKind::Cast { .. } => 46,
@@ -333,6 +342,11 @@ impl WireOpKind {
             WireOpKind::Conv1dBackwardInput { .. } => 74,
             WireOpKind::MaxPool2dBackward => 75,
             WireOpKind::MaxPool2dWithIndices { .. } => 76,
+            WireOpKind::GeluExact => 77,
+            WireOpKind::GeluExactBackward => 78,
+            WireOpKind::GeluTanhBackward => 79,
+            WireOpKind::ScatterWrite => 81,
+            WireOpKind::ScatterAdd => 82,
         }
     }
 
@@ -355,7 +369,8 @@ impl WireOpKind {
             | WireOpKind::BitwiseAnd | WireOpKind::BitwiseOr | WireOpKind::BitwiseXor
             | WireOpKind::BitwiseNot
             | WireOpKind::Mod | WireOpKind::ElemMin | WireOpKind::ElemMax
-            | WireOpKind::LogicalNot => Ok(()),
+            | WireOpKind::LogicalNot
+            | WireOpKind::ScatterWrite | WireOpKind::ScatterAdd => Ok(()),
 
             WireOpKind::FusedElementwise { kernel_source, function_name } => {
                 write_u32(w, kernel_source.len() as u32)?;
@@ -393,15 +408,17 @@ impl WireOpKind {
             WireOpKind::Tril { diagonal } => write_i32(w, *diagonal),
             WireOpKind::Gather { dim } => write_u32(w, *dim as u32),
             WireOpKind::IndexSelect { dim } => write_u32(w, *dim as u32),
-            WireOpKind::Conv1d { stride, padding } => {
+            WireOpKind::Conv1d { stride, padding, groups } => {
                 write_u64(w, *stride as u64)?;
-                write_u64(w, *padding as u64)
+                write_u64(w, *padding as u64)?;
+                write_u64(w, *groups as u64)
             }
-            WireOpKind::Conv2d { stride, padding } => {
+            WireOpKind::Conv2d { stride, padding, groups } => {
                 write_u64(w, stride.0 as u64)?;
                 write_u64(w, stride.1 as u64)?;
                 write_u64(w, padding.0 as u64)?;
-                write_u64(w, padding.1 as u64)
+                write_u64(w, padding.1 as u64)?;
+                write_u64(w, *groups as u64)
             }
             WireOpKind::BatchNorm { eps } => write_f32(w, *eps),
             WireOpKind::MaxPool2d { kernel_size, stride, padding } => {
@@ -421,15 +438,24 @@ impl WireOpKind {
                 write_u64(w, padding.1 as u64)
             }
             WireOpKind::LayerNormBackward { eps } => write_f32(w, *eps),
-            WireOpKind::Conv2dBackwardInput { stride, padding } => {
+            WireOpKind::Conv2dBackwardInput { stride, padding, groups } => {
                 write_u64(w, stride.0 as u64)?;
                 write_u64(w, stride.1 as u64)?;
                 write_u64(w, padding.0 as u64)?;
-                write_u64(w, padding.1 as u64)
+                write_u64(w, padding.1 as u64)?;
+                write_u64(w, *groups as u64)
             }
-            WireOpKind::Conv1dBackwardInput { stride, padding } => {
+            WireOpKind::Conv2dBackwardWeight { stride, padding, groups } => {
+                write_u64(w, stride.0 as u64)?;
+                write_u64(w, stride.1 as u64)?;
+                write_u64(w, padding.0 as u64)?;
+                write_u64(w, padding.1 as u64)?;
+                write_u64(w, *groups as u64)
+            }
+            WireOpKind::Conv1dBackwardInput { stride, padding, groups } => {
                 write_u32(w, *stride as u32)?;
-                write_u32(w, *padding as u32)
+                write_u32(w, *padding as u32)?;
+                write_u32(w, *groups as u32)
             }
             WireOpKind::BatchNormBackward { eps } => write_f32(w, *eps),
             WireOpKind::Cast { target_dtype } => w.write_all(&[*target_dtype]),
@@ -447,7 +473,8 @@ impl WireOpKind {
             }
             WireOpKind::ThresholdBackward { threshold } => write_f32(w, *threshold),
             WireOpKind::TanhBackward | WireOpKind::SigmoidBackward | WireOpKind::GeluBackward |
-            WireOpKind::MaxPool2dBackward => Ok(()),
+            WireOpKind::MaxPool2dBackward |
+            WireOpKind::GeluExact | WireOpKind::GeluExactBackward | WireOpKind::GeluTanhBackward => Ok(()),
             WireOpKind::MaxPool2dWithIndices { kernel_size, stride, padding, indices_id } => {
                 write_u64(w, kernel_size.0 as u64)?;
                 write_u64(w, kernel_size.1 as u64)?;
@@ -533,14 +560,16 @@ impl WireOpKind {
             35 => {
                 let stride = read_u64(r)? as usize;
                 let padding = read_u64(r)? as usize;
-                Ok(WireOpKind::Conv1d { stride, padding })
+                let groups = read_u64(r)? as usize;
+                Ok(WireOpKind::Conv1d { stride, padding, groups })
             }
             36 => {
                 let s0 = read_u64(r)? as usize;
                 let s1 = read_u64(r)? as usize;
                 let p0 = read_u64(r)? as usize;
                 let p1 = read_u64(r)? as usize;
-                Ok(WireOpKind::Conv2d { stride: (s0, s1), padding: (p0, p1) })
+                let groups = read_u64(r)? as usize;
+                Ok(WireOpKind::Conv2d { stride: (s0, s1), padding: (p0, p1), groups })
             }
             37 => Ok(WireOpKind::BatchNorm { eps: read_f32(r)? }),
             38 => {
@@ -573,7 +602,8 @@ impl WireOpKind {
                 let s1 = read_u64(r)? as usize;
                 let p0 = read_u64(r)? as usize;
                 let p1 = read_u64(r)? as usize;
-                Ok(WireOpKind::Conv2dBackwardInput { stride: (s0, s1), padding: (p0, p1) })
+                let groups = read_u64(r)? as usize;
+                Ok(WireOpKind::Conv2dBackwardInput { stride: (s0, s1), padding: (p0, p1), groups })
             }
             44 => Ok(WireOpKind::EmbeddingBackward),
             45 => Ok(WireOpKind::BatchNormBackward { eps: read_f32(r)? }),
@@ -624,7 +654,8 @@ impl WireOpKind {
             74 => {
                 let stride = read_u32(r)? as usize;
                 let padding = read_u32(r)? as usize;
-                Ok(WireOpKind::Conv1dBackwardInput { stride, padding })
+                let groups = read_u32(r)? as usize;
+                Ok(WireOpKind::Conv1dBackwardInput { stride, padding, groups })
             }
             75 => Ok(WireOpKind::MaxPool2dBackward),
             76 => {
@@ -639,6 +670,19 @@ impl WireOpKind {
                     kernel_size: (k0, k1), stride: (s0, s1), padding: (p0, p1), indices_id,
                 })
             }
+            77 => Ok(WireOpKind::GeluExact),
+            78 => Ok(WireOpKind::GeluExactBackward),
+            79 => Ok(WireOpKind::GeluTanhBackward),
+            80 => {
+                let s0 = read_u64(r)? as usize;
+                let s1 = read_u64(r)? as usize;
+                let p0 = read_u64(r)? as usize;
+                let p1 = read_u64(r)? as usize;
+                let groups = read_u64(r)? as usize;
+                Ok(WireOpKind::Conv2dBackwardWeight { stride: (s0, s1), padding: (p0, p1), groups })
+            }
+            81 => Ok(WireOpKind::ScatterWrite),
+            82 => Ok(WireOpKind::ScatterAdd),
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("Unknown op discriminant: {}", disc),

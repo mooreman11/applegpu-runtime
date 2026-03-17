@@ -135,6 +135,9 @@ fn op_to_discriminant(op: &OpKind) -> u32 {
         OpKind::GeluExact => 77,
         OpKind::GeluExactBackward => 78,
         OpKind::GeluTanhBackward => 79,
+        OpKind::Conv2dBackwardWeight { .. } => 80,
+        OpKind::ScatterWrite => 81,
+        OpKind::ScatterAdd => 82,
     }
 }
 
@@ -247,14 +250,16 @@ fn discriminant_to_op(d: u32, r: &mut impl Read) -> io::Result<OpKind> {
         35 => {
             let stride = read_u64(r)? as usize;
             let padding = read_u64(r)? as usize;
-            Ok(OpKind::Conv1d { stride, padding })
+            let groups = read_u64(r)? as usize;
+            Ok(OpKind::Conv1d { stride, padding, groups })
         }
         36 => {
             let s0 = read_u64(r)? as usize;
             let s1 = read_u64(r)? as usize;
             let p0 = read_u64(r)? as usize;
             let p1 = read_u64(r)? as usize;
-            Ok(OpKind::Conv2d { stride: (s0, s1), padding: (p0, p1) })
+            let groups = read_u64(r)? as usize;
+            Ok(OpKind::Conv2d { stride: (s0, s1), padding: (p0, p1), groups })
         }
         37 => {
             let mut eps_bytes = [0u8; 4];
@@ -291,7 +296,8 @@ fn discriminant_to_op(d: u32, r: &mut impl Read) -> io::Result<OpKind> {
             let s1 = read_u64(r)? as usize;
             let p0 = read_u64(r)? as usize;
             let p1 = read_u64(r)? as usize;
-            Ok(OpKind::Conv2dBackwardInput { stride: (s0, s1), padding: (p0, p1) })
+            let groups = read_u64(r)? as usize;
+            Ok(OpKind::Conv2dBackwardInput { stride: (s0, s1), padding: (p0, p1), groups })
         }
         44 => Ok(OpKind::EmbeddingBackward),
         45 => {
@@ -382,7 +388,8 @@ fn discriminant_to_op(d: u32, r: &mut impl Read) -> io::Result<OpKind> {
         74 => {
             let stride = read_u32(r)? as usize;
             let padding = read_u32(r)? as usize;
-            Ok(OpKind::Conv1dBackwardInput { stride, padding })
+            let groups = read_u32(r)? as usize;
+            Ok(OpKind::Conv1dBackwardInput { stride, padding, groups })
         }
         75 => Ok(OpKind::MaxPool2dBackward),
         76 => {
@@ -397,6 +404,19 @@ fn discriminant_to_op(d: u32, r: &mut impl Read) -> io::Result<OpKind> {
                 kernel_size: (k0, k1), stride: (s0, s1), padding: (p0, p1), indices_id,
             })
         }
+        77 => Ok(OpKind::GeluExact),
+        78 => Ok(OpKind::GeluExactBackward),
+        79 => Ok(OpKind::GeluTanhBackward),
+        80 => {
+            let s0 = read_u64(r)? as usize;
+            let s1 = read_u64(r)? as usize;
+            let p0 = read_u64(r)? as usize;
+            let p1 = read_u64(r)? as usize;
+            let groups = read_u64(r)? as usize;
+            Ok(OpKind::Conv2dBackwardWeight { stride: (s0, s1), padding: (p0, p1), groups })
+        }
+        81 => Ok(OpKind::ScatterWrite),
+        82 => Ok(OpKind::ScatterAdd),
         _ => Err(io::Error::new(io::ErrorKind::InvalidData, format!("Unknown op type: {}", d))),
     }
 }
@@ -487,15 +507,17 @@ impl EvalRequest {
             if let OpKind::IndexSelect { dim } = node.op {
                 write_u32(&mut buf, dim as u32).unwrap();
             }
-            if let OpKind::Conv1d { stride, padding } = node.op {
+            if let OpKind::Conv1d { stride, padding, groups } = node.op {
                 write_u64(&mut buf, stride as u64).unwrap();
                 write_u64(&mut buf, padding as u64).unwrap();
+                write_u64(&mut buf, groups as u64).unwrap();
             }
-            if let OpKind::Conv2d { stride, padding } = node.op {
+            if let OpKind::Conv2d { stride, padding, groups } = node.op {
                 write_u64(&mut buf, stride.0 as u64).unwrap();
                 write_u64(&mut buf, stride.1 as u64).unwrap();
                 write_u64(&mut buf, padding.0 as u64).unwrap();
                 write_u64(&mut buf, padding.1 as u64).unwrap();
+                write_u64(&mut buf, groups as u64).unwrap();
             }
             if let OpKind::BatchNorm { eps } = node.op {
                 buf.write_all(&eps.to_le_bytes()).unwrap();
@@ -528,15 +550,24 @@ impl EvalRequest {
             if let OpKind::LayerNormBackward { eps } = node.op {
                 buf.write_all(&eps.to_le_bytes()).unwrap();
             }
-            if let OpKind::Conv2dBackwardInput { stride, padding } = node.op {
+            if let OpKind::Conv2dBackwardInput { stride, padding, groups } = node.op {
                 write_u64(&mut buf, stride.0 as u64).unwrap();
                 write_u64(&mut buf, stride.1 as u64).unwrap();
                 write_u64(&mut buf, padding.0 as u64).unwrap();
                 write_u64(&mut buf, padding.1 as u64).unwrap();
+                write_u64(&mut buf, groups as u64).unwrap();
             }
-            if let OpKind::Conv1dBackwardInput { stride, padding } = node.op {
+            if let OpKind::Conv2dBackwardWeight { stride, padding, groups } = node.op {
+                write_u64(&mut buf, stride.0 as u64).unwrap();
+                write_u64(&mut buf, stride.1 as u64).unwrap();
+                write_u64(&mut buf, padding.0 as u64).unwrap();
+                write_u64(&mut buf, padding.1 as u64).unwrap();
+                write_u64(&mut buf, groups as u64).unwrap();
+            }
+            if let OpKind::Conv1dBackwardInput { stride, padding, groups } = node.op {
                 write_u32(&mut buf, stride as u32).unwrap();
                 write_u32(&mut buf, padding as u32).unwrap();
+                write_u32(&mut buf, groups as u32).unwrap();
             }
             if let OpKind::BatchNormBackward { eps } = node.op {
                 buf.write_all(&eps.to_le_bytes()).unwrap();
@@ -754,8 +785,8 @@ impl From<&OpKind> for WireOpKind {
             OpKind::Tril { diagonal } => WireOpKind::Tril { diagonal: *diagonal },
             OpKind::Gather { dim } => WireOpKind::Gather { dim: *dim },
             OpKind::IndexSelect { dim } => WireOpKind::IndexSelect { dim: *dim },
-            OpKind::Conv1d { stride, padding } => WireOpKind::Conv1d { stride: *stride, padding: *padding },
-            OpKind::Conv2d { stride, padding } => WireOpKind::Conv2d { stride: *stride, padding: *padding },
+            OpKind::Conv1d { stride, padding, groups } => WireOpKind::Conv1d { stride: *stride, padding: *padding, groups: *groups },
+            OpKind::Conv2d { stride, padding, groups } => WireOpKind::Conv2d { stride: *stride, padding: *padding, groups: *groups },
             OpKind::BatchNorm { eps } => WireOpKind::BatchNorm { eps: *eps },
             OpKind::MaxPool2d { kernel_size, stride, padding } => {
                 WireOpKind::MaxPool2d { kernel_size: *kernel_size, stride: *stride, padding: *padding }
@@ -771,9 +802,12 @@ impl From<&OpKind> for WireOpKind {
             OpKind::Var { correction } => WireOpKind::Var { correction: *correction },
             OpKind::SoftmaxBackward => WireOpKind::SoftmaxBackward,
             OpKind::LayerNormBackward { eps } => WireOpKind::LayerNormBackward { eps: *eps },
-            OpKind::Conv2dBackwardInput { stride, padding } => WireOpKind::Conv2dBackwardInput { stride: *stride, padding: *padding },
-            OpKind::Conv1dBackwardInput { stride, padding } => WireOpKind::Conv1dBackwardInput { stride: *stride, padding: *padding },
+            OpKind::Conv2dBackwardInput { stride, padding, groups } => WireOpKind::Conv2dBackwardInput { stride: *stride, padding: *padding, groups: *groups },
+            OpKind::Conv2dBackwardWeight { stride, padding, groups } => WireOpKind::Conv2dBackwardWeight { stride: *stride, padding: *padding, groups: *groups },
+            OpKind::Conv1dBackwardInput { stride, padding, groups } => WireOpKind::Conv1dBackwardInput { stride: *stride, padding: *padding, groups: *groups },
             OpKind::EmbeddingBackward => WireOpKind::EmbeddingBackward,
+            OpKind::ScatterWrite => WireOpKind::ScatterWrite,
+            OpKind::ScatterAdd => WireOpKind::ScatterAdd,
             OpKind::BatchNormBackward { eps } => WireOpKind::BatchNormBackward { eps: *eps },
             OpKind::Lt => WireOpKind::Lt,
             OpKind::Gt => WireOpKind::Gt,
@@ -802,9 +836,9 @@ impl From<&OpKind> for WireOpKind {
             OpKind::TanhBackward => WireOpKind::TanhBackward,
             OpKind::SigmoidBackward => WireOpKind::SigmoidBackward,
             OpKind::GeluBackward => WireOpKind::GeluBackward,
-            OpKind::GeluExact => WireOpKind::Gelu, // Wire doesn't distinguish; map to Gelu
-            OpKind::GeluExactBackward => WireOpKind::GeluBackward, // Wire doesn't distinguish
-            OpKind::GeluTanhBackward => WireOpKind::GeluBackward, // Wire doesn't distinguish
+            OpKind::GeluExact => WireOpKind::GeluExact,
+            OpKind::GeluExactBackward => WireOpKind::GeluExactBackward,
+            OpKind::GeluTanhBackward => WireOpKind::GeluTanhBackward,
             OpKind::MaxPool2dBackward => WireOpKind::MaxPool2dBackward,
             OpKind::MaxPool2dWithIndices { kernel_size, stride, padding, indices_id } => {
                 WireOpKind::MaxPool2dWithIndices { kernel_size: *kernel_size, stride: *stride, padding: *padding, indices_id: *indices_id }
@@ -867,8 +901,8 @@ pub fn wire_op_to_core(wire: &WireOpKind) -> OpKind {
         WireOpKind::Tril { diagonal } => OpKind::Tril { diagonal: *diagonal },
         WireOpKind::Gather { dim } => OpKind::Gather { dim: *dim },
         WireOpKind::IndexSelect { dim } => OpKind::IndexSelect { dim: *dim },
-        WireOpKind::Conv1d { stride, padding } => OpKind::Conv1d { stride: *stride, padding: *padding },
-        WireOpKind::Conv2d { stride, padding } => OpKind::Conv2d { stride: *stride, padding: *padding },
+        WireOpKind::Conv1d { stride, padding, groups } => OpKind::Conv1d { stride: *stride, padding: *padding, groups: *groups },
+        WireOpKind::Conv2d { stride, padding, groups } => OpKind::Conv2d { stride: *stride, padding: *padding, groups: *groups },
         WireOpKind::BatchNorm { eps } => OpKind::BatchNorm { eps: *eps },
         WireOpKind::MaxPool2d { kernel_size, stride, padding } => {
             OpKind::MaxPool2d { kernel_size: *kernel_size, stride: *stride, padding: *padding }
@@ -884,9 +918,12 @@ pub fn wire_op_to_core(wire: &WireOpKind) -> OpKind {
         WireOpKind::Var { correction } => OpKind::Var { correction: *correction },
         WireOpKind::SoftmaxBackward => OpKind::SoftmaxBackward,
         WireOpKind::LayerNormBackward { eps } => OpKind::LayerNormBackward { eps: *eps },
-        WireOpKind::Conv2dBackwardInput { stride, padding } => OpKind::Conv2dBackwardInput { stride: *stride, padding: *padding },
-        WireOpKind::Conv1dBackwardInput { stride, padding } => OpKind::Conv1dBackwardInput { stride: *stride, padding: *padding },
+        WireOpKind::Conv2dBackwardInput { stride, padding, groups } => OpKind::Conv2dBackwardInput { stride: *stride, padding: *padding, groups: *groups },
+        WireOpKind::Conv2dBackwardWeight { stride, padding, groups } => OpKind::Conv2dBackwardWeight { stride: *stride, padding: *padding, groups: *groups },
+        WireOpKind::Conv1dBackwardInput { stride, padding, groups } => OpKind::Conv1dBackwardInput { stride: *stride, padding: *padding, groups: *groups },
         WireOpKind::EmbeddingBackward => OpKind::EmbeddingBackward,
+        WireOpKind::ScatterWrite => OpKind::ScatterWrite,
+        WireOpKind::ScatterAdd => OpKind::ScatterAdd,
         WireOpKind::BatchNormBackward { eps } => OpKind::BatchNormBackward { eps: *eps },
         WireOpKind::Cast { target_dtype } => {
             let dt = DType::from_wire(*target_dtype as u32)
@@ -925,6 +962,9 @@ pub fn wire_op_to_core(wire: &WireOpKind) -> OpKind {
         WireOpKind::MaxPool2dWithIndices { kernel_size, stride, padding, indices_id } => {
             OpKind::MaxPool2dWithIndices { kernel_size: *kernel_size, stride: *stride, padding: *padding, indices_id: *indices_id }
         }
+        WireOpKind::GeluExact => OpKind::GeluExact,
+        WireOpKind::GeluExactBackward => OpKind::GeluExactBackward,
+        WireOpKind::GeluTanhBackward => OpKind::GeluTanhBackward,
     }
 }
 

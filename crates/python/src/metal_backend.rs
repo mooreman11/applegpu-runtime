@@ -480,14 +480,14 @@ impl Backend for MetalBackend {
     }
 
     // CNN ops
-    fn conv1d(&self, input: u64, weight: u64, stride: usize, padding: usize) -> BackendResult<u64> {
+    fn conv1d(&self, input: u64, weight: u64, stride: usize, padding: usize, groups: usize) -> BackendResult<u64> {
         let mut rt = self.runtime.lock().unwrap();
-        map_err!(applegpu_core::ops::conv1d(&mut rt, input, weight, stride, padding))
+        map_err!(applegpu_core::ops::conv1d(&mut rt, input, weight, stride, padding, groups))
     }
 
-    fn conv2d(&self, input: u64, weight: u64, stride: (usize, usize), padding: (usize, usize)) -> BackendResult<u64> {
+    fn conv2d(&self, input: u64, weight: u64, stride: (usize, usize), padding: (usize, usize), groups: usize) -> BackendResult<u64> {
         let mut rt = self.runtime.lock().unwrap();
-        map_err!(applegpu_core::ops::conv2d(&mut rt, input, weight, stride, padding))
+        map_err!(applegpu_core::ops::conv2d(&mut rt, input, weight, stride, padding, groups))
     }
 
     fn batch_norm(&self, input: u64, mean: u64, var: u64, weight: u64, bias: u64, eps: f32) -> BackendResult<u64> {
@@ -521,19 +521,34 @@ impl Backend for MetalBackend {
         map_err!(applegpu_core::ops::layer_norm_backward(&mut rt, grad, input, gamma, eps))
     }
 
-    fn conv2d_backward_input(&self, grad: u64, weight: u64, in_h: usize, in_w: usize, stride: (usize, usize), padding: (usize, usize)) -> BackendResult<u64> {
+    fn conv2d_backward_input(&self, grad: u64, weight: u64, in_h: usize, in_w: usize, stride: (usize, usize), padding: (usize, usize), groups: usize) -> BackendResult<u64> {
         let mut rt = self.runtime.lock().unwrap();
-        map_err!(applegpu_core::ops::conv2d_backward_input(&mut rt, grad, weight, in_h, in_w, stride, padding))
+        map_err!(applegpu_core::ops::conv2d_backward_input(&mut rt, grad, weight, in_h, in_w, stride, padding, groups))
     }
 
-    fn conv1d_backward_input(&self, grad: u64, weight: u64, in_channels: usize, in_len: usize, stride: usize, padding: usize) -> BackendResult<u64> {
+    fn conv2d_backward_weight(&self, grad: u64, input: u64, kh: usize, kw: usize, out_channels: usize, in_channels: usize, stride: (usize, usize), padding: (usize, usize), groups: usize) -> BackendResult<u64> {
         let mut rt = self.runtime.lock().unwrap();
-        map_err!(applegpu_core::ops::conv1d_backward_input(&mut rt, grad, weight, in_channels, in_len, stride, padding))
+        map_err!(applegpu_core::ops::conv2d_backward_weight(&mut rt, grad, input, kh, kw, out_channels, in_channels, stride, padding, groups))
+    }
+
+    fn conv1d_backward_input(&self, grad: u64, weight: u64, in_channels: usize, in_len: usize, stride: usize, padding: usize, groups: usize) -> BackendResult<u64> {
+        let mut rt = self.runtime.lock().unwrap();
+        map_err!(applegpu_core::ops::conv1d_backward_input(&mut rt, grad, weight, in_channels, in_len, stride, padding, groups))
     }
 
     fn embedding_backward(&self, grad: u64, indices: u64, num_weights: usize) -> BackendResult<u64> {
         let mut rt = self.runtime.lock().unwrap();
         map_err!(applegpu_core::ops::embedding_backward(&mut rt, grad, indices, num_weights))
+    }
+
+    fn scatter_write(&self, input: u64, indices: u64, values: u64) -> BackendResult<u64> {
+        let mut rt = self.runtime.lock().unwrap();
+        map_err!(applegpu_core::ops::scatter_write(&mut rt, input, indices, values))
+    }
+
+    fn scatter_add(&self, input: u64, indices: u64, values: u64) -> BackendResult<u64> {
+        let mut rt = self.runtime.lock().unwrap();
+        map_err!(applegpu_core::ops::scatter_add(&mut rt, input, indices, values))
     }
 
     fn batch_norm_backward(&self, grad: u64, weight: u64, var: u64, eps: f32) -> BackendResult<u64> {
