@@ -1091,21 +1091,19 @@ def _op_scalar_tensor(val, dtype=None, layout=None, device=None, pin_memory=None
 
 @register_op(torch.ops.aten.copy_.default)
 def _op_copy_(dst, src, non_blocking=False):
-    """In-place copy of src into dst.
-
-    TODO: GPU→GPU copy goes through CPU (to_torch_cpu → from_torch). A Metal
-    blit encoder (MTLBlitCommandEncoder.copy) would do GPU→GPU directly.
-    """
-    if isinstance(src, ApplegpuTensor):
-        cpu_data = src.to_torch_cpu()
-        new_gpu = gpu.from_torch(cpu_data)
-    elif isinstance(src, torch.Tensor):
-        new_gpu = gpu.from_torch(src)
-    else:
-        return dst
-    # Update both the direct attribute and the registry
-    dst._gpu_tensor = new_gpu
-    _gpu_tensor_registry[dst.data_ptr()] = new_gpu
+    """In-place copy — GPU blit when both are on GPU, CPU fallback otherwise."""
+    if isinstance(dst, ApplegpuTensor) and isinstance(src, ApplegpuTensor):
+        try:
+            gpu.blit_copy(_unwrap(src), _unwrap(dst))
+            return dst
+        except (RuntimeError, ValueError):
+            pass  # Fall through to CPU path
+    # CPU fallback
+    src_cpu = src.to_torch_cpu() if isinstance(src, ApplegpuTensor) else src
+    new_gpu = gpu.from_torch(src_cpu)
+    if isinstance(dst, ApplegpuTensor):
+        dst._gpu_tensor = new_gpu
+        _gpu_tensor_registry[dst.data_ptr()] = new_gpu
     return dst
 
 
@@ -1420,15 +1418,35 @@ def _op_unsafe_split(a, split_size, dim=0):
 
 @register_op(torch.ops.aten.linalg_vector_norm.default)
 def _op_linalg_vector_norm(a, ord=2.0, dim=None, keepdim=False, dtype=None):
-    """Vector norm reduction. Falls back to CPU.
-
-    TODO: CPU fallback. For L2 norm (most common), a Metal kernel computing
-    sum of squares then sqrt would work. Called once per training step for
-    gradient clipping — not a hot-path bottleneck.
-    """
-    a_cpu = a.to_torch_cpu() if isinstance(a, ApplegpuTensor) else a
-    result = torch.ops.aten.linalg_vector_norm.default(a_cpu, ord, dim, keepdim, dtype=dtype)
-    return ApplegpuTensor.from_torch(result)
+    """Vector norm — GPU-composed for L1/L2, CPU fallback for others."""
+    if ord == 2.0:
+        # L2: sqrt(sum(x^2))
+        gpu_a = _unwrap(a)
+        squared = _wrap(gpu.mul(gpu_a, gpu_a))
+        if dim is not None:
+            if isinstance(dim, int):
+                dim = [dim]
+            summed = _op_sum(squared, dim, keepdim=keepdim)
+        else:
+            summed = _op_sum_default(squared)
+        return _wrap(gpu.sqrt(_unwrap(summed)))
+    elif ord == 1.0:
+        # L1: sum(|x|)
+        gpu_a = _unwrap(a)
+        abs_wrapped = _wrap(gpu.abs(gpu_a))
+        if dim is not None:
+            if isinstance(dim, int):
+                dim = [dim]
+            return _op_sum(abs_wrapped, dim, keepdim=keepdim)
+        else:
+            return _op_sum_default(abs_wrapped)
+    else:
+        # Other norms (inf, etc.) — CPU fallback
+        kwargs = {}
+        if dtype is not None:
+            kwargs['dtype'] = dtype
+        return _cpu_fallback(torch.ops.aten.linalg_vector_norm.default,
+                             (a, ord, dim, keepdim), kwargs)
 
 
 @register_op(torch.ops.aten._unique2.default)

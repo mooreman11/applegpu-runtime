@@ -2205,6 +2205,47 @@ impl LazyRuntime {
         Ok(())
     }
 
+    /// Direct GPU→GPU blit copy from src tensor to dst tensor.
+    /// Both must be materialized with the same dtype and total size.
+    pub fn blit_copy(&self, device: &Device, src: u64, dst: u64) -> Result<()> {
+        let src_tensor = self.get_tensor(src)?;
+        let dst_tensor = self.get_tensor(dst)?;
+        if src_tensor.meta.dtype != dst_tensor.meta.dtype {
+            return Err(GpuError::ComputeFailed(format!(
+                "blit_copy dtype mismatch: src={:?}, dst={:?}",
+                src_tensor.meta.dtype, dst_tensor.meta.dtype
+            )));
+        }
+        let size_bytes = src_tensor.meta.size_bytes();
+        if size_bytes != dst_tensor.meta.size_bytes() {
+            return Err(GpuError::ComputeFailed(format!(
+                "blit_copy size mismatch: src={} bytes, dst={} bytes",
+                size_bytes, dst_tensor.meta.size_bytes()
+            )));
+        }
+        if size_bytes == 0 {
+            return Ok(());
+        }
+        if src_tensor.buffer.raw_handle() == dst_tensor.buffer.raw_handle() {
+            return Ok(());
+        }
+        let queue = crate::compute::get_shared_queue(device);
+        let cb = unsafe {
+            ffi::gpu_bridge_blit_copy_nb(
+                device.raw_handle() as *mut _,
+                queue,
+                src_tensor.buffer.raw_handle(),
+                dst_tensor.buffer.raw_handle(),
+                size_bytes as u64,
+            )
+        };
+        if cb.is_null() {
+            return Err(GpuError::ComputeFailed("blit_copy failed: null command buffer".to_string()));
+        }
+        crate::compute::wait_command_buffer(cb);
+        Ok(())
+    }
+
     /// Remove a tensor without scheduler tracking (for deregister cleanup).
     pub fn remove_tensor_raw(&mut self, id: u64) {
         if let Some(tensor) = self.tensors.remove(&id) {

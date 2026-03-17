@@ -1185,6 +1185,14 @@ impl Backend for SocketBackend {
     }
 
     // -----------------------------------------------------------------------
+    // Direct GPU→GPU blit copy — not supported over socket
+    // -----------------------------------------------------------------------
+
+    fn blit_copy(&self, _src: u64, _dst: u64) -> BackendResult<()> {
+        Err("blit_copy not supported on socket backend".to_string())
+    }
+
+    // -----------------------------------------------------------------------
     // Resource management — local tracking only
     // -----------------------------------------------------------------------
 

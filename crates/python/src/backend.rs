@@ -165,6 +165,9 @@ pub trait Backend: Send + Sync {
     fn gelu_backward(&self, grad_output: u64, input: u64) -> BackendResult<u64>;
     fn max_pool2d_backward(&self, grad_output: u64, indices: u64, batch: usize, channels: usize, in_h: usize, in_w: usize) -> BackendResult<u64>;
 
+    // Direct GPU→GPU copy
+    fn blit_copy(&self, src: u64, dst: u64) -> BackendResult<()>;
+
     // Resource management
     fn set_limits(&self, max_tensor_size_mb: usize, max_memory_mb: usize, max_tensors: usize);
     fn memory_usage(&self) -> usize;

@@ -1187,6 +1187,11 @@ fn max_pool2d_backward(grad_output: &GpuTensor, indices: &GpuTensor, batch: usiz
     wrap_tensor(BACKEND.max_pool2d_backward(grad_output.id, indices.id, batch, channels, in_h, in_w))
 }
 
+#[pyfunction]
+fn blit_copy(src: &GpuTensor, dst: &GpuTensor) -> PyResult<()> {
+    BACKEND.blit_copy(src.id, dst.id).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+}
+
 #[pymodule]
 fn applegpu_runtime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<GpuTensor>()?;
@@ -1300,5 +1305,6 @@ fn applegpu_runtime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(sigmoid_backward, m)?)?;
     m.add_function(wrap_pyfunction!(gelu_backward, m)?)?;
     m.add_function(wrap_pyfunction!(max_pool2d_backward, m)?)?;
+    m.add_function(wrap_pyfunction!(blit_copy, m)?)?;
     Ok(())
 }

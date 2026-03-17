@@ -556,6 +556,16 @@ impl Backend for MetalBackend {
         map_err!(applegpu_core::ops::max_pool2d_backward(&mut rt, grad_output, indices, batch, channels, in_h, in_w))
     }
 
+    // Direct GPU→GPU blit copy
+    fn blit_copy(&self, src: u64, dst: u64) -> BackendResult<()> {
+        let mut rt = self.runtime.lock().unwrap();
+        // Auto-eval both tensors to ensure they are materialized
+        auto_eval(&mut rt, src)?;
+        auto_eval(&mut rt, dst)?;
+        let runtime = get_device_runtime()?;
+        map_err!(rt.blit_copy(&runtime.device, src, dst))
+    }
+
     // Resource management
     fn set_limits(&self, max_tensor_size_mb: usize, max_memory_mb: usize, max_tensors: usize) {
         let mut rt = self.runtime.lock().unwrap();
