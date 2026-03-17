@@ -565,6 +565,41 @@ def _op_zeros_like(a, dtype=None, layout=None, device=None, pin_memory=None, mem
     return _wrap(gpu_t, torch_dtype=torch_dtype)
 
 
+@register_op(torch.ops.aten.linspace.default)
+def _op_linspace(start, end, steps, dtype=None, layout=None, device=None, pin_memory=None):
+    """Create linearly spaced tensor on GPU. Uses numpy for fast generation, single memcpy to Metal.
+
+    TODO: No dedicated Metal kernel — data is generated on CPU via numpy and copied.
+    A GPU kernel computing `start + id * step` per thread would avoid the copy,
+    but linspace is typically called once during model init (positional encodings),
+    not on the hot path. The numpy→Metal memcpy is negligible for typical sizes.
+    """
+    import numpy as np
+    steps = int(steps)
+    data = np.linspace(float(start), float(end), steps, dtype=np.float32)
+    return _wrap(gpu.from_numpy(data))
+
+
+@register_op(torch.ops.aten.normal_.default)
+def _op_normal_(a, mean=0.0, std=1.0, generator=None):
+    """Fill with random normal values. Generated on CPU, transferred to GPU."""
+    import numpy as np
+    if isinstance(a, ApplegpuTensor):
+        shape = tuple(a.shape)
+    else:
+        shape = tuple(a.shape)
+    n = 1
+    for s in shape:
+        n *= s
+    data = np.random.normal(float(mean), float(std), n).astype(np.float32)
+    new_gpu = gpu.from_numpy(data.reshape(shape))
+    # Replace the GPU tensor on the ApplegpuTensor in-place
+    if isinstance(a, ApplegpuTensor):
+        a._gpu_tensor = new_gpu
+        _gpu_tensor_registry[a.data_ptr()] = new_gpu
+    return a
+
+
 @register_op(torch.ops.aten.new_empty_strided.default)
 def _op_new_empty_strided(a, size, stride, dtype=None, layout=None, device=None, pin_memory=None):
     """Create empty tensor with given size (ignore stride — always contiguous)."""
@@ -1092,6 +1127,39 @@ def _op_stack(tensors, dim=0):
     for t in reshaped[1:]:
         result = gpu.concat(result, t, dim)
     return _wrap(result)
+
+
+@register_op(torch.ops.aten.index.Tensor)
+def _op_index_tensor(a, indices):
+    """Advanced/boolean indexing. Falls back to CPU for irregular access patterns."""
+    a_cpu = a.to_torch_cpu() if isinstance(a, ApplegpuTensor) else a
+    idx_cpu = []
+    for idx in indices:
+        if idx is None:
+            idx_cpu.append(None)
+        elif isinstance(idx, ApplegpuTensor):
+            idx_cpu.append(idx.to_torch_cpu())
+        else:
+            idx_cpu.append(idx)
+    result = torch.ops.aten.index.Tensor(a_cpu, idx_cpu)
+    return ApplegpuTensor.from_torch(result)
+
+
+@register_op(torch.ops.aten.index_put_.default)
+def _op_index_put_(a, indices, values, accumulate=False):
+    """Advanced index assignment. Falls back to CPU."""
+    a_cpu = a.to_torch_cpu() if isinstance(a, ApplegpuTensor) else a
+    idx_cpu = []
+    for idx in indices:
+        if idx is None:
+            idx_cpu.append(None)
+        elif isinstance(idx, ApplegpuTensor):
+            idx_cpu.append(idx.to_torch_cpu())
+        else:
+            idx_cpu.append(idx)
+    v_cpu = values.to_torch_cpu() if isinstance(values, ApplegpuTensor) else values
+    result = torch.ops.aten.index_put_(a_cpu, idx_cpu, v_cpu, accumulate)
+    return ApplegpuTensor.from_torch(result)
 
 
 @register_op(torch.ops.aten.select.int)
