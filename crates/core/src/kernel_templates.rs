@@ -1537,6 +1537,58 @@ kernel void threshold_backward{s}(device const {t}* grad_output [[buffer(0)]], d
     )
 }
 
+pub fn tanh_backward_kernel_source(dtype: DType) -> String {
+    let t = metal_type(dtype);
+    let s = dtype_suffix(dtype);
+    let acc = needs_float_acc(dtype);
+    let load_out = if acc { "float(output[id])".to_string() } else { "output[id]".to_string() };
+    let load_grad = if acc { "float(grad_output[id])".to_string() } else { "grad_output[id]".to_string() };
+    let store = if acc { format!("{}(result)", t) } else { "result".to_string() };
+    format!(
+        r#"#include <metal_stdlib>
+using namespace metal;
+
+kernel void tanh_backward{s}(device const {t}* grad_output [[buffer(0)]], device const {t}* output [[buffer(1)]], device {t}* grad_input [[buffer(2)]], constant uint& numel [[buffer(3)]], uint id [[thread_position_in_grid]]) {{
+    if (id >= numel) return;
+    float out_val = {load_out};
+    float go = {load_grad};
+    float result = go * (1.0f - out_val * out_val);
+    grad_input[id] = {store};
+}}
+"#,
+        t = t, s = s,
+        load_out = load_out,
+        load_grad = load_grad,
+        store = store,
+    )
+}
+
+pub fn sigmoid_backward_kernel_source(dtype: DType) -> String {
+    let t = metal_type(dtype);
+    let s = dtype_suffix(dtype);
+    let acc = needs_float_acc(dtype);
+    let load_out = if acc { "float(output[id])".to_string() } else { "output[id]".to_string() };
+    let load_grad = if acc { "float(grad_output[id])".to_string() } else { "grad_output[id]".to_string() };
+    let store = if acc { format!("{}(result)", t) } else { "result".to_string() };
+    format!(
+        r#"#include <metal_stdlib>
+using namespace metal;
+
+kernel void sigmoid_backward{s}(device const {t}* grad_output [[buffer(0)]], device const {t}* output [[buffer(1)]], device {t}* grad_input [[buffer(2)]], constant uint& numel [[buffer(3)]], uint id [[thread_position_in_grid]]) {{
+    if (id >= numel) return;
+    float out_val = {load_out};
+    float go = {load_grad};
+    float result = go * out_val * (1.0f - out_val);
+    grad_input[id] = {store};
+}}
+"#,
+        t = t, s = s,
+        load_out = load_out,
+        load_grad = load_grad,
+        store = store,
+    )
+}
+
 // ── Task 10: Cast op kernel ─────────────────────────────────────────────────
 
 /// Generate cast kernel source (convert from src dtype to dst dtype).

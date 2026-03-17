@@ -491,6 +491,36 @@ impl LazyRuntime {
             return Ok(out);
         }
 
+        if node.op.is_tanh_backward() {
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+            let grad_output = self.get_tensor(node.inputs[0])?;
+            let output = self.get_tensor(node.inputs[1])?;
+            let numel: usize = node.out_shape.dims().iter().product();
+            let (k_src, k_fn) = KernelRegistry::resolve_kernel("tanh_backward", dtype);
+            REGISTRY.dispatch_cnn_3d(
+                device, &k_src, &k_fn,
+                &[&grad_output.buffer, &output.buffer], &out.buffer,
+                &[numel as u32], &[], (numel as u32, 1, 1),
+            )?;
+            return Ok(out);
+        }
+
+        if node.op.is_sigmoid_backward() {
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+            let grad_output = self.get_tensor(node.inputs[0])?;
+            let output = self.get_tensor(node.inputs[1])?;
+            let numel: usize = node.out_shape.dims().iter().product();
+            let (k_src, k_fn) = KernelRegistry::resolve_kernel("sigmoid_backward", dtype);
+            REGISTRY.dispatch_cnn_3d(
+                device, &k_src, &k_fn,
+                &[&grad_output.buffer, &output.buffer], &out.buffer,
+                &[numel as u32], &[], (numel as u32, 1, 1),
+            )?;
+            return Ok(out);
+        }
+
         if let crate::graph::OpKind::Transpose { dim0, dim1 } = node.op {
             let out_buf = self.pool.acquire(device, out_size)?;
             let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
@@ -1292,6 +1322,30 @@ impl LazyRuntime {
                 device, &k_src, &k_fn, queue,
                 &[&grad_output.buffer, &input.buffer], &out.buffer,
                 &[numel as u32], &[threshold], (numel as u32, 1, 1),
+            );
+        }
+
+        if node.op.is_tanh_backward() {
+            let grad_output = self.get_tensor(node.inputs[0])?;
+            let output = self.get_tensor(node.inputs[1])?;
+            let numel: usize = node.out_shape.dims().iter().product();
+            let (k_src, k_fn) = KernelRegistry::resolve_kernel("tanh_backward", dtype);
+            return REGISTRY.dispatch_cnn_3d_nb(
+                device, &k_src, &k_fn, queue,
+                &[&grad_output.buffer, &output.buffer], &out.buffer,
+                &[numel as u32], &[], (numel as u32, 1, 1),
+            );
+        }
+
+        if node.op.is_sigmoid_backward() {
+            let grad_output = self.get_tensor(node.inputs[0])?;
+            let output = self.get_tensor(node.inputs[1])?;
+            let numel: usize = node.out_shape.dims().iter().product();
+            let (k_src, k_fn) = KernelRegistry::resolve_kernel("sigmoid_backward", dtype);
+            return REGISTRY.dispatch_cnn_3d_nb(
+                device, &k_src, &k_fn, queue,
+                &[&grad_output.buffer, &output.buffer], &out.buffer,
+                &[numel as u32], &[], (numel as u32, 1, 1),
             );
         }
 

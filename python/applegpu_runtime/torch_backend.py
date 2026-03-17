@@ -493,28 +493,16 @@ def _op_gelu_backward(grad_output, self_tensor, approximate="none"):
 
 @register_op(torch.ops.aten.tanh_backward.default)
 def _op_tanh_backward(grad_output, output):
-    """Backward for tanh: grad * (1 - output^2).
-
-    TODO: CPU fallback. Metal kernel: `out[id] = grad[id] * (1 - output[id] * output[id])`.
-    Trivial element-wise — just needs mul and sub ops composed on GPU.
-    """
-    out_cpu = output.to_torch_cpu() if isinstance(output, ApplegpuTensor) else output
-    grad_cpu = grad_output.to_torch_cpu() if isinstance(grad_output, ApplegpuTensor) else grad_output
-    result = grad_cpu * (1 - out_cpu ** 2)
-    return ApplegpuTensor.from_torch(result)
+    """Backward for tanh: grad * (1 - output^2) — Metal GPU."""
+    return _wrap(gpu.tanh_backward(_unwrap(grad_output), _unwrap(output)),
+                 torch_dtype=grad_output.dtype, requires_grad=grad_output.requires_grad)
 
 
 @register_op(torch.ops.aten.sigmoid_backward.default)
 def _op_sigmoid_backward(grad_output, output):
-    """Backward for sigmoid: grad * output * (1 - output).
-
-    TODO: CPU fallback. Metal kernel: `out[id] = grad[id] * output[id] * (1 - output[id])`.
-    Trivial element-wise — could compose from existing mul/sub ops on GPU.
-    """
-    out_cpu = output.to_torch_cpu() if isinstance(output, ApplegpuTensor) else output
-    grad_cpu = grad_output.to_torch_cpu() if isinstance(grad_output, ApplegpuTensor) else grad_output
-    result = grad_cpu * out_cpu * (1 - out_cpu)
-    return ApplegpuTensor.from_torch(result)
+    """Backward for sigmoid: grad * output * (1 - output) — Metal GPU."""
+    return _wrap(gpu.sigmoid_backward(_unwrap(grad_output), _unwrap(output)),
+                 torch_dtype=grad_output.dtype, requires_grad=grad_output.requires_grad)
 
 
 @register_op(torch.ops.aten.mul.Scalar)

@@ -124,6 +124,8 @@ pub enum OpKind {
     EmbeddingBackward,
     BatchNormBackward { eps: f32 },
     ThresholdBackward { threshold: f32 },
+    TanhBackward,
+    SigmoidBackward,
     // Comparison ops (output is always Bool)
     Lt, Gt, Le, Ge, Eq, Ne,
     // Bitwise ops (integer + Bool)
@@ -200,6 +202,8 @@ impl OpKind {
             OpKind::EmbeddingBackward => "embedding_backward",
             OpKind::BatchNormBackward { .. } => "batch_norm_backward",
             OpKind::ThresholdBackward { .. } => "threshold_backward",
+            OpKind::TanhBackward => "tanh_backward",
+            OpKind::SigmoidBackward => "sigmoid_backward",
             OpKind::Lt => "lt",
             OpKind::Gt => "gt",
             OpKind::Le => "le",
@@ -398,6 +402,14 @@ impl OpKind {
 
     pub fn is_threshold_backward(&self) -> bool {
         matches!(self, OpKind::ThresholdBackward { .. })
+    }
+
+    pub fn is_tanh_backward(&self) -> bool {
+        matches!(self, OpKind::TanhBackward)
+    }
+
+    pub fn is_sigmoid_backward(&self) -> bool {
+        matches!(self, OpKind::SigmoidBackward)
     }
 }
 

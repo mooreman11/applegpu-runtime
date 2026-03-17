@@ -126,6 +126,8 @@ fn op_to_discriminant(op: &OpKind) -> u32 {
         OpKind::Sigmoid => 68,
         OpKind::Var { .. } => 69,
         OpKind::ThresholdBackward { .. } => 70,
+        OpKind::TanhBackward => 71,
+        OpKind::SigmoidBackward => 72,
     }
 }
 
@@ -367,6 +369,8 @@ fn discriminant_to_op(d: u32, r: &mut impl Read) -> io::Result<OpKind> {
             r.read_exact(&mut t_bytes)?;
             Ok(OpKind::ThresholdBackward { threshold: f32::from_le_bytes(t_bytes) })
         }
+        71 => Ok(OpKind::TanhBackward),
+        72 => Ok(OpKind::SigmoidBackward),
         _ => Err(io::Error::new(io::ErrorKind::InvalidData, format!("Unknown op type: {}", d))),
     }
 }
@@ -755,6 +759,8 @@ impl From<&OpKind> for WireOpKind {
                 WireOpKind::Dequantize { scale: *scale, zero_point: *zero_point, target_dtype: target_dtype.to_wire() as u8 }
             }
             OpKind::ThresholdBackward { threshold } => WireOpKind::ThresholdBackward { threshold: *threshold },
+            OpKind::TanhBackward => WireOpKind::TanhBackward,
+            OpKind::SigmoidBackward => WireOpKind::SigmoidBackward,
         }
     }
 }
@@ -863,6 +869,8 @@ pub fn wire_op_to_core(wire: &WireOpKind) -> OpKind {
             OpKind::Dequantize { scale: *scale, zero_point: *zero_point, target_dtype: dt }
         }
         WireOpKind::ThresholdBackward { threshold } => OpKind::ThresholdBackward { threshold: *threshold },
+        WireOpKind::TanhBackward => OpKind::TanhBackward,
+        WireOpKind::SigmoidBackward => OpKind::SigmoidBackward,
     }
 }
 

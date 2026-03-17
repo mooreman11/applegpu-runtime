@@ -45,7 +45,8 @@ pub fn validate_op_dtype(op: &OpKind, dtype: DType) -> Result<()> {
         OpKind::SoftmaxBackward | OpKind::LayerNormBackward { .. } |
         OpKind::Conv2dBackwardInput { .. } | OpKind::EmbeddingBackward |
         OpKind::BatchNormBackward { .. } |
-        OpKind::ThresholdBackward { .. } => {
+        OpKind::ThresholdBackward { .. } |
+        OpKind::TanhBackward | OpKind::SigmoidBackward => {
             if !dtype.is_float() {
                 return Err(GpuError::UnsupportedDtype(format!(
                     "{:?} requires a float dtype, got {}", op, dtype.name()
@@ -896,6 +897,54 @@ pub fn threshold_backward(rt: &mut LazyRuntime, grad_output_id: u64, input_id: u
         id: out_id,
         op: OpKind::ThresholdBackward { threshold },
         inputs: vec![grad_output_id, input_id],
+        out_shape: Shape::new(shape)?,
+        out_dtype: dtype,
+        container_id: ContainerId::DEFAULT,
+    });
+    Ok(out_id)
+}
+
+/// Tanh backward: grad_output * (1 - output^2).
+/// Receives the forward OUTPUT (tanh(x)), not the original input.
+pub fn tanh_backward(rt: &mut LazyRuntime, grad_output_id: u64, output_id: u64) -> Result<u64> {
+    let dtype = rt.dtype(grad_output_id)?;
+    validate_op_dtype(&OpKind::TanhBackward, dtype)?;
+    let shape = rt.shape(grad_output_id)?;
+    let out_shape = rt.shape(output_id)?;
+    if shape != out_shape {
+        return Err(GpuError::InvalidTensor(format!(
+            "tanh_backward shape mismatch: grad {:?} vs output {:?}", shape, out_shape
+        )));
+    }
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op: OpKind::TanhBackward,
+        inputs: vec![grad_output_id, output_id],
+        out_shape: Shape::new(shape)?,
+        out_dtype: dtype,
+        container_id: ContainerId::DEFAULT,
+    });
+    Ok(out_id)
+}
+
+/// Sigmoid backward: grad_output * output * (1 - output).
+/// Receives the forward OUTPUT (sigmoid(x)), not the original input.
+pub fn sigmoid_backward(rt: &mut LazyRuntime, grad_output_id: u64, output_id: u64) -> Result<u64> {
+    let dtype = rt.dtype(grad_output_id)?;
+    validate_op_dtype(&OpKind::SigmoidBackward, dtype)?;
+    let shape = rt.shape(grad_output_id)?;
+    let out_shape = rt.shape(output_id)?;
+    if shape != out_shape {
+        return Err(GpuError::InvalidTensor(format!(
+            "sigmoid_backward shape mismatch: grad {:?} vs output {:?}", shape, out_shape
+        )));
+    }
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op: OpKind::SigmoidBackward,
+        inputs: vec![grad_output_id, output_id],
         out_shape: Shape::new(shape)?,
         out_dtype: dtype,
         container_id: ContainerId::DEFAULT,
@@ -4543,5 +4592,55 @@ mod tests {
         rt.eval(&device, out_id).unwrap();
         let data = rt.read_f32(out_id).unwrap();
         assert_eq!(data, vec![0.0, 2.0, 0.0, 4.0]);
+    }
+
+    #[test]
+    fn test_tanh_backward() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        let grad = Tensor::from_f32(&device, vec![4], &[1.0, 2.0, 3.0, 4.0]).unwrap();
+        let output = Tensor::from_f32(&device, vec![4], &[0.5, -0.3, 0.9, 0.0]).unwrap();
+        let grad_id = grad.meta.id;
+        let output_id = output.meta.id;
+        rt.insert_tensor(grad).unwrap();
+        rt.insert_tensor(output).unwrap();
+        let out_id = tanh_backward(&mut rt, grad_id, output_id).unwrap();
+        rt.eval(&device, out_id).unwrap();
+        let data = rt.read_f32(out_id).unwrap();
+        // expected: grad * (1 - output^2)
+        let expected = vec![
+            1.0 * (1.0 - 0.5 * 0.5),
+            2.0 * (1.0 - (-0.3) * (-0.3)),
+            3.0 * (1.0 - 0.9 * 0.9),
+            4.0 * (1.0 - 0.0 * 0.0),
+        ];
+        for (a, b) in data.iter().zip(expected.iter()) {
+            assert!((a - b).abs() < 1e-5, "got {} expected {}", a, b);
+        }
+    }
+
+    #[test]
+    fn test_sigmoid_backward() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        let grad = Tensor::from_f32(&device, vec![4], &[1.0, 2.0, 3.0, 4.0]).unwrap();
+        let output = Tensor::from_f32(&device, vec![4], &[0.5, 0.3, 0.8, 0.0]).unwrap();
+        let grad_id = grad.meta.id;
+        let output_id = output.meta.id;
+        rt.insert_tensor(grad).unwrap();
+        rt.insert_tensor(output).unwrap();
+        let out_id = sigmoid_backward(&mut rt, grad_id, output_id).unwrap();
+        rt.eval(&device, out_id).unwrap();
+        let data = rt.read_f32(out_id).unwrap();
+        // expected: grad * output * (1 - output)
+        let expected = vec![
+            1.0 * 0.5 * (1.0 - 0.5),
+            2.0 * 0.3 * (1.0 - 0.3),
+            3.0 * 0.8 * (1.0 - 0.8),
+            4.0 * 0.0 * (1.0 - 0.0),
+        ];
+        for (a, b) in data.iter().zip(expected.iter()) {
+            assert!((a - b).abs() < 1e-5, "got {} expected {}", a, b);
+        }
     }
 }

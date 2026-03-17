@@ -105,6 +105,8 @@ from applegpu_runtime.applegpu_runtime import (
     embedding_backward,
     batch_norm_backward,
     threshold_backward,
+    tanh_backward,
+    sigmoid_backward,
 )
 
 __version__ = version()
@@ -336,4 +338,6 @@ __all__ = [
     "embedding_backward",
     "batch_norm_backward",
     "threshold_backward",
+    "tanh_backward",
+    "sigmoid_backward",
 ]

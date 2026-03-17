@@ -1160,6 +1160,16 @@ fn threshold_backward(grad_output: &GpuTensor, input: &GpuTensor, threshold: f32
     wrap_tensor(BACKEND.threshold_backward(grad_output.id, input.id, threshold))
 }
 
+#[pyfunction]
+fn tanh_backward(grad_output: &GpuTensor, output: &GpuTensor) -> PyResult<GpuTensor> {
+    wrap_tensor(BACKEND.tanh_backward(grad_output.id, output.id))
+}
+
+#[pyfunction]
+fn sigmoid_backward(grad_output: &GpuTensor, output: &GpuTensor) -> PyResult<GpuTensor> {
+    wrap_tensor(BACKEND.sigmoid_backward(grad_output.id, output.id))
+}
+
 #[pymodule]
 fn applegpu_runtime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<GpuTensor>()?;
@@ -1268,5 +1278,7 @@ fn applegpu_runtime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(embedding_backward, m)?)?;
     m.add_function(wrap_pyfunction!(batch_norm_backward, m)?)?;
     m.add_function(wrap_pyfunction!(threshold_backward, m)?)?;
+    m.add_function(wrap_pyfunction!(tanh_backward, m)?)?;
+    m.add_function(wrap_pyfunction!(sigmoid_backward, m)?)?;
     Ok(())
 }

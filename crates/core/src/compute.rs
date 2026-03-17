@@ -1484,6 +1484,8 @@ impl KernelRegistry {
             "embedding_backward" => kt::embedding_backward_kernel_source(dtype),
             "batch_norm_backward" => kt::batch_norm_backward_kernel_source(dtype),
             "threshold_backward" => kt::threshold_backward_kernel_source(dtype),
+            "tanh_backward" => kt::tanh_backward_kernel_source(dtype),
+            "sigmoid_backward" => kt::sigmoid_backward_kernel_source(dtype),
             "transpose" => return (kt::byte_copy_transpose_source(dtype.size_bytes()), format!("transpose_bytes{}", dtype.size_bytes())),
             "transpose_batched" => kt::transpose_batched_kernel_source(dtype),
             "copy_strided" => kt::copy_strided_kernel_source(dtype),

@@ -240,6 +240,10 @@ pub enum WireOpKind {
     LogSoftmax,
     // 70: threshold backward
     ThresholdBackward { threshold: f32 },
+    // 71: tanh backward
+    TanhBackward,
+    // 72: sigmoid backward
+    SigmoidBackward,
 }
 
 impl WireOpKind {
@@ -316,6 +320,8 @@ impl WireOpKind {
             WireOpKind::Sigmoid => 68,
             WireOpKind::Var { .. } => 69,
             WireOpKind::ThresholdBackward { .. } => 70,
+            WireOpKind::TanhBackward => 71,
+            WireOpKind::SigmoidBackward => 72,
         }
     }
 
@@ -425,6 +431,7 @@ impl WireOpKind {
                 w.write_all(&[*target_dtype])
             }
             WireOpKind::ThresholdBackward { threshold } => write_f32(w, *threshold),
+            WireOpKind::TanhBackward | WireOpKind::SigmoidBackward => Ok(()),
         }
     }
 
@@ -586,6 +593,8 @@ impl WireOpKind {
             68 => Ok(WireOpKind::Sigmoid),
             69 => Ok(WireOpKind::Var { correction: read_u32(r)? }),
             70 => Ok(WireOpKind::ThresholdBackward { threshold: read_f32(r)? }),
+            71 => Ok(WireOpKind::TanhBackward),
+            72 => Ok(WireOpKind::SigmoidBackward),
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("Unknown op discriminant: {}", disc),

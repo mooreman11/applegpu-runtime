@@ -531,6 +531,16 @@ impl Backend for MetalBackend {
         map_err!(applegpu_core::ops::threshold_backward(&mut rt, grad_output, input, threshold))
     }
 
+    fn tanh_backward(&self, grad_output: u64, output: u64) -> BackendResult<u64> {
+        let mut rt = self.runtime.lock().unwrap();
+        map_err!(applegpu_core::ops::tanh_backward(&mut rt, grad_output, output))
+    }
+
+    fn sigmoid_backward(&self, grad_output: u64, output: u64) -> BackendResult<u64> {
+        let mut rt = self.runtime.lock().unwrap();
+        map_err!(applegpu_core::ops::sigmoid_backward(&mut rt, grad_output, output))
+    }
+
     // Resource management
     fn set_limits(&self, max_tensor_size_mb: usize, max_memory_mb: usize, max_tensors: usize) {
         let mut rt = self.runtime.lock().unwrap();

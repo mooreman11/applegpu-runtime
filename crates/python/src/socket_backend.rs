@@ -1165,6 +1165,14 @@ impl Backend for SocketBackend {
         Err("threshold_backward not yet implemented over socket backend".to_string())
     }
 
+    fn tanh_backward(&self, _grad_output: u64, _output: u64) -> BackendResult<u64> {
+        Err("tanh_backward not yet implemented over socket backend".to_string())
+    }
+
+    fn sigmoid_backward(&self, _grad_output: u64, _output: u64) -> BackendResult<u64> {
+        Err("sigmoid_backward not yet implemented over socket backend".to_string())
+    }
+
     // -----------------------------------------------------------------------
     // Resource management — local tracking only
     // -----------------------------------------------------------------------
