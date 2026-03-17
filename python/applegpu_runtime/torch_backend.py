@@ -394,6 +394,16 @@ def _op_sign(a):
     return _wrap(gpu.sign(_unwrap(a)))
 
 
+@register_op(torch.ops.aten.sin.default)
+def _op_sin(a):
+    return _wrap(gpu.sin(_unwrap(a)))
+
+
+@register_op(torch.ops.aten.cos.default)
+def _op_cos(a):
+    return _wrap(gpu.cos(_unwrap(a)))
+
+
 @register_op(torch.ops.aten.pow.Tensor_Scalar)
 def _op_pow(a, exponent):
     return _wrap(gpu.pow(_unwrap(a), float(exponent)))
