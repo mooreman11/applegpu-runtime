@@ -369,7 +369,8 @@ impl WireOpKind {
             | WireOpKind::BitwiseAnd | WireOpKind::BitwiseOr | WireOpKind::BitwiseXor
             | WireOpKind::BitwiseNot
             | WireOpKind::Mod | WireOpKind::ElemMin | WireOpKind::ElemMax
-            | WireOpKind::LogicalNot => Ok(()),
+            | WireOpKind::LogicalNot
+            | WireOpKind::ScatterWrite | WireOpKind::ScatterAdd => Ok(()),
 
             WireOpKind::FusedElementwise { kernel_source, function_name } => {
                 write_u32(w, kernel_source.len() as u32)?;
@@ -473,8 +474,7 @@ impl WireOpKind {
             WireOpKind::ThresholdBackward { threshold } => write_f32(w, *threshold),
             WireOpKind::TanhBackward | WireOpKind::SigmoidBackward | WireOpKind::GeluBackward |
             WireOpKind::MaxPool2dBackward |
-            WireOpKind::GeluExact | WireOpKind::GeluExactBackward | WireOpKind::GeluTanhBackward |
-            WireOpKind::ScatterWrite | WireOpKind::ScatterAdd => Ok(()),
+            WireOpKind::GeluExact | WireOpKind::GeluExactBackward | WireOpKind::GeluTanhBackward => Ok(()),
             WireOpKind::MaxPool2dWithIndices { kernel_size, stride, padding, indices_id } => {
                 write_u64(w, kernel_size.0 as u64)?;
                 write_u64(w, kernel_size.1 as u64)?;

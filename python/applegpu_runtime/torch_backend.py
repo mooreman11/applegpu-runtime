@@ -1152,13 +1152,26 @@ def _op_stack(tensors, dim=0):
 
 @register_op(torch.ops.aten.index.Tensor)
 def _op_index_tensor(a, indices):
-    """Advanced/boolean indexing. Falls back to CPU for irregular access patterns.
-
-    TODO: No Metal kernel — GPU→CPU→GPU round-trip. A GPU stream compaction
-    kernel (for boolean masks) or gather kernel (for integer indices) would
-    eliminate the transfer. Boolean masking produces variable-length output
-    which requires prefix-sum for GPU parallelization.
+    """Advanced/boolean indexing. Routes simple integer index on dim 0 of 2D
+    tensors to GPU index_select; falls back to CPU for other patterns.
     """
+    # GPU fast path: single integer index tensor on dim 0, 2D input
+    if (len(indices) == 1 and indices[0] is not None
+            and isinstance(indices[0], ApplegpuTensor)):
+        idx = indices[0]
+        idx_cpu = idx.to_torch_cpu()
+        if idx_cpu.dtype in (torch.int32, torch.int64):
+            a_unwrapped = _unwrap(a)
+            a_shape = gpu.shape(a_unwrapped)
+            if len(a_shape) == 2:
+                # Cast to int32 if needed (GPU kernels require Int32 indices)
+                if idx_cpu.dtype == torch.int64:
+                    idx_i32 = ApplegpuTensor.from_torch(idx_cpu.to(torch.int32))
+                    idx_gpu = _unwrap(idx_i32)
+                else:
+                    idx_gpu = _unwrap(idx)
+                return _wrap(gpu.index_select(a_unwrapped, 0, idx_gpu))
+    # CPU fallback for all other cases (boolean masks, multi-index, etc.)
     a_cpu = a.to_torch_cpu() if isinstance(a, ApplegpuTensor) else a
     idx_cpu = []
     for idx in indices:
@@ -1174,12 +1187,31 @@ def _op_index_tensor(a, indices):
 
 @register_op(torch.ops.aten.index_put_.default)
 def _op_index_put_(a, indices, values, accumulate=False):
-    """Advanced index assignment. Falls back to CPU.
-
-    TODO: No Metal kernel — GPU→CPU→GPU round-trip. A GPU scatter kernel
-    would eliminate the transfer, but irregular write patterns with potential
-    race conditions (accumulate=True) require atomic operations on Metal.
+    """Advanced index assignment. Routes simple integer index on dim 0 of 2D
+    tensors to GPU scatter_write/scatter_add; falls back to CPU for other patterns.
     """
+    # GPU fast path: single integer index on dim 0, 2D tensor
+    if (len(indices) == 1 and indices[0] is not None
+            and isinstance(indices[0], ApplegpuTensor)):
+        idx = indices[0]
+        idx_cpu = idx.to_torch_cpu()
+        if idx_cpu.dtype in (torch.int32, torch.int64):
+            a_unwrapped = _unwrap(a)
+            a_shape = gpu.shape(a_unwrapped)
+            if len(a_shape) == 2:
+                # Cast to int32 if needed
+                if idx_cpu.dtype == torch.int64:
+                    idx_i32 = ApplegpuTensor.from_torch(idx_cpu.to(torch.int32))
+                    idx_gpu = _unwrap(idx_i32)
+                else:
+                    idx_gpu = _unwrap(idx)
+                v_unwrapped = _unwrap(values)
+                if accumulate:
+                    result = gpu.scatter_add(a_unwrapped, idx_gpu, v_unwrapped)
+                else:
+                    result = gpu.scatter_write(a_unwrapped, idx_gpu, v_unwrapped)
+                return _update_inplace(a, result)
+    # CPU fallback
     a_cpu = a.to_torch_cpu() if isinstance(a, ApplegpuTensor) else a
     idx_cpu = []
     for idx in indices:

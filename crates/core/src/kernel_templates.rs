@@ -2382,6 +2382,80 @@ kernel void ne{s}(device const {t}* a [[buffer(0)]], device const {t}* b [[buffe
     )
 }
 
+/// Generate scatter_write kernel source. Simple write (no atomics), last write wins.
+/// values: [num_indices, cols], indices: [num_indices], output: [rows, cols]
+pub fn scatter_write_kernel_source(dtype: DType) -> String {
+    let t = metal_type(dtype);
+    let s = dtype_suffix(dtype);
+    format!(
+        r#"#include <metal_stdlib>
+using namespace metal;
+
+kernel void scatter_write{s}(
+    device const {t}* values [[buffer(0)]],
+    device const int* indices [[buffer(1)]],
+    device {t}* output [[buffer(2)]],
+    constant uint& num_indices [[buffer(3)]],
+    constant uint& cols [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]]
+) {{
+    uint col = gid.x;
+    uint i = gid.y;
+    if (i >= num_indices || col >= cols) return;
+    int dst_row = indices[i];
+    output[dst_row * cols + col] = values[i * cols + col];
+}}
+"#,
+        t = t, s = s,
+    )
+}
+
+/// Generate scatter_add kernel source. Uses atomic float CAS loop for accumulation.
+/// values: [num_indices, cols], indices: [num_indices], output: [rows, cols] (float*)
+pub fn scatter_add_kernel_source(dtype: DType) -> String {
+    let t = metal_type(dtype);
+    let s = dtype_suffix(dtype);
+    let acc = needs_float_acc(dtype);
+    let load = |e: &str| if acc { format!("float({})", e) } else { e.to_string() };
+    format!(
+        r#"#include <metal_stdlib>
+using namespace metal;
+
+inline void atomic_add_float(device float* addr, float val) {{
+    float expected = *addr;
+    while (true) {{
+        float desired = expected + val;
+        device atomic_uint* addr_uint = (device atomic_uint*)addr;
+        uint expected_uint = as_type<uint>(expected);
+        uint desired_uint = as_type<uint>(desired);
+        if (atomic_compare_exchange_weak_explicit(addr_uint, &expected_uint, desired_uint,
+                memory_order_relaxed, memory_order_relaxed)) {{
+            break;
+        }}
+        expected = as_type<float>(expected_uint);
+    }}
+}}
+
+kernel void scatter_add{s}(
+    device const {t}* values [[buffer(0)]],
+    device const int* indices [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    constant uint& num_indices [[buffer(3)]],
+    constant uint& cols [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]]
+) {{
+    uint col = gid.x;
+    uint i = gid.y;
+    if (i >= num_indices || col >= cols) return;
+    int dst_row = indices[i];
+    atomic_add_float(&output[dst_row * cols + col], {load});
+}}
+"#,
+        t = t, s = s,
+        load = load("values[i * cols + col]"),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

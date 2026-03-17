@@ -1180,6 +1180,16 @@ fn embedding_backward(grad_output: &GpuTensor, indices: &GpuTensor, num_weights:
 }
 
 #[pyfunction]
+fn scatter_write(input: &GpuTensor, indices: &GpuTensor, values: &GpuTensor) -> PyResult<GpuTensor> {
+    wrap_tensor(BACKEND.scatter_write(input.id, indices.id, values.id))
+}
+
+#[pyfunction]
+fn scatter_add(input: &GpuTensor, indices: &GpuTensor, values: &GpuTensor) -> PyResult<GpuTensor> {
+    wrap_tensor(BACKEND.scatter_add(input.id, indices.id, values.id))
+}
+
+#[pyfunction]
 #[pyo3(signature = (grad_output, weight, running_var, eps=1e-5))]
 fn batch_norm_backward(grad_output: &GpuTensor, weight: &GpuTensor, running_var: &GpuTensor, eps: f32) -> PyResult<GpuTensor> {
     wrap_tensor(BACKEND.batch_norm_backward(grad_output.id, weight.id, running_var.id, eps))
@@ -1336,6 +1346,8 @@ fn applegpu_runtime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(conv2d_backward_weight, m)?)?;
     m.add_function(wrap_pyfunction!(conv1d_backward_input, m)?)?;
     m.add_function(wrap_pyfunction!(embedding_backward, m)?)?;
+    m.add_function(wrap_pyfunction!(scatter_write, m)?)?;
+    m.add_function(wrap_pyfunction!(scatter_add, m)?)?;
     m.add_function(wrap_pyfunction!(batch_norm_backward, m)?)?;
     m.add_function(wrap_pyfunction!(threshold_backward, m)?)?;
     m.add_function(wrap_pyfunction!(tanh_backward, m)?)?;

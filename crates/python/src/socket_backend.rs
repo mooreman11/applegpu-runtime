@@ -1169,6 +1169,12 @@ impl Backend for SocketBackend {
     fn embedding_backward(&self, _grad: u64, _indices: u64, _num_weights: usize) -> BackendResult<u64> {
         Err("embedding_backward not yet implemented over socket backend".to_string())
     }
+    fn scatter_write(&self, _input: u64, _indices: u64, _values: u64) -> BackendResult<u64> {
+        Err("scatter_write not yet implemented over socket backend".to_string())
+    }
+    fn scatter_add(&self, _input: u64, _indices: u64, _values: u64) -> BackendResult<u64> {
+        Err("scatter_add not yet implemented over socket backend".to_string())
+    }
     fn batch_norm_backward(&self, _grad: u64, _weight: u64, _var: u64, _eps: f32) -> BackendResult<u64> {
         Err("batch_norm_backward not yet implemented over socket backend".to_string())
     }

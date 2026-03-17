@@ -1166,6 +1166,64 @@ impl LazyRuntime {
             return Ok(out);
         }
 
+        if matches!(node.op, crate::graph::OpKind::ScatterWrite) {
+            // Acquire output buffer first (mutable borrow of pool)
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+            let input = self.get_tensor(node.inputs[0])?;
+            let indices = self.get_tensor(node.inputs[1])?;
+            let values = self.get_tensor(node.inputs[2])?;
+            // CPU memcpy input into output (shared memory — avoids GPU command queue deadlock)
+            let size_bytes = input.meta.size_bytes();
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    input.buffer.contents(),
+                    out.buffer.contents(),
+                    size_bytes,
+                );
+            }
+            // Now scatter values into the output via GPU kernel
+            let num_indices = indices.meta.layout.shape.numel();
+            let cols = node.out_shape.dims()[1];
+            let uint_params: Vec<u32> = vec![num_indices as u32, cols as u32];
+            let (k_src, k_fn) = KernelRegistry::resolve_kernel("scatter_write", dtype);
+            REGISTRY.dispatch_cnn_3d(
+                device, &k_src, &k_fn,
+                &[&values.buffer, &indices.buffer], &out.buffer,
+                &uint_params, &[], (cols as u32, num_indices as u32, 1),
+            )?;
+            return Ok(out);
+        }
+
+        if matches!(node.op, crate::graph::OpKind::ScatterAdd) {
+            // Acquire output buffer first (mutable borrow of pool)
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+            let input = self.get_tensor(node.inputs[0])?;
+            let indices = self.get_tensor(node.inputs[1])?;
+            let values = self.get_tensor(node.inputs[2])?;
+            // CPU memcpy input into output (shared memory — avoids GPU command queue deadlock)
+            let size_bytes = input.meta.size_bytes();
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    input.buffer.contents(),
+                    out.buffer.contents(),
+                    size_bytes,
+                );
+            }
+            // Now scatter-add values into the output via GPU kernel
+            let num_indices = indices.meta.layout.shape.numel();
+            let cols = node.out_shape.dims()[1];
+            let uint_params: Vec<u32> = vec![num_indices as u32, cols as u32];
+            let (k_src, k_fn) = KernelRegistry::resolve_kernel("scatter_add", dtype);
+            REGISTRY.dispatch_cnn_3d(
+                device, &k_src, &k_fn,
+                &[&values.buffer, &indices.buffer], &out.buffer,
+                &uint_params, &[], (cols as u32, num_indices as u32, 1),
+            )?;
+            return Ok(out);
+        }
+
         if node.op.is_reshape() {
             let out_buf = self.pool.acquire(device, out_size)?;
             let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
@@ -2021,6 +2079,54 @@ impl LazyRuntime {
                     in_dims[0], in_dims[1], num_indices,
                 );
             }
+        }
+
+        if matches!(node.op, crate::graph::OpKind::ScatterWrite) {
+            let input = self.get_tensor(node.inputs[0])?;
+            let indices = self.get_tensor(node.inputs[1])?;
+            let values = self.get_tensor(node.inputs[2])?;
+            // CPU memcpy input into output (shared memory — avoids batch context deadlock)
+            let size_bytes = input.meta.size_bytes();
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    input.buffer.contents(),
+                    out.buffer.contents(),
+                    size_bytes,
+                );
+            }
+            let num_indices = indices.meta.layout.shape.numel();
+            let cols = node.out_shape.dims()[1];
+            let uint_params: Vec<u32> = vec![num_indices as u32, cols as u32];
+            let (k_src, k_fn) = KernelRegistry::resolve_kernel("scatter_write", dtype);
+            return REGISTRY.dispatch_cnn_3d_nb(
+                device, &k_src, &k_fn, queue,
+                &[&values.buffer, &indices.buffer], &out.buffer,
+                &uint_params, &[], (cols as u32, num_indices as u32, 1),
+            );
+        }
+
+        if matches!(node.op, crate::graph::OpKind::ScatterAdd) {
+            let input = self.get_tensor(node.inputs[0])?;
+            let indices = self.get_tensor(node.inputs[1])?;
+            let values = self.get_tensor(node.inputs[2])?;
+            // CPU memcpy input into output (shared memory — avoids batch context deadlock)
+            let size_bytes = input.meta.size_bytes();
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    input.buffer.contents(),
+                    out.buffer.contents(),
+                    size_bytes,
+                );
+            }
+            let num_indices = indices.meta.layout.shape.numel();
+            let cols = node.out_shape.dims()[1];
+            let uint_params: Vec<u32> = vec![num_indices as u32, cols as u32];
+            let (k_src, k_fn) = KernelRegistry::resolve_kernel("scatter_add", dtype);
+            return REGISTRY.dispatch_cnn_3d_nb(
+                device, &k_src, &k_fn, queue,
+                &[&values.buffer, &indices.buffer], &out.buffer,
+                &uint_params, &[], (cols as u32, num_indices as u32, 1),
+            );
         }
 
         if node.op.is_reshape() {

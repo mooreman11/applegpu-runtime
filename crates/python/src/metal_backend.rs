@@ -541,6 +541,16 @@ impl Backend for MetalBackend {
         map_err!(applegpu_core::ops::embedding_backward(&mut rt, grad, indices, num_weights))
     }
 
+    fn scatter_write(&self, input: u64, indices: u64, values: u64) -> BackendResult<u64> {
+        let mut rt = self.runtime.lock().unwrap();
+        map_err!(applegpu_core::ops::scatter_write(&mut rt, input, indices, values))
+    }
+
+    fn scatter_add(&self, input: u64, indices: u64, values: u64) -> BackendResult<u64> {
+        let mut rt = self.runtime.lock().unwrap();
+        map_err!(applegpu_core::ops::scatter_add(&mut rt, input, indices, values))
+    }
+
     fn batch_norm_backward(&self, grad: u64, weight: u64, var: u64, eps: f32) -> BackendResult<u64> {
         let mut rt = self.runtime.lock().unwrap();
         map_err!(applegpu_core::ops::batch_norm_backward(&mut rt, grad, weight, var, eps))

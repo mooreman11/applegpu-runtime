@@ -806,6 +806,8 @@ impl From<&OpKind> for WireOpKind {
             OpKind::Conv2dBackwardWeight { stride, padding, groups } => WireOpKind::Conv2dBackwardWeight { stride: *stride, padding: *padding, groups: *groups },
             OpKind::Conv1dBackwardInput { stride, padding, groups } => WireOpKind::Conv1dBackwardInput { stride: *stride, padding: *padding, groups: *groups },
             OpKind::EmbeddingBackward => WireOpKind::EmbeddingBackward,
+            OpKind::ScatterWrite => WireOpKind::ScatterWrite,
+            OpKind::ScatterAdd => WireOpKind::ScatterAdd,
             OpKind::BatchNormBackward { eps } => WireOpKind::BatchNormBackward { eps: *eps },
             OpKind::Lt => WireOpKind::Lt,
             OpKind::Gt => WireOpKind::Gt,
@@ -841,8 +843,6 @@ impl From<&OpKind> for WireOpKind {
             OpKind::MaxPool2dWithIndices { kernel_size, stride, padding, indices_id } => {
                 WireOpKind::MaxPool2dWithIndices { kernel_size: *kernel_size, stride: *stride, padding: *padding, indices_id: *indices_id }
             }
-            OpKind::ScatterWrite => WireOpKind::ScatterWrite,
-            OpKind::ScatterAdd => WireOpKind::ScatterAdd,
         }
     }
 }
@@ -922,6 +922,8 @@ pub fn wire_op_to_core(wire: &WireOpKind) -> OpKind {
         WireOpKind::Conv2dBackwardWeight { stride, padding, groups } => OpKind::Conv2dBackwardWeight { stride: *stride, padding: *padding, groups: *groups },
         WireOpKind::Conv1dBackwardInput { stride, padding, groups } => OpKind::Conv1dBackwardInput { stride: *stride, padding: *padding, groups: *groups },
         WireOpKind::EmbeddingBackward => OpKind::EmbeddingBackward,
+        WireOpKind::ScatterWrite => OpKind::ScatterWrite,
+        WireOpKind::ScatterAdd => OpKind::ScatterAdd,
         WireOpKind::BatchNormBackward { eps } => OpKind::BatchNormBackward { eps: *eps },
         WireOpKind::Cast { target_dtype } => {
             let dt = DType::from_wire(*target_dtype as u32)
@@ -963,8 +965,6 @@ pub fn wire_op_to_core(wire: &WireOpKind) -> OpKind {
         WireOpKind::GeluExact => OpKind::GeluExact,
         WireOpKind::GeluExactBackward => OpKind::GeluExactBackward,
         WireOpKind::GeluTanhBackward => OpKind::GeluTanhBackward,
-        WireOpKind::ScatterWrite => OpKind::ScatterWrite,
-        WireOpKind::ScatterAdd => OpKind::ScatterAdd,
     }
 }
 

@@ -46,6 +46,7 @@ pub fn validate_op_dtype(op: &OpKind, dtype: DType) -> Result<()> {
         OpKind::Conv2dBackwardInput { .. } | OpKind::Conv2dBackwardWeight { .. } |
         OpKind::Conv1dBackwardInput { .. } |
         OpKind::EmbeddingBackward |
+        OpKind::ScatterWrite | OpKind::ScatterAdd |
         OpKind::BatchNormBackward { .. } |
         OpKind::ThresholdBackward { .. } |
         OpKind::TanhBackward | OpKind::SigmoidBackward |
@@ -80,8 +81,7 @@ pub fn validate_op_dtype(op: &OpKind, dtype: DType) -> Result<()> {
 
         // All except Bool
         OpKind::Gather { .. } | OpKind::IndexSelect { .. } |
-        OpKind::Sum | OpKind::Argmax |
-        OpKind::ScatterWrite | OpKind::ScatterAdd => {
+        OpKind::Sum | OpKind::Argmax => {
             if matches!(dtype, DType::Bool) {
                 return Err(GpuError::UnsupportedDtype(format!(
                     "{:?} does not support bool dtype", op
@@ -1784,6 +1784,130 @@ pub fn index_select(rt: &mut LazyRuntime, input_id: u64, dim: usize, index_id: u
         op: OpKind::IndexSelect { dim },
         inputs: vec![input_id, index_id],
         out_shape: Shape::new(out_shape)?,
+        out_dtype: input_dtype,
+        container_id: ContainerId::DEFAULT,
+    });
+    Ok(out_id)
+}
+
+// ── Scatter ops ─────────────────────────────────────────────────────────────
+
+/// Scatter write: copy values into a clone of `input` at positions given by `indices`.
+/// input: [rows, cols], indices: [num_indices] (Int32), values: [num_indices, cols]
+/// Returns new tensor with same shape as input.
+pub fn scatter_write(
+    rt: &mut LazyRuntime,
+    input_id: u64,
+    indices_id: u64,
+    values_id: u64,
+) -> Result<u64> {
+    let input_dtype = rt.dtype(input_id)?;
+    let input_shape = rt.shape(input_id)?;
+    let indices_dtype = rt.dtype(indices_id)?;
+    let indices_shape = rt.shape(indices_id)?;
+    let values_dtype = rt.dtype(values_id)?;
+    let values_shape = rt.shape(values_id)?;
+
+    if indices_dtype != DType::Int32 {
+        return Err(GpuError::InvalidTensor(format!(
+            "scatter_write indices must be Int32, got {:?}", indices_dtype
+        )));
+    }
+    if input_shape.len() != 2 {
+        return Err(GpuError::InvalidTensor(
+            "scatter_write currently supports only 2D tensors".to_string()
+        ));
+    }
+    if indices_shape.len() != 1 {
+        return Err(GpuError::InvalidTensor(
+            "scatter_write indices must be 1D".to_string()
+        ));
+    }
+    if values_shape.len() != 2 {
+        return Err(GpuError::InvalidTensor(
+            "scatter_write values must be 2D".to_string()
+        ));
+    }
+    if input_dtype != values_dtype {
+        return Err(GpuError::InvalidTensor(format!(
+            "scatter_write dtype mismatch: input {:?} vs values {:?}", input_dtype, values_dtype
+        )));
+    }
+    let num_indices = indices_shape[0];
+    let cols = input_shape[1];
+    if values_shape[0] != num_indices || values_shape[1] != cols {
+        return Err(GpuError::InvalidTensor(format!(
+            "scatter_write values shape {:?} must be [{}, {}]", values_shape, num_indices, cols
+        )));
+    }
+
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op: OpKind::ScatterWrite,
+        inputs: vec![input_id, indices_id, values_id],
+        out_shape: Shape::new(input_shape)?,
+        out_dtype: input_dtype,
+        container_id: ContainerId::DEFAULT,
+    });
+    Ok(out_id)
+}
+
+/// Scatter add: atomically add values into a clone of `input` at positions given by `indices`.
+/// input: [rows, cols], indices: [num_indices] (Int32), values: [num_indices, cols]
+/// Returns new tensor with same shape as input (Float32 output for atomic correctness).
+pub fn scatter_add(
+    rt: &mut LazyRuntime,
+    input_id: u64,
+    indices_id: u64,
+    values_id: u64,
+) -> Result<u64> {
+    let input_dtype = rt.dtype(input_id)?;
+    let input_shape = rt.shape(input_id)?;
+    let indices_dtype = rt.dtype(indices_id)?;
+    let indices_shape = rt.shape(indices_id)?;
+    let values_dtype = rt.dtype(values_id)?;
+    let values_shape = rt.shape(values_id)?;
+
+    if indices_dtype != DType::Int32 {
+        return Err(GpuError::InvalidTensor(format!(
+            "scatter_add indices must be Int32, got {:?}", indices_dtype
+        )));
+    }
+    if input_shape.len() != 2 {
+        return Err(GpuError::InvalidTensor(
+            "scatter_add currently supports only 2D tensors".to_string()
+        ));
+    }
+    if indices_shape.len() != 1 {
+        return Err(GpuError::InvalidTensor(
+            "scatter_add indices must be 1D".to_string()
+        ));
+    }
+    if values_shape.len() != 2 {
+        return Err(GpuError::InvalidTensor(
+            "scatter_add values must be 2D".to_string()
+        ));
+    }
+    if input_dtype != values_dtype {
+        return Err(GpuError::InvalidTensor(format!(
+            "scatter_add dtype mismatch: input {:?} vs values {:?}", input_dtype, values_dtype
+        )));
+    }
+    let num_indices = indices_shape[0];
+    let cols = input_shape[1];
+    if values_shape[0] != num_indices || values_shape[1] != cols {
+        return Err(GpuError::InvalidTensor(format!(
+            "scatter_add values shape {:?} must be [{}, {}]", values_shape, num_indices, cols
+        )));
+    }
+
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op: OpKind::ScatterAdd,
+        inputs: vec![input_id, indices_id, values_id],
+        out_shape: Shape::new(input_shape)?,
         out_dtype: input_dtype,
         container_id: ContainerId::DEFAULT,
     });
