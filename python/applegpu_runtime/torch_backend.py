@@ -582,7 +582,12 @@ def _op_linspace(start, end, steps, dtype=None, layout=None, device=None, pin_me
 
 @register_op(torch.ops.aten.normal_.default)
 def _op_normal_(a, mean=0.0, std=1.0, generator=None):
-    """Fill with random normal values. Generated on CPU, transferred to GPU."""
+    """Fill with random normal values. Generated on CPU, transferred to GPU.
+
+    TODO: No Metal kernel — CPU RNG + memcpy. A GPU Philox counter-based PRNG
+    kernel would eliminate the transfer, but weight initialization is a cold path
+    (called once per model init, not per forward pass).
+    """
     import numpy as np
     if isinstance(a, ApplegpuTensor):
         shape = tuple(a.shape)
@@ -1131,7 +1136,13 @@ def _op_stack(tensors, dim=0):
 
 @register_op(torch.ops.aten.index.Tensor)
 def _op_index_tensor(a, indices):
-    """Advanced/boolean indexing. Falls back to CPU for irregular access patterns."""
+    """Advanced/boolean indexing. Falls back to CPU for irregular access patterns.
+
+    TODO: No Metal kernel — GPU→CPU→GPU round-trip. A GPU stream compaction
+    kernel (for boolean masks) or gather kernel (for integer indices) would
+    eliminate the transfer. Boolean masking produces variable-length output
+    which requires prefix-sum for GPU parallelization.
+    """
     a_cpu = a.to_torch_cpu() if isinstance(a, ApplegpuTensor) else a
     idx_cpu = []
     for idx in indices:
@@ -1147,7 +1158,12 @@ def _op_index_tensor(a, indices):
 
 @register_op(torch.ops.aten.index_put_.default)
 def _op_index_put_(a, indices, values, accumulate=False):
-    """Advanced index assignment. Falls back to CPU."""
+    """Advanced index assignment. Falls back to CPU.
+
+    TODO: No Metal kernel — GPU→CPU→GPU round-trip. A GPU scatter kernel
+    would eliminate the transfer, but irregular write patterns with potential
+    race conditions (accumulate=True) require atomic operations on Metal.
+    """
     a_cpu = a.to_torch_cpu() if isinstance(a, ApplegpuTensor) else a
     idx_cpu = []
     for idx in indices:
