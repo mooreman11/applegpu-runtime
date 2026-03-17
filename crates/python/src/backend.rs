@@ -161,6 +161,7 @@ pub trait Backend: Send + Sync {
     fn threshold_backward(&self, grad_output: u64, input: u64, threshold: f32) -> BackendResult<u64>;
     fn tanh_backward(&self, grad_output: u64, output: u64) -> BackendResult<u64>;
     fn sigmoid_backward(&self, grad_output: u64, output: u64) -> BackendResult<u64>;
+    fn gelu_backward(&self, grad_output: u64, input: u64) -> BackendResult<u64>;
 
     // Resource management
     fn set_limits(&self, max_tensor_size_mb: usize, max_memory_mb: usize, max_tensors: usize);

@@ -471,24 +471,14 @@ def _op_threshold_backward(grad_output, self_tensor, threshold):
 
 @register_op(torch.ops.aten.gelu_backward.default)
 def _op_gelu_backward(grad_output, self_tensor, approximate="none"):
-    """Backward for gelu.
-
-    TODO: CPU fallback. Metal kernel would compute the GELU derivative
-    (tanh approximation gradient) per element. Formula is complex but
-    entirely element-wise — good candidate for a dedicated kernel.
+    """Backward for gelu (tanh approximation) — Metal GPU.
+    Falls back to CPU for exact mode since forward kernel only supports tanh approx.
     """
-    import math
-    x_cpu = self_tensor.to_torch_cpu() if isinstance(self_tensor, ApplegpuTensor) else self_tensor
-    grad_cpu = grad_output.to_torch_cpu() if isinstance(grad_output, ApplegpuTensor) else grad_output
-    # GELU derivative using tanh approximation
-    sqrt_2_pi = math.sqrt(2.0 / math.pi)
-    a = sqrt_2_pi * (x_cpu + 0.044715 * x_cpu ** 3)
-    a = a.clamp(-10, 10)
-    tanh_a = torch.tanh(a)
-    da = sqrt_2_pi * (1 + 3 * 0.044715 * x_cpu ** 2)
-    gelu_grad = 0.5 * (1 + tanh_a) + 0.5 * x_cpu * (1 - tanh_a ** 2) * da
-    result = grad_cpu * gelu_grad
-    return ApplegpuTensor.from_torch(result)
+    if approximate == "none":
+        return _cpu_fallback(torch.ops.aten.gelu_backward.default,
+                             (grad_output, self_tensor, approximate), {})
+    return _wrap(gpu.gelu_backward(_unwrap(grad_output), _unwrap(self_tensor)),
+                 torch_dtype=grad_output.dtype, requires_grad=grad_output.requires_grad)
 
 
 @register_op(torch.ops.aten.tanh_backward.default)

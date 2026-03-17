@@ -1173,6 +1173,10 @@ impl Backend for SocketBackend {
         Err("sigmoid_backward not yet implemented over socket backend".to_string())
     }
 
+    fn gelu_backward(&self, _grad_output: u64, _input: u64) -> BackendResult<u64> {
+        Err("gelu_backward not yet implemented over socket backend".to_string())
+    }
+
     // -----------------------------------------------------------------------
     // Resource management — local tracking only
     // -----------------------------------------------------------------------

@@ -128,6 +128,7 @@ fn op_to_discriminant(op: &OpKind) -> u32 {
         OpKind::ThresholdBackward { .. } => 70,
         OpKind::TanhBackward => 71,
         OpKind::SigmoidBackward => 72,
+        OpKind::GeluBackward => 73,
     }
 }
 
@@ -371,6 +372,7 @@ fn discriminant_to_op(d: u32, r: &mut impl Read) -> io::Result<OpKind> {
         }
         71 => Ok(OpKind::TanhBackward),
         72 => Ok(OpKind::SigmoidBackward),
+        73 => Ok(OpKind::GeluBackward),
         _ => Err(io::Error::new(io::ErrorKind::InvalidData, format!("Unknown op type: {}", d))),
     }
 }
@@ -761,6 +763,7 @@ impl From<&OpKind> for WireOpKind {
             OpKind::ThresholdBackward { threshold } => WireOpKind::ThresholdBackward { threshold: *threshold },
             OpKind::TanhBackward => WireOpKind::TanhBackward,
             OpKind::SigmoidBackward => WireOpKind::SigmoidBackward,
+            OpKind::GeluBackward => WireOpKind::GeluBackward,
         }
     }
 }
@@ -871,6 +874,7 @@ pub fn wire_op_to_core(wire: &WireOpKind) -> OpKind {
         WireOpKind::ThresholdBackward { threshold } => OpKind::ThresholdBackward { threshold: *threshold },
         WireOpKind::TanhBackward => OpKind::TanhBackward,
         WireOpKind::SigmoidBackward => OpKind::SigmoidBackward,
+        WireOpKind::GeluBackward => OpKind::GeluBackward,
     }
 }
 

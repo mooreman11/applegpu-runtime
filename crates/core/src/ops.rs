@@ -46,7 +46,8 @@ pub fn validate_op_dtype(op: &OpKind, dtype: DType) -> Result<()> {
         OpKind::Conv2dBackwardInput { .. } | OpKind::EmbeddingBackward |
         OpKind::BatchNormBackward { .. } |
         OpKind::ThresholdBackward { .. } |
-        OpKind::TanhBackward | OpKind::SigmoidBackward => {
+        OpKind::TanhBackward | OpKind::SigmoidBackward |
+        OpKind::GeluBackward => {
             if !dtype.is_float() {
                 return Err(GpuError::UnsupportedDtype(format!(
                     "{:?} requires a float dtype, got {}", op, dtype.name()
@@ -945,6 +946,30 @@ pub fn sigmoid_backward(rt: &mut LazyRuntime, grad_output_id: u64, output_id: u6
         id: out_id,
         op: OpKind::SigmoidBackward,
         inputs: vec![grad_output_id, output_id],
+        out_shape: Shape::new(shape)?,
+        out_dtype: dtype,
+        container_id: ContainerId::DEFAULT,
+    });
+    Ok(out_id)
+}
+
+/// GELU backward (tanh approximation): computes gradient of GELU w.r.t. its input.
+/// Receives the forward INPUT (not output) and the upstream gradient.
+pub fn gelu_backward(rt: &mut LazyRuntime, grad_output_id: u64, input_id: u64) -> Result<u64> {
+    let dtype = rt.dtype(grad_output_id)?;
+    validate_op_dtype(&OpKind::GeluBackward, dtype)?;
+    let shape = rt.shape(grad_output_id)?;
+    let in_shape = rt.shape(input_id)?;
+    if shape != in_shape {
+        return Err(GpuError::InvalidTensor(format!(
+            "gelu_backward shape mismatch: grad {:?} vs input {:?}", shape, in_shape
+        )));
+    }
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op: OpKind::GeluBackward,
+        inputs: vec![grad_output_id, input_id],
         out_shape: Shape::new(shape)?,
         out_dtype: dtype,
         container_id: ContainerId::DEFAULT,
@@ -4642,5 +4667,24 @@ mod tests {
         for (a, b) in data.iter().zip(expected.iter()) {
             assert!((a - b).abs() < 1e-5, "got {} expected {}", a, b);
         }
+    }
+
+    #[test]
+    fn test_gelu_backward() {
+        let device = match get_device() { Some(d) => d, None => return };
+        let mut rt = LazyRuntime::new();
+        let grad = Tensor::from_f32(&device, vec![3], &[1.0, 1.0, 1.0]).unwrap();
+        let input = Tensor::from_f32(&device, vec![3], &[0.0, 1.0, -1.0]).unwrap();
+        let grad_id = grad.meta.id;
+        let input_id = input.meta.id;
+        rt.insert_tensor(grad).unwrap();
+        rt.insert_tensor(input).unwrap();
+        let out_id = gelu_backward(&mut rt, grad_id, input_id).unwrap();
+        rt.eval(&device, out_id).unwrap();
+        let data = rt.read_f32(out_id).unwrap();
+        // gelu'(0) ≈ 0.5, gelu'(1) ≈ 1.083, gelu'(-1) ≈ -0.083
+        assert!((data[0] - 0.5).abs() < 0.01, "gelu'(0): got {}", data[0]);
+        assert!((data[1] - 1.083).abs() < 0.02, "gelu'(1): got {}", data[1]);
+        assert!((data[2] - (-0.083)).abs() < 0.02, "gelu'(-1): got {}", data[2]);
     }
 }

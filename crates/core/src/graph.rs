@@ -126,6 +126,7 @@ pub enum OpKind {
     ThresholdBackward { threshold: f32 },
     TanhBackward,
     SigmoidBackward,
+    GeluBackward,
     // Comparison ops (output is always Bool)
     Lt, Gt, Le, Ge, Eq, Ne,
     // Bitwise ops (integer + Bool)
@@ -204,6 +205,7 @@ impl OpKind {
             OpKind::ThresholdBackward { .. } => "threshold_backward",
             OpKind::TanhBackward => "tanh_backward",
             OpKind::SigmoidBackward => "sigmoid_backward",
+            OpKind::GeluBackward => "gelu_backward",
             OpKind::Lt => "lt",
             OpKind::Gt => "gt",
             OpKind::Le => "le",
@@ -410,6 +412,10 @@ impl OpKind {
 
     pub fn is_sigmoid_backward(&self) -> bool {
         matches!(self, OpKind::SigmoidBackward)
+    }
+
+    pub fn is_gelu_backward(&self) -> bool {
+        matches!(self, OpKind::GeluBackward)
     }
 }
 

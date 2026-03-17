@@ -1589,6 +1589,38 @@ kernel void sigmoid_backward{s}(device const {t}* grad_output [[buffer(0)]], dev
     )
 }
 
+pub fn gelu_backward_kernel_source(dtype: DType) -> String {
+    let t = metal_type(dtype);
+    let s = dtype_suffix(dtype);
+    let acc = needs_float_acc(dtype);
+    let load_input = if acc { "float(input[id])".to_string() } else { "input[id]".to_string() };
+    let load_grad = if acc { "float(grad_output[id])".to_string() } else { "grad_output[id]".to_string() };
+    let store = if acc { format!("{}(result)", t) } else { "result".to_string() };
+    format!(
+        r#"#include <metal_stdlib>
+using namespace metal;
+
+kernel void gelu_backward{s}(device const {t}* grad_output [[buffer(0)]], device const {t}* input [[buffer(1)]], device {t}* grad_input [[buffer(2)]], constant uint& numel [[buffer(3)]], uint id [[thread_position_in_grid]]) {{
+    if (id >= numel) return;
+    float x = {load_input};
+    float go = {load_grad};
+    float sqrt_2_pi = 0.7978845608f;
+    float a = sqrt_2_pi * (x + 0.044715f * x * x * x);
+    a = clamp(a, -10.0f, 10.0f);
+    float tanh_a = tanh(a);
+    float da = sqrt_2_pi * (1.0f + 3.0f * 0.044715f * x * x);
+    float gelu_grad = 0.5f * (1.0f + tanh_a) + 0.5f * x * (1.0f - tanh_a * tanh_a) * da;
+    float result = go * gelu_grad;
+    grad_input[id] = {store};
+}}
+"#,
+        t = t, s = s,
+        load_input = load_input,
+        load_grad = load_grad,
+        store = store,
+    )
+}
+
 // ── Task 10: Cast op kernel ─────────────────────────────────────────────────
 
 /// Generate cast kernel source (convert from src dtype to dst dtype).

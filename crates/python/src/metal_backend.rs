@@ -541,6 +541,11 @@ impl Backend for MetalBackend {
         map_err!(applegpu_core::ops::sigmoid_backward(&mut rt, grad_output, output))
     }
 
+    fn gelu_backward(&self, grad_output: u64, input: u64) -> BackendResult<u64> {
+        let mut rt = self.runtime.lock().unwrap();
+        map_err!(applegpu_core::ops::gelu_backward(&mut rt, grad_output, input))
+    }
+
     // Resource management
     fn set_limits(&self, max_tensor_size_mb: usize, max_memory_mb: usize, max_tensors: usize) {
         let mut rt = self.runtime.lock().unwrap();
