@@ -250,6 +250,7 @@ impl GpuTensor {
     fn argmax(&self) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.argmax(self.id)) }
     fn sum(&self) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.sum(self.id)) }
     fn mean(&self) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.mean(self.id)) }
+    fn amax(&self) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.amax(self.id)) }
     fn softmax_causal(&self) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.softmax_causal(self.id)) }
 
     #[pyo3(signature = (gamma, beta, eps=1e-5))]
@@ -968,6 +969,9 @@ fn mean(t: &GpuTensor) -> PyResult<GpuTensor> {
 }
 
 #[pyfunction]
+fn amax(t: &GpuTensor) -> PyResult<GpuTensor> { t.amax() }
+
+#[pyfunction]
 fn lt(a: &GpuTensor, b: &GpuTensor) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.lt(a.id, b.id)) }
 #[pyfunction]
 fn gt(a: &GpuTensor, b: &GpuTensor) -> PyResult<GpuTensor> { wrap_tensor(BACKEND.gt(a.id, b.id)) }
@@ -1287,6 +1291,7 @@ fn applegpu_runtime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(gelu_exact, m)?)?;
     m.add_function(wrap_pyfunction!(sigmoid, m)?)?;
     m.add_function(wrap_pyfunction!(var, m)?)?;
+    m.add_function(wrap_pyfunction!(amax, m)?)?;
     m.add_function(wrap_pyfunction!(std_dev, m)?)?;
     m.add_function(wrap_pyfunction!(layer_norm, m)?)?;
     m.add_function(wrap_pyfunction!(embedding, m)?)?;
