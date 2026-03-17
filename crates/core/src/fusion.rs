@@ -21,7 +21,9 @@ fn unary_msl(op: &OpKind, expr: &str, dtype: DType) -> String {
         OpKind::Gelu => {
             format!("({expr} * 0.5f * (1.0f + tanh(clamp(0.7978845608f * ({expr} + 0.044715f * {expr} * {expr} * {expr}), -10.0f, 10.0f))))")
         }
-        _ => unreachable!("Not a unary op"),
+        // GeluExact is excluded from fusion (is_elementwise returns false)
+        // because it requires a custom erf_approx function definition.
+        _ => unreachable!("Not a fusible unary op"),
     }
 }
 

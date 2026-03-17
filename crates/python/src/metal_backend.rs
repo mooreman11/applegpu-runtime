@@ -193,6 +193,11 @@ impl Backend for MetalBackend {
         map_err!(applegpu_core::ops::gelu(&mut rt, a))
     }
 
+    fn gelu_exact(&self, a: u64) -> BackendResult<u64> {
+        let mut rt = self.runtime.lock().unwrap();
+        map_err!(applegpu_core::ops::gelu_exact(&mut rt, a))
+    }
+
     fn sigmoid(&self, a: u64) -> BackendResult<u64> {
         let mut rt = self.runtime.lock().unwrap();
         map_err!(applegpu_core::ops::sigmoid(&mut rt, a))
@@ -495,6 +500,11 @@ impl Backend for MetalBackend {
         map_err!(applegpu_core::ops::max_pool2d(&mut rt, input, kernel, stride, padding))
     }
 
+    fn max_pool2d_with_indices(&self, input: u64, kernel: (usize, usize), stride: (usize, usize), padding: (usize, usize)) -> BackendResult<(u64, u64)> {
+        let mut rt = self.runtime.lock().unwrap();
+        map_err!(applegpu_core::ops::max_pool2d_with_indices(&mut rt, input, kernel, stride, padding))
+    }
+
     fn avg_pool2d(&self, input: u64, kernel: (usize, usize), stride: (usize, usize), padding: (usize, usize)) -> BackendResult<u64> {
         let mut rt = self.runtime.lock().unwrap();
         map_err!(applegpu_core::ops::avg_pool2d(&mut rt, input, kernel, stride, padding))
@@ -549,6 +559,16 @@ impl Backend for MetalBackend {
     fn gelu_backward(&self, grad_output: u64, input: u64) -> BackendResult<u64> {
         let mut rt = self.runtime.lock().unwrap();
         map_err!(applegpu_core::ops::gelu_backward(&mut rt, grad_output, input))
+    }
+
+    fn gelu_tanh_backward(&self, grad_output: u64, input: u64) -> BackendResult<u64> {
+        let mut rt = self.runtime.lock().unwrap();
+        map_err!(applegpu_core::ops::gelu_tanh_backward(&mut rt, grad_output, input))
+    }
+
+    fn gelu_exact_backward(&self, grad_output: u64, input: u64) -> BackendResult<u64> {
+        let mut rt = self.runtime.lock().unwrap();
+        map_err!(applegpu_core::ops::gelu_exact_backward(&mut rt, grad_output, input))
     }
 
     fn max_pool2d_backward(&self, grad_output: u64, indices: u64, batch: usize, channels: usize, in_h: usize, in_w: usize) -> BackendResult<u64> {

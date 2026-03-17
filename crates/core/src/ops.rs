@@ -34,12 +34,12 @@ pub fn validate_op_dtype(op: &OpKind, dtype: DType) -> Result<()> {
         // Float-only ops
         OpKind::Exp | OpKind::Log | OpKind::Sqrt | OpKind::Tanh |
         OpKind::Sin | OpKind::Cos |
-        OpKind::Relu | OpKind::Gelu | OpKind::Sigmoid |
+        OpKind::Relu | OpKind::Gelu | OpKind::GeluExact | OpKind::Sigmoid |
         OpKind::Softmax | OpKind::LogSoftmax | OpKind::SoftmaxCausal |
         OpKind::Matmul |
         OpKind::LayerNorm { .. } | OpKind::BatchNorm { .. } |
         OpKind::Conv1d { .. } | OpKind::Conv2d { .. } |
-        OpKind::MaxPool2d { .. } | OpKind::AvgPool2d { .. } |
+        OpKind::MaxPool2d { .. } | OpKind::MaxPool2dWithIndices { .. } | OpKind::AvgPool2d { .. } |
         OpKind::AddBias | OpKind::Embedding |
         OpKind::Mean | OpKind::Var { .. } |
         OpKind::SoftmaxBackward | OpKind::LayerNormBackward { .. } |
@@ -48,7 +48,8 @@ pub fn validate_op_dtype(op: &OpKind, dtype: DType) -> Result<()> {
         OpKind::BatchNormBackward { .. } |
         OpKind::ThresholdBackward { .. } |
         OpKind::TanhBackward | OpKind::SigmoidBackward |
-        OpKind::GeluBackward | OpKind::MaxPool2dBackward => {
+        OpKind::GeluBackward | OpKind::GeluTanhBackward | OpKind::GeluExactBackward |
+        OpKind::MaxPool2dBackward => {
             if !dtype.is_float() {
                 return Err(GpuError::UnsupportedDtype(format!(
                     "{:?} requires a float dtype, got {}", op, dtype.name()
@@ -604,6 +605,10 @@ pub fn gelu(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
     lazy_unary_op(rt, input_id, OpKind::Gelu)
 }
 
+pub fn gelu_exact(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
+    lazy_unary_op(rt, input_id, OpKind::GeluExact)
+}
+
 pub fn sigmoid(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
     lazy_unary_op(rt, input_id, OpKind::Sigmoid)
 }
@@ -1025,6 +1030,52 @@ pub fn gelu_backward(rt: &mut LazyRuntime, grad_output_id: u64, input_id: u64) -
     rt.record_op(OpNode {
         id: out_id,
         op: OpKind::GeluBackward,
+        inputs: vec![grad_output_id, input_id],
+        out_shape: Shape::new(shape)?,
+        out_dtype: dtype,
+        container_id: ContainerId::DEFAULT,
+    });
+    Ok(out_id)
+}
+
+/// GELU tanh backward: same math as gelu_backward but with explicit OpKind variant.
+pub fn gelu_tanh_backward(rt: &mut LazyRuntime, grad_output_id: u64, input_id: u64) -> Result<u64> {
+    let dtype = rt.dtype(grad_output_id)?;
+    validate_op_dtype(&OpKind::GeluTanhBackward, dtype)?;
+    let shape = rt.shape(grad_output_id)?;
+    let in_shape = rt.shape(input_id)?;
+    if shape != in_shape {
+        return Err(GpuError::InvalidTensor(format!(
+            "gelu_tanh_backward shape mismatch: grad {:?} vs input {:?}", shape, in_shape
+        )));
+    }
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op: OpKind::GeluTanhBackward,
+        inputs: vec![grad_output_id, input_id],
+        out_shape: Shape::new(shape)?,
+        out_dtype: dtype,
+        container_id: ContainerId::DEFAULT,
+    });
+    Ok(out_id)
+}
+
+/// GELU exact backward: derivative of exact GELU (uses erf + exp).
+pub fn gelu_exact_backward(rt: &mut LazyRuntime, grad_output_id: u64, input_id: u64) -> Result<u64> {
+    let dtype = rt.dtype(grad_output_id)?;
+    validate_op_dtype(&OpKind::GeluExactBackward, dtype)?;
+    let shape = rt.shape(grad_output_id)?;
+    let in_shape = rt.shape(input_id)?;
+    if shape != in_shape {
+        return Err(GpuError::InvalidTensor(format!(
+            "gelu_exact_backward shape mismatch: grad {:?} vs input {:?}", shape, in_shape
+        )));
+    }
+    let out_id = next_id();
+    rt.record_op(OpNode {
+        id: out_id,
+        op: OpKind::GeluExactBackward,
         inputs: vec![grad_output_id, input_id],
         out_shape: Shape::new(shape)?,
         out_dtype: dtype,
@@ -1860,6 +1911,45 @@ pub fn max_pool2d(rt: &mut LazyRuntime, input_id: u64, kernel_size: (usize, usiz
         container_id: ContainerId::DEFAULT,
     });
     Ok(out_id)
+}
+
+/// Max pooling 2D with indices.
+/// Returns (values_id, indices_id) — both computed in a single GPU pass.
+/// input: [batch, channels, height, width]
+pub fn max_pool2d_with_indices(rt: &mut LazyRuntime, input_id: u64, kernel_size: (usize, usize), stride: (usize, usize), padding: (usize, usize)) -> Result<(u64, u64)> {
+    let dtype = rt.dtype(input_id)?;
+    validate_op_dtype(&OpKind::MaxPool2dWithIndices { kernel_size, stride, padding, indices_id: 0 }, dtype)?;
+
+    let in_shape = rt.shape(input_id)?;
+    if in_shape.len() != 4 {
+        return Err(GpuError::InvalidTensor(format!(
+            "max_pool2d_with_indices input must be 4D [B,C,H,W], got {:?}", in_shape
+        )));
+    }
+
+    let in_h = in_shape[2];
+    let in_w = in_shape[3];
+    if in_h + 2 * padding.0 < kernel_size.0 || in_w + 2 * padding.1 < kernel_size.1 {
+        return Err(GpuError::InvalidTensor(
+            "max_pool2d_with_indices: input too small for given kernel_size and padding".to_string()
+        ));
+    }
+    let out_h = (in_h + 2 * padding.0 - kernel_size.0) / stride.0 + 1;
+    let out_w = (in_w + 2 * padding.1 - kernel_size.1) / stride.1 + 1;
+
+    let values_id = next_id();
+    let indices_id = next_id();
+    let out_shape = Shape::new(vec![in_shape[0], in_shape[1], out_h, out_w])?;
+
+    rt.record_op(OpNode {
+        id: values_id,
+        op: OpKind::MaxPool2dWithIndices { kernel_size, stride, padding, indices_id },
+        inputs: vec![input_id],
+        out_shape,
+        out_dtype: dtype,
+        container_id: ContainerId::DEFAULT,
+    });
+    Ok((values_id, indices_id))
 }
 
 /// Average pooling 2D.

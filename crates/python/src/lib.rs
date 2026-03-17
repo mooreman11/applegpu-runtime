@@ -891,6 +891,11 @@ fn cos(t: &GpuTensor) -> PyResult<GpuTensor> { t.cos() }
 fn gelu(t: &GpuTensor) -> PyResult<GpuTensor> { t.gelu() }
 
 #[pyfunction]
+fn gelu_exact(t: &GpuTensor) -> PyResult<GpuTensor> {
+    wrap_tensor(BACKEND.gelu_exact(t.id))
+}
+
+#[pyfunction]
 fn sigmoid(t: &GpuTensor) -> PyResult<GpuTensor> { t.sigmoid() }
 
 #[pyfunction]
@@ -1046,6 +1051,18 @@ fn max_pool2d(input: &GpuTensor, kh: usize, kw: usize, stride_h: usize, stride_w
 
 #[pyfunction]
 #[pyo3(signature = (input, kh=2, kw=2, stride_h=0, stride_w=0, pad_h=0, pad_w=0))]
+fn max_pool2d_with_indices(input: &GpuTensor, kh: usize, kw: usize, stride_h: usize, stride_w: usize, pad_h: usize, pad_w: usize) -> PyResult<(GpuTensor, GpuTensor)> {
+    let sh = if stride_h == 0 { kh } else { stride_h };
+    let sw = if stride_w == 0 { kw } else { stride_w };
+    let (values_id, indices_id) = py_err(BACKEND.max_pool2d_with_indices(input.id, (kh, kw), (sh, sw), (pad_h, pad_w)))?;
+    Ok((
+        GpuTensor { id: values_id, destroyed: Cell::new(false) },
+        GpuTensor { id: indices_id, destroyed: Cell::new(false) },
+    ))
+}
+
+#[pyfunction]
+#[pyo3(signature = (input, kh=2, kw=2, stride_h=0, stride_w=0, pad_h=0, pad_w=0))]
 fn avg_pool2d(input: &GpuTensor, kh: usize, kw: usize, stride_h: usize, stride_w: usize, pad_h: usize, pad_w: usize) -> PyResult<GpuTensor> {
     let sh = if stride_h == 0 { kh } else { stride_h };
     let sw = if stride_w == 0 { kw } else { stride_w };
@@ -1182,6 +1199,16 @@ fn gelu_backward(grad_output: &GpuTensor, input: &GpuTensor) -> PyResult<GpuTens
 }
 
 #[pyfunction]
+fn gelu_tanh_backward(grad_output: &GpuTensor, input: &GpuTensor) -> PyResult<GpuTensor> {
+    wrap_tensor(BACKEND.gelu_tanh_backward(grad_output.id, input.id))
+}
+
+#[pyfunction]
+fn gelu_exact_backward(grad_output: &GpuTensor, input: &GpuTensor) -> PyResult<GpuTensor> {
+    wrap_tensor(BACKEND.gelu_exact_backward(grad_output.id, input.id))
+}
+
+#[pyfunction]
 #[pyo3(signature = (grad_output, indices, batch, channels, in_h, in_w))]
 fn max_pool2d_backward(grad_output: &GpuTensor, indices: &GpuTensor, batch: usize, channels: usize, in_h: usize, in_w: usize) -> PyResult<GpuTensor> {
     wrap_tensor(BACKEND.max_pool2d_backward(grad_output.id, indices.id, batch, channels, in_h, in_w))
@@ -1240,6 +1267,7 @@ fn applegpu_runtime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(sin, m)?)?;
     m.add_function(wrap_pyfunction!(cos, m)?)?;
     m.add_function(wrap_pyfunction!(gelu, m)?)?;
+    m.add_function(wrap_pyfunction!(gelu_exact, m)?)?;
     m.add_function(wrap_pyfunction!(sigmoid, m)?)?;
     m.add_function(wrap_pyfunction!(var, m)?)?;
     m.add_function(wrap_pyfunction!(std_dev, m)?)?;
@@ -1293,6 +1321,7 @@ fn applegpu_runtime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(conv2d, m)?)?;
     m.add_function(wrap_pyfunction!(batch_norm, m)?)?;
     m.add_function(wrap_pyfunction!(max_pool2d, m)?)?;
+    m.add_function(wrap_pyfunction!(max_pool2d_with_indices, m)?)?;
     m.add_function(wrap_pyfunction!(avg_pool2d, m)?)?;
     m.add_function(wrap_pyfunction!(softmax_backward, m)?)?;
     m.add_function(wrap_pyfunction!(layer_norm_backward, m)?)?;
@@ -1304,6 +1333,8 @@ fn applegpu_runtime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(tanh_backward, m)?)?;
     m.add_function(wrap_pyfunction!(sigmoid_backward, m)?)?;
     m.add_function(wrap_pyfunction!(gelu_backward, m)?)?;
+    m.add_function(wrap_pyfunction!(gelu_tanh_backward, m)?)?;
+    m.add_function(wrap_pyfunction!(gelu_exact_backward, m)?)?;
     m.add_function(wrap_pyfunction!(max_pool2d_backward, m)?)?;
     m.add_function(wrap_pyfunction!(blit_copy, m)?)?;
     Ok(())

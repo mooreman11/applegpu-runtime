@@ -249,6 +249,8 @@ pub enum WireOpKind {
     GeluBackward,
     // 75: max_pool2d backward
     MaxPool2dBackward,
+    // 76: max_pool2d with indices (dual output)
+    MaxPool2dWithIndices { kernel_size: (usize, usize), stride: (usize, usize), padding: (usize, usize), indices_id: u64 },
 }
 
 impl WireOpKind {
@@ -330,6 +332,7 @@ impl WireOpKind {
             WireOpKind::GeluBackward => 73,
             WireOpKind::Conv1dBackwardInput { .. } => 74,
             WireOpKind::MaxPool2dBackward => 75,
+            WireOpKind::MaxPool2dWithIndices { .. } => 76,
         }
     }
 
@@ -445,6 +448,15 @@ impl WireOpKind {
             WireOpKind::ThresholdBackward { threshold } => write_f32(w, *threshold),
             WireOpKind::TanhBackward | WireOpKind::SigmoidBackward | WireOpKind::GeluBackward |
             WireOpKind::MaxPool2dBackward => Ok(()),
+            WireOpKind::MaxPool2dWithIndices { kernel_size, stride, padding, indices_id } => {
+                write_u64(w, kernel_size.0 as u64)?;
+                write_u64(w, kernel_size.1 as u64)?;
+                write_u64(w, stride.0 as u64)?;
+                write_u64(w, stride.1 as u64)?;
+                write_u64(w, padding.0 as u64)?;
+                write_u64(w, padding.1 as u64)?;
+                write_u64(w, *indices_id)
+            }
         }
     }
 
@@ -615,6 +627,18 @@ impl WireOpKind {
                 Ok(WireOpKind::Conv1dBackwardInput { stride, padding })
             }
             75 => Ok(WireOpKind::MaxPool2dBackward),
+            76 => {
+                let k0 = read_u64(r)? as usize;
+                let k1 = read_u64(r)? as usize;
+                let s0 = read_u64(r)? as usize;
+                let s1 = read_u64(r)? as usize;
+                let p0 = read_u64(r)? as usize;
+                let p1 = read_u64(r)? as usize;
+                let indices_id = read_u64(r)?;
+                Ok(WireOpKind::MaxPool2dWithIndices {
+                    kernel_size: (k0, k1), stride: (s0, s1), padding: (p0, p1), indices_id,
+                })
+            }
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("Unknown op discriminant: {}", disc),

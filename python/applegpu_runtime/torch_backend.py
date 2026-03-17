@@ -364,7 +364,10 @@ def _op_relu_inplace(a):
 
 @register_op(torch.ops.aten.gelu.default)
 def _op_gelu(a, approximate="none"):
-    return _wrap(gpu.gelu(_unwrap(a)))
+    if approximate == "tanh":
+        return _wrap(gpu.gelu(_unwrap(a)))
+    else:
+        return _wrap(gpu.gelu_exact(_unwrap(a)))
 
 
 @register_op(torch.ops.aten.exp.default)
@@ -471,14 +474,13 @@ def _op_threshold_backward(grad_output, self_tensor, threshold):
 
 @register_op(torch.ops.aten.gelu_backward.default)
 def _op_gelu_backward(grad_output, self_tensor, approximate="none"):
-    """Backward for gelu (tanh approximation) — Metal GPU.
-    Falls back to CPU for exact mode since forward kernel only supports tanh approx.
-    """
-    if approximate == "none":
-        return _cpu_fallback(torch.ops.aten.gelu_backward.default,
-                             (grad_output, self_tensor, approximate), {})
-    return _wrap(gpu.gelu_backward(_unwrap(grad_output), _unwrap(self_tensor)),
-                 torch_dtype=grad_output.dtype, requires_grad=grad_output.requires_grad)
+    """Backward for gelu — Metal GPU for both tanh and exact modes."""
+    if approximate == "tanh":
+        return _wrap(gpu.gelu_tanh_backward(_unwrap(grad_output), _unwrap(self_tensor)),
+                     torch_dtype=grad_output.dtype, requires_grad=grad_output.requires_grad)
+    else:
+        return _wrap(gpu.gelu_exact_backward(_unwrap(grad_output), _unwrap(self_tensor)),
+                     torch_dtype=grad_output.dtype, requires_grad=grad_output.requires_grad)
 
 
 @register_op(torch.ops.aten.tanh_backward.default)
@@ -1351,15 +1353,8 @@ def _max_pool2d(input, kernel_size, stride=None, padding=(0, 0), dilation=(1, 1)
     kh, kw = kernel_size[0], kernel_size[1] if len(kernel_size) > 1 else kernel_size[0]
     sh, sw = stride[0], stride[1] if len(stride) > 1 else stride[0]
     ph, pw = padding[0], padding[1] if len(padding) > 1 else padding[0]
-    result = _wrap(gpu.max_pool2d(_unwrap(input), kh, kw, sh, sw, ph, pw))
-    # Compute real indices on CPU (needed for backward pass)
-    input_cpu = input.to_torch_cpu() if isinstance(input, ApplegpuTensor) else input
-    _, indices_cpu = torch.nn.functional.max_pool2d_with_indices(
-        input_cpu, kernel_size, stride=stride, padding=padding,
-        dilation=dilation, ceil_mode=ceil_mode,
-    )
-    indices = ApplegpuTensor.from_torch(indices_cpu)
-    return result, indices
+    values, indices = gpu.max_pool2d_with_indices(_unwrap(input), kh, kw, sh, sw, ph, pw)
+    return _wrap(values), _wrap(indices)
 
 
 @register_op(torch.ops.aten.avg_pool2d.default)

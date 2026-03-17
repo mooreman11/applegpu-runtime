@@ -24,6 +24,10 @@ pub struct LazyRuntime {
     pub scheduler: Scheduler,
     /// Buffer pool for reusing GPU allocations.
     pub pool: BufferPool,
+    /// Maps secondary output IDs to their primary op ID.
+    /// Used by multi-output ops (e.g., MaxPool2dWithIndices) where evaluating
+    /// the primary op also materializes the secondary output.
+    secondary_outputs: HashMap<u64, u64>,
 }
 
 impl LazyRuntime {
@@ -33,6 +37,7 @@ impl LazyRuntime {
             graph: Graph::new(),
             scheduler: Scheduler::new(ResourceLimits::from_env()),
             pool: BufferPool::new(256 * 1024 * 1024),
+            secondary_outputs: HashMap::new(),
         }
     }
 
@@ -65,8 +70,13 @@ impl LazyRuntime {
     }
 
     /// Record a lazy operation. Returns the output node ID.
+    /// For multi-output ops, also registers secondary output mappings.
     pub fn record_op(&mut self, node: OpNode) -> u64 {
         let id = node.id;
+        // Register secondary outputs for multi-output ops
+        if let crate::graph::OpKind::MaxPool2dWithIndices { indices_id, .. } = &node.op {
+            self.secondary_outputs.insert(*indices_id, id);
+        }
         self.graph.add_node(node);
         id
     }
@@ -76,9 +86,9 @@ impl LazyRuntime {
         self.tensors.contains_key(&id)
     }
 
-    /// Check if a tensor ID is pending (in the graph).
+    /// Check if a tensor ID is pending (in the graph or as a secondary output).
     pub fn is_pending(&self, id: u64) -> bool {
-        self.graph.has_node(id)
+        self.graph.has_node(id) || self.secondary_outputs.contains_key(&id)
     }
 
     /// Get a graph node by ID (for serialization).
@@ -98,6 +108,12 @@ impl LazyRuntime {
         }
         if let Some(node) = self.graph.get_node(id) {
             return Ok(node.out_shape.dims().to_vec());
+        }
+        // Check secondary outputs (e.g., indices from MaxPool2dWithIndices)
+        if let Some(&primary_id) = self.secondary_outputs.get(&id) {
+            if let Some(node) = self.graph.get_node(primary_id) {
+                return Ok(node.out_shape.dims().to_vec());
+            }
         }
         Err(GpuError::GraphError(format!("Tensor {} not found", id)))
     }
@@ -120,16 +136,33 @@ impl LazyRuntime {
             return Ok(()); // already done
         }
 
-        let container_id = self.resolve_container(id);
+        // If this is a secondary output (e.g., indices), evaluate the primary op instead
+        let eval_id = if let Some(&primary_id) = self.secondary_outputs.get(&id) {
+            primary_id
+        } else {
+            id
+        };
+
+        if self.is_materialized(eval_id) {
+            // Primary was already evaluated, which should have materialized the secondary too
+            if self.is_materialized(id) {
+                return Ok(());
+            }
+            return Err(GpuError::GraphError(format!(
+                "Secondary output {} not materialized after primary {} eval", id, eval_id
+            )));
+        }
+
+        let container_id = self.resolve_container(eval_id);
 
         // Run fusion BEFORE computing parallel levels (fusion mutates graph topology)
-        let order = self.graph.topo_sort(id)?;
+        let order = self.graph.topo_sort(eval_id)?;
         if order.is_empty() {
-            return Err(GpuError::GraphError(format!("Tensor {} not found", id)));
+            return Err(GpuError::GraphError(format!("Tensor {} not found", eval_id)));
         }
         let _fused_order = crate::fusion::optimize(&mut self.graph, &order);
 
-        let levels = self.graph.parallel_levels(id)?;
+        let levels = self.graph.parallel_levels(eval_id)?;
 
         // Fast path: linear graph -> existing single-CB path
         if levels.iter().all(|l| l.len() == 1) {
@@ -170,12 +203,46 @@ impl LazyRuntime {
                     if self.is_materialized(node_id) { continue; }
                     let node = self.graph.remove_node(node_id)
                         .ok_or_else(|| GpuError::GraphError(format!("Node {} not found", node_id)))?;
-                    let out_buf = self.pool.acquire(device, node.out_shape.numel() * node.out_dtype.size_bytes())?;
-                    let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
 
                     // Set active context to this node's queue
                     let queue_idx = node_idx % num_queues;
                     crate::compute::set_active_context((queue_idx + 1) as u32);
+
+                    // Special case: MaxPool2dWithIndices produces two output tensors
+                    if let crate::graph::OpKind::MaxPool2dWithIndices { kernel_size, stride, padding, indices_id } = node.op {
+                        let out_size = node.out_shape.numel() * node.out_dtype.size_bytes();
+                        let out_buf = self.pool.acquire(device, out_size)?;
+                        let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+                        let idx_size = node.out_shape.numel() * DType::Int32.size_bytes();
+                        let idx_buf = self.pool.acquire(device, idx_size)?;
+                        let idx_tensor = Tensor::from_raw(indices_id, node.out_shape.dims().to_vec(), DType::Int32, idx_buf);
+                        let input = self.get_tensor(node.inputs[0])?;
+                        let in_dims = input.meta.layout.shape.dims();
+                        let out_dims = node.out_shape.dims();
+                        let dtype = node.out_dtype;
+                        let uint_params: Vec<u32> = vec![
+                            in_dims[0] as u32, in_dims[1] as u32, in_dims[2] as u32, in_dims[3] as u32,
+                            out_dims[2] as u32, out_dims[3] as u32,
+                            kernel_size.0 as u32, kernel_size.1 as u32,
+                            stride.0 as u32, stride.1 as u32,
+                            padding.0 as u32, padding.1 as u32,
+                        ];
+                        let grid_y = out_dims[2] as u32 * in_dims[1] as u32;
+                        let (k_src, k_fn) = KernelRegistry::resolve_kernel("max_pool2d_idx", dtype);
+                        REGISTRY.dispatch_cnn_3d_nb(
+                            device, &k_src, &k_fn, queues[queue_idx],
+                            &[&input.buffer, &idx_tensor.buffer], &out.buffer,
+                            &uint_params, &[], (out_dims[3] as u32, grid_y, in_dims[0] as u32),
+                        )?;
+                        self.scheduler.allocate_tensor(container_id, node_id, out_size)?;
+                        self.tensors.insert(node_id, out);
+                        self.scheduler.allocate_tensor(container_id, indices_id, idx_size)?;
+                        self.tensors.insert(indices_id, idx_tensor);
+                        continue;
+                    }
+
+                    let out_buf = self.pool.acquire(device, node.out_shape.numel() * node.out_dtype.size_bytes())?;
+                    let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
                     self.execute_node_nb(device, queues[queue_idx], &node, &out)?;
 
                     self.scheduler.allocate_tensor(container_id, node_id, node.out_shape.numel() * node.out_dtype.size_bytes())?;
@@ -231,6 +298,42 @@ impl LazyRuntime {
                 let node = self.graph.remove_node(node_id).ok_or_else(|| {
                     GpuError::GraphError(format!("Node {} not found in graph", node_id))
                 })?;
+
+                // Special case: MaxPool2dWithIndices produces two output tensors
+                if let crate::graph::OpKind::MaxPool2dWithIndices { kernel_size, stride, padding, indices_id } = node.op {
+                    let out_size = node.out_shape.numel() * node.out_dtype.size_bytes();
+                    let out_buf = self.pool.acquire(device, out_size)?;
+                    let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+                    // Allocate indices buffer (Int32, same shape as values output)
+                    let idx_size = node.out_shape.numel() * DType::Int32.size_bytes();
+                    let idx_buf = self.pool.acquire(device, idx_size)?;
+                    let idx_tensor = Tensor::from_raw(indices_id, node.out_shape.dims().to_vec(), DType::Int32, idx_buf);
+                    let input = self.get_tensor(node.inputs[0])?;
+                    let in_dims = input.meta.layout.shape.dims();
+                    let out_dims = node.out_shape.dims();
+                    let dtype = node.out_dtype;
+                    let uint_params: Vec<u32> = vec![
+                        in_dims[0] as u32, in_dims[1] as u32, in_dims[2] as u32, in_dims[3] as u32,
+                        out_dims[2] as u32, out_dims[3] as u32,
+                        kernel_size.0 as u32, kernel_size.1 as u32,
+                        stride.0 as u32, stride.1 as u32,
+                        padding.0 as u32, padding.1 as u32,
+                    ];
+                    let grid_y = out_dims[2] as u32 * in_dims[1] as u32;
+                    let (k_src, k_fn) = KernelRegistry::resolve_kernel("max_pool2d_idx", dtype);
+                    let cb = REGISTRY.dispatch_cnn_3d_nb(
+                        device, &k_src, &k_fn, queue,
+                        &[&input.buffer, &idx_tensor.buffer], &out.buffer,
+                        &uint_params, &[], (out_dims[3] as u32, grid_y, in_dims[0] as u32),
+                    )?;
+                    if !use_batch { last_cb = Some(cb); }
+                    self.scheduler.allocate_tensor(container_id, node_id, out_size)?;
+                    self.tensors.insert(node_id, out);
+                    self.scheduler.allocate_tensor(container_id, indices_id, idx_size)?;
+                    self.tensors.insert(indices_id, idx_tensor);
+                    continue;
+                }
+
                 let out_size = node.out_shape.numel() * node.out_dtype.size_bytes();
                 let out_buf = self.pool.acquire(device, out_size)?;
                 let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
@@ -591,6 +694,36 @@ impl LazyRuntime {
             return Ok(out);
         }
 
+        if node.op.is_gelu_tanh_backward() {
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+            let grad_output = self.get_tensor(node.inputs[0])?;
+            let input = self.get_tensor(node.inputs[1])?;
+            let numel: usize = node.out_shape.dims().iter().product();
+            let (k_src, k_fn) = KernelRegistry::resolve_kernel("gelu_tanh_backward", dtype);
+            REGISTRY.dispatch_cnn_3d(
+                device, &k_src, &k_fn,
+                &[&grad_output.buffer, &input.buffer], &out.buffer,
+                &[numel as u32], &[], (numel as u32, 1, 1),
+            )?;
+            return Ok(out);
+        }
+
+        if node.op.is_gelu_exact_backward() {
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+            let grad_output = self.get_tensor(node.inputs[0])?;
+            let input = self.get_tensor(node.inputs[1])?;
+            let numel: usize = node.out_shape.dims().iter().product();
+            let (k_src, k_fn) = KernelRegistry::resolve_kernel("gelu_exact_backward", dtype);
+            REGISTRY.dispatch_cnn_3d(
+                device, &k_src, &k_fn,
+                &[&grad_output.buffer, &input.buffer], &out.buffer,
+                &[numel as u32], &[], (numel as u32, 1, 1),
+            )?;
+            return Ok(out);
+        }
+
         if let crate::graph::OpKind::Transpose { dim0, dim1 } = node.op {
             let out_buf = self.pool.acquire(device, out_size)?;
             let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
@@ -749,6 +882,18 @@ impl LazyRuntime {
             let input = self.get_tensor(node.inputs[0])?;
             REGISTRY.dispatch_unary_nd_typed(
                 device, "gelu", dtype,
+                &input.buffer, &in_strides, &out.buffer, &out_shape_u32, ndim, numel,
+            )?;
+            return Ok(out);
+        }
+
+        if node.op.is_gelu_exact() {
+            let (in_strides, out_shape_u32, ndim, numel) = self.unary_nd_params(node)?;
+            let out_buf = self.pool.acquire(device, out_size)?;
+            let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+            let input = self.get_tensor(node.inputs[0])?;
+            REGISTRY.dispatch_unary_nd_typed(
+                device, "gelu_exact", dtype,
                 &input.buffer, &in_strides, &out.buffer, &out_shape_u32, ndim, numel,
             )?;
             return Ok(out);
@@ -1480,6 +1625,30 @@ impl LazyRuntime {
             );
         }
 
+        if node.op.is_gelu_tanh_backward() {
+            let grad_output = self.get_tensor(node.inputs[0])?;
+            let input = self.get_tensor(node.inputs[1])?;
+            let numel: usize = node.out_shape.dims().iter().product();
+            let (k_src, k_fn) = KernelRegistry::resolve_kernel("gelu_tanh_backward", dtype);
+            return REGISTRY.dispatch_cnn_3d_nb(
+                device, &k_src, &k_fn, queue,
+                &[&grad_output.buffer, &input.buffer], &out.buffer,
+                &[numel as u32], &[], (numel as u32, 1, 1),
+            );
+        }
+
+        if node.op.is_gelu_exact_backward() {
+            let grad_output = self.get_tensor(node.inputs[0])?;
+            let input = self.get_tensor(node.inputs[1])?;
+            let numel: usize = node.out_shape.dims().iter().product();
+            let (k_src, k_fn) = KernelRegistry::resolve_kernel("gelu_exact_backward", dtype);
+            return REGISTRY.dispatch_cnn_3d_nb(
+                device, &k_src, &k_fn, queue,
+                &[&grad_output.buffer, &input.buffer], &out.buffer,
+                &[numel as u32], &[], (numel as u32, 1, 1),
+            );
+        }
+
         if let crate::graph::OpKind::Transpose { dim0, dim1 } = node.op {
             let input = self.get_tensor(node.inputs[0])?;
             let dims = input.meta.layout.shape.dims();
@@ -1606,6 +1775,15 @@ impl LazyRuntime {
             let input = self.get_tensor(node.inputs[0])?;
             return REGISTRY.dispatch_unary_nd_typed_nb(
                 device, "gelu", dtype, queue,
+                &input.buffer, &in_strides, &out.buffer, &out_shape_u32, ndim, numel,
+            );
+        }
+
+        if node.op.is_gelu_exact() {
+            let (in_strides, out_shape_u32, ndim, numel) = self.unary_nd_params(node)?;
+            let input = self.get_tensor(node.inputs[0])?;
+            return REGISTRY.dispatch_unary_nd_typed_nb(
+                device, "gelu_exact", dtype, queue,
                 &input.buffer, &in_strides, &out.buffer, &out_shape_u32, ndim, numel,
             );
         }
@@ -2069,6 +2247,14 @@ impl LazyRuntime {
         }
         if let Some(node) = self.graph.get_node(id) {
             return Ok(node.out_dtype);
+        }
+        // Secondary outputs: indices from MaxPool2dWithIndices are always Int32
+        if let Some(&primary_id) = self.secondary_outputs.get(&id) {
+            if let Some(node) = self.graph.get_node(primary_id) {
+                if matches!(node.op, crate::graph::OpKind::MaxPool2dWithIndices { .. }) {
+                    return Ok(DType::Int32);
+                }
+            }
         }
         Err(GpuError::GraphError(format!("Tensor {} not found", id)))
     }
