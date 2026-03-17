@@ -34,9 +34,25 @@ def test_l2_with_dim():
     np.testing.assert_allclose(result_gpu.numpy(), result_cpu.numpy(), atol=1e-4)
 
 
+def test_l2_keepdim():
+    x = torch.randn(3, 4)
+    x_gpu = to_applegpu(x)
+    result = torch.linalg.vector_norm(x_gpu, ord=2, dim=1, keepdim=True)
+    expected = torch.linalg.vector_norm(x, ord=2, dim=1, keepdim=True)
+    assert result.to_torch_cpu().shape == expected.shape
+    assert torch.allclose(result.to_torch_cpu(), expected, atol=1e-4)
+
+
 def test_linf_fallback():
     """L-infinity falls back to CPU -- should still work."""
     x = torch.tensor([1.0, -5.0, 3.0])
     x_gpu = to_applegpu(x)
     result = torch.linalg.vector_norm(x_gpu, ord=float('inf')).to_torch_cpu().item()
     assert abs(result - 5.0) < 1e-4
+
+
+def test_l2_single_element():
+    x = torch.tensor([3.0])
+    x_gpu = to_applegpu(x)
+    result = torch.linalg.vector_norm(x_gpu, ord=2).to_torch_cpu().item()
+    assert abs(result - 3.0) < 1e-4

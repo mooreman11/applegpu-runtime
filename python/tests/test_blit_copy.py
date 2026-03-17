@@ -1,6 +1,7 @@
 """Tests for GPU->GPU blit copy."""
 import numpy as np
 import pytest
+import torch
 import applegpu_runtime as gpu
 
 
@@ -39,3 +40,26 @@ def test_blit_copy_3d():
     gpu.blit_copy(src, dst)
     result = _to_numpy(dst)
     np.testing.assert_allclose(result, data)
+
+
+def test_copy_op_gpu_tensor():
+    """aten.copy_ uses blit for GPU->GPU when both are ApplegpuTensor."""
+    gpu.enable_torch_backend()
+    a = torch.randn(3, 4)
+    b = torch.randn(3, 4)
+    a_gpu = gpu.to_applegpu(a)
+    b_gpu = gpu.to_applegpu(b)
+    a_gpu.copy_(b_gpu)
+    result = a_gpu.to_torch_cpu()
+    assert torch.allclose(result, b, atol=1e-6)
+
+
+def test_copy_op_cpu_to_gpu():
+    """aten.copy_ still works for CPU->GPU (fallback path)."""
+    gpu.enable_torch_backend()
+    a = torch.randn(2, 3)
+    a_gpu = gpu.to_applegpu(a)
+    b_cpu = torch.randn(2, 3)
+    a_gpu.copy_(b_cpu)
+    result = a_gpu.to_torch_cpu()
+    assert torch.allclose(result, b_cpu, atol=1e-6)
