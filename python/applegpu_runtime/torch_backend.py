@@ -536,6 +536,68 @@ def _op_mean_default(a, dtype=None):
     return _wrap(gpu.scalar_mul(_unwrap(sum_result), 1.0 / total_elems))
 
 
+@register_op(torch.ops.aten.mse_loss.default)
+def _op_mse_loss(input, target, reduction=1):
+    """MSE loss on GPU: mean((input - target)^2).
+    reduction: 0=none, 1=mean, 2=sum.
+    """
+    diff = _wrap(gpu.sub(_unwrap(input), _unwrap(target)))
+    sq = _wrap(gpu.mul(_unwrap(diff), _unwrap(diff)))
+    if reduction == 1:
+        return _op_mean_default(sq)
+    elif reduction == 2:
+        return _op_sum_default(sq)
+    return sq
+
+
+@register_op(torch.ops.aten.mse_loss_backward.default)
+def _op_mse_loss_backward(grad_output, input, target, reduction=1):
+    """MSE loss backward on GPU: grad * 2 * (input - target) / numel."""
+    diff = _wrap(gpu.sub(_unwrap(input), _unwrap(target)))
+    grad_input = _wrap(gpu.scalar_mul(_unwrap(diff), 2.0))
+    if reduction == 1:
+        numel = 1
+        for s in _unwrap(input).shape:
+            numel *= s
+        grad_input = _wrap(gpu.scalar_mul(_unwrap(grad_input), 1.0 / numel))
+    grad_input = _wrap(gpu.mul(_unwrap(grad_output), _unwrap(grad_input)))
+    return grad_input
+
+
+@register_op(torch.ops.aten.select_backward.default)
+def _op_select_backward(grad_output, input_sizes, dim, index):
+    """Backward for select: scatter grad into zeros at the selected index."""
+    if dim < 0:
+        dim += len(input_sizes)
+    # Create zeros of input shape, then place grad_output at the selected slice
+    import numpy as np_
+    zeros = gpu.from_numpy(np_.zeros(input_sizes, dtype=np_.float32))
+    # Build slice to place grad: zeros[:, ..., index, ..., :] = grad_output
+    # Use slice + concat approach: slice before, unsqueeze grad, slice after
+    if index < 0:
+        index += input_sizes[dim]
+    # Unsqueeze grad_output to add back the selected dimension
+    grad_unsqueezed = _wrap(gpu.reshape(_unwrap(grad_output),
+        list(grad_output.shape[:dim]) + [1] + list(grad_output.shape[dim:])))
+    # Build output: zeros before index, grad, zeros after index
+    if index > 0:
+        before_shape = list(input_sizes)
+        before_shape[dim] = index
+        before = _wrap(gpu.slice(zeros, dim, 0, index))
+    if index < input_sizes[dim] - 1:
+        after_shape = list(input_sizes)
+        after_shape[dim] = input_sizes[dim] - index - 1
+        after = _wrap(gpu.slice(zeros, dim, index + 1, input_sizes[dim]))
+    if index == 0:
+        result = _wrap(gpu.concat(_unwrap(grad_unsqueezed), _unwrap(after), dim=dim))
+    elif index == input_sizes[dim] - 1:
+        result = _wrap(gpu.concat(_unwrap(before), _unwrap(grad_unsqueezed), dim=dim))
+    else:
+        temp = _wrap(gpu.concat(_unwrap(before), _unwrap(grad_unsqueezed), dim=dim))
+        result = _wrap(gpu.concat(_unwrap(temp), _unwrap(after), dim=dim))
+    return result
+
+
 @register_op(torch.ops.aten.fill_.Scalar)
 def _op_fill_scalar(a, value):
     """Fill tensor in-place with a scalar value."""

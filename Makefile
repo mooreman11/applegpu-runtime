@@ -1,4 +1,4 @@
-.PHONY: all build test clean setup check ci release
+.PHONY: all build test clean setup check ci release bench bench-ops bench-training
 
 all: build test
 
@@ -59,6 +59,14 @@ release-local:
 	cp swift/GPUContainer/.build/release/gpu-container dist/
 	cd dist && shasum -a 256 * > checksums.txt
 	@echo "Artifacts in dist/"
+
+bench: bench-ops bench-training
+
+bench-ops: build-python
+	uv run python benchmarks/bench_ops.py --sizes 256 512 1024
+
+bench-training: build-python
+	uv run python benchmarks/bench_training.py --epochs 3
 
 clean:
 	cargo clean

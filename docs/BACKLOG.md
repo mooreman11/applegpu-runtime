@@ -182,16 +182,28 @@ _Containerization, multi-dtype completion, wire protocol v3, CI/packaging._
 
 ## Up Next
 
-### PRIORITY 1: Stable Diffusion / `group_norm`
+### PRIORITY 1: Dispatch Overhead Reduction
+_Benchmarks show ~0.3ms per-op dispatch overhead dominates training. GPU is slower than CPU for all model sizes tested. This is the #1 blocker for real-world GPU advantage._
+- [ ] Batched command buffer encoding — encode multiple ops into one MTLCommandBuffer, single submit+wait per eval
+- [ ] Non-blocking op pipelining — don't wait for each op, pipeline dispatch in eager mode
+- [ ] Eliminate remaining CPU fallbacks on hot paths: `empty_like`, `bernoulli_` (dropout), `div_.Scalar`
+- [ ] Benchmark: achieve GPU > CPU throughput for LSTM 128-hidden training
+
+### PRIORITY 2: Eliminate CPU Fallbacks
+_Every CPU fallback causes a GPU→CPU→GPU roundtrip (~1ms each). Registered mse_loss/select_backward but more remain._
+- [ ] `fill`/`zeros`/`ones` Metal kernels — eliminates CPU fallback in model init
+- [ ] `empty_like` — tensor creation on GPU
+- [ ] `bernoulli_` / dropout — GPU RNG or bypass
+- [ ] `div_.Scalar` — in-place scalar division
+- [ ] `_safe_softmax` — PyTorch 2.10 variant
+- [ ] Audit: run full model suite, list all remaining CPU fallbacks
+
+### PRIORITY 3: Stable Diffusion / `group_norm`
 - [ ] `group_norm` kernel — single new Metal kernel
 - [ ] Stable Diffusion model wrapper + weight loading
 - [ ] End-to-end image generation test
 
-### PRIORITY 2: `fill`/`zeros`/`ones` Compute Kernels
-- [ ] Metal kernels for tensor creation (all dtypes)
-- [ ] Eliminates CPU fallback in model initialization paths
-
-### PRIORITY 3: PyPI Publishing
+### PRIORITY 4: PyPI Publishing
 - [ ] Create PyPI account + API token
 - [ ] Publish wheels to real PyPI
 - [ ] Add `PYPI_TOKEN` GitHub secret for automated releases
@@ -216,9 +228,20 @@ _Blocked by apple/containerization framework socket staging bug (errno 20 ENOTDI
 - [x] GPU index/gather and index_put/scatter kernels (#21) — PR #26
 - [x] GPU linalg_vector_norm kernel for gradient clipping (#22) — L1/L2/L-inf all on GPU
 - [x] GPU amax reduction kernel for L-inf vector norm (#23)
+- [x] mse_loss + mse_loss_backward — GPU-composed from sub/mul/mean
+- [x] select_backward — GPU scatter via slice/concat
 - [ ] GPU linspace kernel — `start + id * step` per thread (cold path, low priority)
-- [ ] GPU RNG kernel — Philox counter-based PRNG for normal_() (cold path, low priority)
+- [ ] GPU RNG kernel — Philox counter-based PRNG for normal_/bernoulli_ (cold path, low priority)
 - [ ] GPU unique kernel — parallel sort + stream compaction (low priority)
+
+### Performance Optimization
+- [ ] Batched command buffer — encode N ops per MTLCommandBuffer (reduces dispatch overhead N×)
+- [ ] Non-blocking eager dispatch — pipeline Metal commands without per-op synchronization
+- [ ] `torch.compile()` support — register as compile backend
+- [ ] Async eval — `gpu.eval_async(tensor)` returns GpuFuture
+- [ ] Fine-grained locking — split `Mutex<LazyRuntime>` per-component
+- [ ] MTLSharedEvent for concurrent queue sync (lazy.rs TODO)
+- [ ] Fused LSTM/GRU kernel — single Metal kernel per timestep for all gates
 
 ### Multi-Dtype Remaining
 - [ ] Reduction output dtype overrides — sum(Int32)→Int32, mean(Int32)→Float32, sum(Bool)→Int32 count
@@ -226,19 +249,13 @@ _Blocked by apple/containerization framework socket staging bug (errno 20 ENOTDI
 - [ ] `isinf`/`isnan` — float → Bool predicates for numerical debugging
 - [ ] Fused comparison chains — `(a > 0) & (a < 10)` as single kernel
 - [ ] `where`/`masked_fill` Bool condition enforcement (migration needed)
-- [ ] `is_elementwise()` expansion — mark new ops as fusable
+- [ ] `is_elementwise()` expansion — mark additional ops as fusable (e.g. Pow, Clamp)
 - [ ] Backward ops multi-dtype — extend backward kernels to BFloat16
 - [ ] Float64 compute kernels — deferred until Apple hardware adds MSL double support
 
 ### Models + Polish
 - [ ] Fine-tuned model export — save trained weights
 - [ ] Binary signing/notarization — Apple Developer ID
-
-### Performance Optimization
-- [ ] `torch.compile()` support — register as compile backend
-- [ ] Async eval — `gpu.eval_async(tensor)` returns GpuFuture
-- [ ] Fine-grained locking — split `Mutex<LazyRuntime>` per-component
-- [ ] MTLSharedEvent for concurrent queue sync (lazy.rs TODO)
 
 ### Infrastructure
 - [ ] Unix socket relay / vsock — complete Containerization framework integration (macOS 26 SDK)
