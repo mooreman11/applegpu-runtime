@@ -46,3 +46,36 @@ fn preallocated_buffer_stored_for_later_use() {
     assert!(!rt.is_pending(id));
     assert!(rt.has_preallocated_buffer(id));
 }
+
+#[test]
+fn eval_writes_into_preallocated_output_buffer() {
+    let device = match get_device() { Some(d) => d, None => return };
+    let mut rt = LazyRuntime::new();
+
+    // Create input tensors normally
+    let a = Tensor::from_f32(&device, vec![4], &[1.0, 2.0, 3.0, 4.0]).unwrap();
+    let b = Tensor::from_f32(&device, vec![4], &[10.0, 20.0, 30.0, 40.0]).unwrap();
+    let a_id = a.meta.id;
+    let b_id = b.meta.id;
+    rt.insert_tensor(a).unwrap();
+    rt.insert_tensor(b).unwrap();
+
+    // Record an add op — this returns a new tensor ID for the output
+    let sum_id = ops::add(&mut rt, a_id, b_id).unwrap();
+
+    // Pre-allocate the OUTPUT buffer BEFORE eval
+    let out_buf = rt.pool.acquire(&device, 4 * 4).unwrap(); // 4 floats
+    let out_ptr = out_buf.contents() as usize;
+    rt.insert_preallocated_buffer(sum_id, out_buf);
+
+    // Eval should write into the pre-allocated buffer
+    rt.eval(&device, sum_id).unwrap();
+
+    // Verify correct result
+    let result = rt.read_f32(sum_id).unwrap();
+    assert_eq!(result, &[11.0, 22.0, 33.0, 44.0]);
+
+    // Verify it used the same buffer (same pointer)
+    let final_ptr = rt.get_tensor_ptr(sum_id).unwrap();
+    assert_eq!(out_ptr, final_ptr, "eval should write into pre-allocated buffer, not allocate new");
+}

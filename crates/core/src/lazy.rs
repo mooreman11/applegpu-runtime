@@ -93,6 +93,23 @@ impl LazyRuntime {
         self.preallocated.contains_key(&id)
     }
 
+    /// Get the raw buffer pointer for a materialized tensor.
+    pub fn get_tensor_ptr(&self, id: u64) -> Result<usize> {
+        let t = self.get_tensor(id)?;
+        Ok(t.buffer.contents() as usize)
+    }
+
+    /// Move a pre-allocated buffer to a materialized tensor with shape metadata.
+    /// Used when a C++ allocator creates a buffer and then registers shape/dtype.
+    pub fn materialize_preallocated(&mut self, id: u64, dims: Vec<usize>, dtype: DType) -> Result<()> {
+        let buffer = self.preallocated.remove(&id).ok_or_else(|| {
+            GpuError::GraphError(format!("Tensor {} not in preallocated buffers", id))
+        })?;
+        let tensor = Tensor::from_raw(id, dims, dtype, buffer);
+        self.tensors.insert(id, tensor);
+        Ok(())
+    }
+
     /// Record a lazy operation. Returns the output node ID.
     /// For multi-output ops, also registers secondary output mappings.
     pub fn record_op(&mut self, node: OpNode) -> u64 {
@@ -339,12 +356,20 @@ impl LazyRuntime {
                 // Special case: MaxPool2dWithIndices produces two output tensors
                 if let crate::graph::OpKind::MaxPool2dWithIndices { kernel_size, stride, padding, indices_id } = node.op {
                     let out_size = node.out_shape.numel() * node.out_dtype.size_bytes();
-                    let out_buf = self.pool.acquire(device, out_size)?;
-                    let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+                    let out = if let Some(pre_buf) = self.preallocated.remove(&node.id) {
+                        Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, pre_buf)
+                    } else {
+                        let out_buf = self.pool.acquire(device, out_size)?;
+                        Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf)
+                    };
                     // Allocate indices buffer (Int32, same shape as values output)
                     let idx_size = node.out_shape.numel() * DType::Int32.size_bytes();
-                    let idx_buf = self.pool.acquire(device, idx_size)?;
-                    let idx_tensor = Tensor::from_raw(indices_id, node.out_shape.dims().to_vec(), DType::Int32, idx_buf);
+                    let idx_tensor = if let Some(pre_buf) = self.preallocated.remove(&indices_id) {
+                        Tensor::from_raw(indices_id, node.out_shape.dims().to_vec(), DType::Int32, pre_buf)
+                    } else {
+                        let idx_buf = self.pool.acquire(device, idx_size)?;
+                        Tensor::from_raw(indices_id, node.out_shape.dims().to_vec(), DType::Int32, idx_buf)
+                    };
                     let input = self.get_tensor(node.inputs[0])?;
                     let in_dims = input.meta.layout.shape.dims();
                     let out_dims = node.out_shape.dims();
@@ -375,8 +400,12 @@ impl LazyRuntime {
                 }
 
                 let out_size = node.out_shape.numel() * node.out_dtype.size_bytes();
-                let out_buf = self.pool.acquire(device, out_size)?;
-                let out = Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf);
+                let out = if let Some(pre_buf) = self.preallocated.remove(&node.id) {
+                    Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, pre_buf)
+                } else {
+                    let out_buf = self.pool.acquire(device, out_size)?;
+                    Tensor::from_raw(node.id, node.out_shape.dims().to_vec(), node.out_dtype, out_buf)
+                };
                 let cb = self.execute_node_nb(device, queue, &node, &out)?;
                 if !use_batch { last_cb = Some(cb); }
                 let size = node.out_shape.numel() * node.out_dtype.size_bytes();
