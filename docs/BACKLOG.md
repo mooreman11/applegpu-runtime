@@ -128,7 +128,7 @@ _Containerization, multi-dtype completion, wire protocol v3, CI/packaging._
 - [x] `--version` flag for gpu-service and gpu-container
 - [x] Install script (`install.sh`) with SHA256 checksums
 - [x] `make ci` / `make release-local` — local CI via act or direct build
-- [x] TestPyPI — wheels uploaded, verified (https://test.pypi.org/project/applegpu-runtime/0.8.0/)
+- [x] TestPyPI — wheels uploaded, verified (https://test.pypi.org/project/applegpu-runtime/0.9.0/)
 - [x] Homebrew tap — `brew install mooreman11/tap/applegpu-runtime`
 
 ### N-D Generalization + Missing Ops
