@@ -1277,6 +1277,15 @@ impl Backend for SocketBackend {
     fn queue_depth(&self) -> usize {
         0
     }
+
+    // Streaming batch control (no-ops on socket backend)
+    fn begin_streaming_batch(&self) -> BackendResult<()> {
+        Ok(())
+    }
+
+    fn flush_streaming_batch(&self) {}
+
+    fn end_streaming_batch(&self) {}
 }
 
 // ===========================================================================

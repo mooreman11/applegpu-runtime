@@ -196,4 +196,9 @@ pub trait Backend: Send + Sync {
     fn container_usage(&self, container_id: u64) -> BackendResult<(usize, usize)>;
     fn global_usage(&self) -> (usize, usize);
     fn queue_depth(&self) -> usize;
+
+    // Streaming batch control
+    fn begin_streaming_batch(&self) -> BackendResult<()>;
+    fn flush_streaming_batch(&self);
+    fn end_streaming_batch(&self);
 }

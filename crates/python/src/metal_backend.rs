@@ -725,4 +725,20 @@ impl Backend for MetalBackend {
         let rt = self.runtime.lock().unwrap();
         rt.scheduler.queue_depth()
     }
+
+    // Streaming batch control
+    fn begin_streaming_batch(&self) -> BackendResult<()> {
+        let runtime = get_device_runtime()?;
+        let queue = applegpu_core::compute::get_shared_queue(&runtime.device);
+        applegpu_core::compute::begin_streaming_batch(queue);
+        Ok(())
+    }
+
+    fn flush_streaming_batch(&self) {
+        applegpu_core::compute::flush_streaming_batch();
+    }
+
+    fn end_streaming_batch(&self) {
+        applegpu_core::compute::end_streaming_batch();
+    }
 }

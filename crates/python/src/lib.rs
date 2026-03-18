@@ -1240,6 +1240,21 @@ fn blit_copy(src: &GpuTensor, dst: &GpuTensor) -> PyResult<()> {
     BACKEND.blit_copy(src.id, dst.id).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
 }
 
+#[pyfunction]
+fn begin_streaming_batch() -> PyResult<()> {
+    py_err(BACKEND.begin_streaming_batch())
+}
+
+#[pyfunction]
+fn flush_streaming_batch() {
+    BACKEND.flush_streaming_batch();
+}
+
+#[pyfunction]
+fn end_streaming_batch() {
+    BACKEND.end_streaming_batch();
+}
+
 #[pymodule]
 fn applegpu_runtime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<GpuTensor>()?;
@@ -1362,5 +1377,8 @@ fn applegpu_runtime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(gelu_exact_backward, m)?)?;
     m.add_function(wrap_pyfunction!(max_pool2d_backward, m)?)?;
     m.add_function(wrap_pyfunction!(blit_copy, m)?)?;
+    m.add_function(wrap_pyfunction!(begin_streaming_batch, m)?)?;
+    m.add_function(wrap_pyfunction!(flush_streaming_batch, m)?)?;
+    m.add_function(wrap_pyfunction!(end_streaming_batch, m)?)?;
     Ok(())
 }

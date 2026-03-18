@@ -119,6 +119,9 @@ from applegpu_runtime.applegpu_runtime import (
     gelu_exact_backward,
     max_pool2d_backward,
     blit_copy,
+    begin_streaming_batch,
+    flush_streaming_batch,
+    end_streaming_batch,
 )
 
 __version__ = version()
@@ -364,4 +367,7 @@ __all__ = [
     "gelu_exact_backward",
     "max_pool2d_backward",
     "blit_copy",
+    "begin_streaming_batch",
+    "flush_streaming_batch",
+    "end_streaming_batch",
 ]
