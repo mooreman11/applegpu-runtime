@@ -28,6 +28,9 @@ pub struct LazyRuntime {
     /// Used by multi-output ops (e.g., MaxPool2dWithIndices) where evaluating
     /// the primary op also materializes the secondary output.
     secondary_outputs: HashMap<u64, u64>,
+    /// Pre-allocated buffers awaiting graph eval to write output data.
+    /// Maps tensor_id -> Buffer. Used by PrivateUse1 backend.
+    preallocated: HashMap<u64, crate::buffer::Buffer>,
 }
 
 impl LazyRuntime {
@@ -38,6 +41,7 @@ impl LazyRuntime {
             scheduler: Scheduler::new(ResourceLimits::from_env()),
             pool: BufferPool::new(256 * 1024 * 1024),
             secondary_outputs: HashMap::new(),
+            preallocated: HashMap::new(),
         }
     }
 
@@ -67,6 +71,26 @@ impl LazyRuntime {
         self.scheduler.allocate_tensor(container_id, id, size)?;
         self.tensors.insert(id, tensor);
         Ok(())
+    }
+
+    /// Insert a fully materialized pre-allocated tensor (has data, no graph node).
+    /// Used by PrivateUse1 backend where PyTorch's allocator creates Metal buffers.
+    /// Skips scheduler quota accounting — PyTorch manages lifetime via refcounting.
+    pub fn insert_preallocated(&mut self, tensor: Tensor) -> Result<()> {
+        let id = tensor.meta.id;
+        self.tensors.insert(id, tensor);
+        Ok(())
+    }
+
+    /// Stash a pre-allocated buffer for a tensor that will be written during eval.
+    /// The buffer is held until eval_single_cb needs it as an output buffer.
+    pub fn insert_preallocated_buffer(&mut self, id: u64, buffer: crate::buffer::Buffer) {
+        self.preallocated.insert(id, buffer);
+    }
+
+    /// Check if a pre-allocated buffer exists for a tensor_id.
+    pub fn has_preallocated_buffer(&self, id: u64) -> bool {
+        self.preallocated.contains_key(&id)
     }
 
     /// Record a lazy operation. Returns the output node ID.
