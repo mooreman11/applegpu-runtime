@@ -37,7 +37,7 @@ Supports macOS ARM64 and Linux aarch64, Python 3.10–3.13.
 brew install mooreman11/tap/applegpu-runtime
 
 # Or install script
-curl -fsSL https://raw.githubusercontent.com/mooreman11/applegpu-runtime/v0.8.0/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/mooreman11/applegpu-runtime/v0.9.0/install.sh | sh
 ```
 
 ### From source

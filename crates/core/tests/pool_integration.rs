@@ -1,6 +1,5 @@
 use applegpu_core::device::Device;
 use applegpu_core::lazy::LazyRuntime;
-use applegpu_core::scheduler::ContainerId;
 use applegpu_core::tensor::Tensor;
 
 fn get_device() -> Option<Device> {
