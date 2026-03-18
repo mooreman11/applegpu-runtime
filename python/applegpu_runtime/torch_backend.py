@@ -38,7 +38,14 @@ def _warn_fallback(op_name):
 
 
 def _gpu_tensor_to_torch_cpu(gpu_t):
-    """Convert a GpuTensor to a CPU torch.Tensor."""
+    """Convert a GpuTensor to a CPU torch.Tensor.
+
+    In eager/training mode we flush the streaming command buffer and
+    evaluate pending lazy work before host readback.
+    """
+    if _eager_mode:
+        gpu.flush_streaming_batch()
+        gpu.eval(gpu_t)
     return gpu_t.to_torch()
 
 
@@ -167,12 +174,17 @@ _eager_mode = False
 def set_eager_mode(enabled=True):
     """Enable or disable eager evaluation mode.
 
-    When enabled, all GPU operations are immediately materialized, which is
-    needed for autograd training (backward pass requires live tensor data).
-    When disabled (default), lazy evaluation with kernel fusion is used.
+    When enabled, training ops are synchronized at eager boundaries (CPU
+    readback and in-place state updates) instead of every op creation.
+    Also activates streaming command buffer to amortize Metal dispatch.
     """
     global _eager_mode
-    _eager_mode = enabled
+    if enabled and not _eager_mode:
+        _eager_mode = True
+        gpu.begin_streaming_batch()
+    elif not enabled and _eager_mode:
+        gpu.end_streaming_batch()
+        _eager_mode = False
 
 
 def _wrap(gpu_t, torch_dtype=None, requires_grad=False):
