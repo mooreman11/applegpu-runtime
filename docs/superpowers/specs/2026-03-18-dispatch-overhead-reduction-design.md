@@ -114,7 +114,7 @@ Root cause: in eager mode, every op triggers a full cycle of:
 
 ## Implementation Order
 
-1. Phase A first (Python-only, minimal risk, immediate ~2-3x win)
+1. Phase A first (Python-only, minimal risk, modest win -- removes CPU sync from 9 in-place ops)
 2. Benchmark to confirm Phase A improvement
 3. Phase B (Rust + Python, more complex, additional ~2x on top of A)
 4. Benchmark to confirm Phase B improvement against success metric
@@ -139,4 +139,5 @@ Root cause: in eager mode, every op triggers a full cycle of:
 - New test: rolling flush triggers correctly at N=512
 - New test: `set_eager_mode` toggle multiple times without crash (idempotent)
 - New test: chain of 50+ ops followed by readback (validates Metal sequential guarantee)
+- New test: graph with independent branches triggers parallel eval while streaming is active (validates flush-then-parallel transition)
 - Benchmark: `benchmarks/bench_training.py` shows GPU faster than CPU for LSTM h=128
