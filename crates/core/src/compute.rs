@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::ffi::CString;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::buffer::Buffer;
@@ -2536,6 +2537,108 @@ pub fn end_batch() -> *mut std::ffi::c_void {
 /// Call this when an error occurs mid-batch to clean up batch state.
 pub fn abort_batch() {
     unsafe { ffi::gpu_bridge_abort_batch() }
+}
+
+// ── Streaming batch mode ──────────────────────────────────────────
+
+/// Wrapper for raw pointer to satisfy Send/Sync requirements.
+struct QueuePtr(*mut std::ffi::c_void);
+unsafe impl Send for QueuePtr {}
+unsafe impl Sync for QueuePtr {}
+
+static STREAMING_ACTIVE: AtomicBool = AtomicBool::new(false);
+static STREAMING_OPS_COUNT: AtomicU32 = AtomicU32::new(0);
+static STREAMING_QUEUE: Mutex<QueuePtr> = Mutex::new(QueuePtr(std::ptr::null_mut()));
+
+/// Default flush interval (configurable via APPLEGPU_STREAMING_FLUSH_INTERVAL env var).
+fn streaming_flush_interval() -> u32 {
+    static INTERVAL: once_cell::sync::Lazy<u32> = once_cell::sync::Lazy::new(|| {
+        std::env::var("APPLEGPU_STREAMING_FLUSH_INTERVAL")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(512)
+    });
+    *INTERVAL
+}
+
+/// Check if streaming batch mode is active.
+pub fn streaming_is_active() -> bool {
+    STREAMING_ACTIVE.load(Ordering::Acquire)
+}
+
+/// Begin streaming batch mode. Opens a persistent command buffer that stays
+/// open across multiple eval() calls. No-op if already active.
+pub fn begin_streaming_batch(queue: *mut std::ffi::c_void) {
+    if STREAMING_ACTIVE.load(Ordering::Acquire) {
+        return; // already active, no-op
+    }
+    let cb = begin_batch(queue);
+    if cb.is_null() {
+        return; // failed to create CB
+    }
+    STREAMING_QUEUE.lock().unwrap().0 = queue;
+    STREAMING_OPS_COUNT.store(0, Ordering::Release);
+    STREAMING_ACTIVE.store(true, Ordering::Release);
+}
+
+/// Flush the streaming batch: commit+wait the current CB, then reopen a new one.
+/// No-op if streaming is not active.
+pub fn flush_streaming_batch() {
+    if !STREAMING_ACTIVE.load(Ordering::Acquire) {
+        return;
+    }
+    let cb = end_batch();
+    if !cb.is_null() {
+        wait_command_buffer(cb);
+    }
+    // Reopen
+    let queue = STREAMING_QUEUE.lock().unwrap().0;
+    if !queue.is_null() {
+        let _new_cb = begin_batch(queue);
+    }
+    STREAMING_OPS_COUNT.store(0, Ordering::Release);
+}
+
+/// End streaming batch mode. Commits+waits the final CB, clears state.
+/// No-op if streaming is not active.
+pub fn end_streaming_batch() {
+    if !STREAMING_ACTIVE.load(Ordering::Acquire) {
+        return;
+    }
+    let cb = end_batch();
+    if !cb.is_null() {
+        wait_command_buffer(cb);
+    }
+    STREAMING_QUEUE.lock().unwrap().0 = std::ptr::null_mut();
+    STREAMING_OPS_COUNT.store(0, Ordering::Release);
+    STREAMING_ACTIVE.store(false, Ordering::Release);
+}
+
+/// Abort streaming batch: discard uncommitted work, then reopen a fresh CB.
+/// Used for error recovery. No-op if streaming is not active.
+pub fn abort_and_reopen_streaming_batch() {
+    if !STREAMING_ACTIVE.load(Ordering::Acquire) {
+        return;
+    }
+    abort_batch();
+    // Reopen
+    let queue = STREAMING_QUEUE.lock().unwrap().0;
+    if !queue.is_null() {
+        let _new_cb = begin_batch(queue);
+    }
+    STREAMING_OPS_COUNT.store(0, Ordering::Release);
+}
+
+/// Increment streaming ops count and auto-flush if threshold reached.
+/// Call this after encoding an op into the streaming CB.
+pub fn streaming_tick() {
+    if !STREAMING_ACTIVE.load(Ordering::Acquire) {
+        return;
+    }
+    let count = STREAMING_OPS_COUNT.fetch_add(1, Ordering::AcqRel) + 1;
+    if count >= streaming_flush_interval() {
+        flush_streaming_batch();
+    }
 }
 
 // ── Concurrent queue pool ──────────────────────────────────────────
