@@ -17,9 +17,16 @@ Root cause: in eager mode, every op triggers a full cycle of:
 
 ### Phase A: Deferred CPU Sync (Python-only change)
 
-**What**: Stop calling `to_torch()` + `backing.copy_()` after every op in eager mode. Only sync at explicit readback points.
+**What**: Remove the `_sync_cpu_backing_from_gpu()` call in `_update_inplace()` that runs after every in-place op in eager mode.
 
-**Why safe**: Subagent analysis confirmed that during normal training:
+**Current state** (verified against actual code):
+- `_wrap()` (line 203): Already clean -- no eager eval or CPU sync. 84 ops use this path.
+- `_update_inplace()` (line 209): Still calls `gpu.eval()` (line 217) and `_sync_cpu_backing_from_gpu()` (line 222) in eager mode. 9 in-place ops use this path (add_, mul_, copy_, etc.).
+- `_gpu_tensor_to_torch_cpu()` (line 40): Calls `gpu.eval()` (line 48) + `to_torch()` (line 49) -- this is the readback path, keep as-is.
+
+**Key insight**: Most ops (84/93) already skip eager eval via `_wrap()`. The per-op overhead comes from: (a) the 9 in-place ops doing eval+sync, and (b) readback points like `loss.item()` and `to_torch_cpu()` triggering full graph eval. The main overhead is NOT per-op eval -- it's that readback forces a full commit+wait.
+
+**Why removing CPU sync is safe**: Subagent analysis confirmed that during normal training:
 - All dispatch handlers use `_unwrap()` which returns the GPU tensor directly
 - CPU fallback reads directly from GPU tensor via `_gpu_tensor_to_torch_cpu()`
 - Autograd, optimizers, and `clip_grad_norm_` all go through `__torch_dispatch__`
@@ -29,11 +36,9 @@ Root cause: in eager mode, every op triggers a full cycle of:
 - CPU fallback ops (e.g., `fill`, `zeros`, `bernoulli_`) call `_gpu_tensor_to_torch_cpu()` internally
 - `__repr__` only reads metadata (shape), does not access buffer contents
 
-**Changes in `python/applegpu_runtime/torch_backend.py`**:
+**Change in `python/applegpu_runtime/torch_backend.py`**:
 
-1. `_wrap()` (line ~178): Remove the `if _eager_mode:` block that calls `gpu_t.to_torch()` + `backing.copy_()` (lines 183-197). Keep `gpu.eval(gpu_t)`.
-
-2. `_update_inplace()` (line ~201): Remove the `if _eager_mode:` block that calls `_sync_cpu_backing_from_gpu()` (lines 213-222). Keep `gpu.eval(result_gpu)`.
+1. `_update_inplace()` (line 209): Remove lines 221-222 (`if _eager_mode: _sync_cpu_backing_from_gpu(a, result_gpu)`). Keep `gpu.eval(result_gpu)` on line 217 -- this is needed for in-place ops that subsequent ops may depend on.
 
 **Sync points** (already handle their own readback):
 - `to_torch_cpu()` -- calls `_gpu_tensor_to_torch_cpu()` which does `gpu.eval()` + `to_torch()`
@@ -43,7 +48,7 @@ Root cause: in eager mode, every op triggers a full cycle of:
 
 **Risk**: If a GPU tensor is unexpectedly freed, `_unwrap()` reconstructs from stale CPU backing. Mitigation: this doesn't happen in eager mode (see safety justification above). Add `warnings.warn()` if reconstruction is triggered in eager mode -- this indicates a bug, not expected behavior.
 
-**Expected speedup**: ~2-3x (eliminates per-op GPU->CPU DMA)
+**Expected speedup**: Modest for Phase A alone (only 9 in-place ops affected). The main win comes from Phase B.
 
 ### Phase B: Streaming Command Buffer (Rust + Python change)
 
@@ -69,7 +74,7 @@ Root cause: in eager mode, every op triggers a full cycle of:
 
 2. `eval()` (parallel path): When streaming is active, flush the streaming batch first (commit+wait), then proceed with per-level batch contexts as normal. Streaming and parallel evaluation are mutually exclusive within a single eval call.
 
-3. `read_bytes()`, `read_f16()`, `read_f32()`, `as_bytes()`: Add implicit flush INSIDE the read method, AFTER `get_tensor()` succeeds but BEFORE accessing `buffer.contents()`:
+3. `read_bytes()`, `read_f16()`, `read_f32()`: Add implicit flush INSIDE the read method, AFTER `get_tensor()` succeeds but BEFORE accessing `buffer.contents()` (these are the only three buffer-read entry points on `LazyRuntime`; internal methods like `Tensor::as_bytes()` are only called via these):
    ```rust
    pub fn read_bytes(&self, id: u64) -> Result<Vec<u8>> {
        let t = self.get_tensor(id)?;
@@ -90,7 +95,7 @@ Root cause: in eager mode, every op triggers a full cycle of:
 1. `set_eager_mode(True)`: Call `gpu.begin_streaming_batch()` after enabling eager mode
 2. `set_eager_mode(False)`: Call `gpu.end_streaming_batch()` before disabling
 3. Guard against double-open: if `set_eager_mode(True)` is called when streaming is already active, no-op
-4. `_gpu_tensor_to_torch_cpu()`: Call `gpu.flush_streaming_batch()` BEFORE `gpu_t.to_torch()`. This is critical -- `to_torch()` reads buffer contents via `read_bytes`, and the streaming CB must be flushed first for the data to be valid. This makes `to_torch_cpu()`, CPU fallback ops, and `.item()` all safe as sync points.
+4. `_gpu_tensor_to_torch_cpu()`: Call `gpu.flush_streaming_batch()` BEFORE `gpu_t.to_torch()` (belt-and-suspenders -- the Rust-side flush guard in `read_bytes()` would also catch this, but flushing early in Python avoids unnecessary work). This makes `to_torch_cpu()`, CPU fallback ops, and `.item()` all safe as sync points.
 
 **PyO3 changes in `crates/python/src/lib.rs`**:
 
