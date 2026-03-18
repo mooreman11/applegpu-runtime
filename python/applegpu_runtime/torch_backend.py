@@ -38,7 +38,14 @@ def _warn_fallback(op_name):
 
 
 def _gpu_tensor_to_torch_cpu(gpu_t):
-    """Convert a GpuTensor to a CPU torch.Tensor."""
+    """Convert a GpuTensor to a CPU torch.Tensor.
+
+    In eager/training mode we explicitly flush pending lazy work for this tensor
+    before host readback. This preserves eager-visible semantics without forcing
+    a GPU roundtrip at every op creation.
+    """
+    if _eager_mode:
+        gpu.eval(gpu_t)
     return gpu_t.to_torch()
 
 
@@ -128,6 +135,15 @@ def _unwrap(t):
                 return gt
             except (ValueError, RuntimeError):
                 # Tensor was freed by lazy runtime -- recreate from CPU backing.
+                if _eager_mode:
+                    import warnings
+                    warnings.warn(
+                        f"GPU tensor {id(t)} was freed in eager mode -- "
+                        "reconstructing from CPU backing (may be stale). "
+                        "This indicates a bug.",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
                 # Access the backing CPU data WITHOUT going through __torch_dispatch__
                 # to avoid infinite recursion.
                 cpu_data = _extract_cpu_backing(t)
@@ -167,34 +183,35 @@ _eager_mode = False
 def set_eager_mode(enabled=True):
     """Enable or disable eager evaluation mode.
 
-    When enabled, all GPU operations are immediately materialized, which is
-    needed for autograd training (backward pass requires live tensor data).
+    When enabled, training ops are synchronized at eager boundaries (CPU
+    readback and in-place state updates) instead of every op creation. This
+    preserves autograd-visible behavior while avoiding per-op Metal roundtrips.
     When disabled (default), lazy evaluation with kernel fusion is used.
     """
     global _eager_mode
     _eager_mode = enabled
 
 
+def _sync_cpu_backing_from_gpu(app_tensor, gpu_t):
+    """Best-effort sync of the tensor subclass backing store from GPU data."""
+    try:
+        cpu_data = gpu_t.to_torch()
+        global _in_fallback
+        was = _in_fallback
+        _in_fallback = True
+        try:
+            backing = app_tensor.data
+            if backing.shape == cpu_data.shape:
+                backing.copy_(cpu_data)
+        finally:
+            _in_fallback = was
+    except Exception:
+        pass
+
+
 def _wrap(gpu_t, torch_dtype=None, requires_grad=False):
     """Wrap a GpuTensor in an ApplegpuTensor."""
-    if _eager_mode:
-        gpu.eval(gpu_t)
     result = ApplegpuTensor(gpu_t, torch_dtype=torch_dtype, requires_grad=requires_grad)
-    if _eager_mode:
-        # Sync CPU backing so _unwrap can reconstruct if needed
-        try:
-            cpu_data = gpu_t.to_torch()
-            global _in_fallback
-            was = _in_fallback
-            _in_fallback = True
-            try:
-                backing = result.data
-                if backing.shape == cpu_data.shape:
-                    backing.copy_(cpu_data)
-            finally:
-                _in_fallback = was
-        except Exception:
-            pass
     return result
 
 
@@ -210,20 +227,6 @@ def _update_inplace(a, result_gpu):
     if isinstance(a, ApplegpuTensor):
         _gpu_tensor_registry[a.data_ptr()] = result_gpu
         a._gpu_tensor = result_gpu
-        if _eager_mode:
-            try:
-                cpu_data = result_gpu.to_torch()
-                global _in_fallback
-                was = _in_fallback
-                _in_fallback = True
-                try:
-                    backing = a.data
-                    if backing.shape == cpu_data.shape:
-                        backing.copy_(cpu_data)
-                finally:
-                    _in_fallback = was
-            except Exception:
-                pass
     return a
 
 
