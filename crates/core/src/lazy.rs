@@ -164,9 +164,15 @@ impl LazyRuntime {
 
         let levels = self.graph.parallel_levels(eval_id)?;
 
-        // Fast path: linear graph -> existing single-CB path
+        // Fast path: linear graph -> single-CB path
         if levels.iter().all(|l| l.len() == 1) {
             return self.eval_single_cb(device, container_id, levels);
+        }
+
+        // Parallel path: if streaming is active, flush first
+        // (streaming and parallel contexts are mutually exclusive)
+        if crate::compute::streaming_is_active() {
+            crate::compute::flush_streaming_batch();
         }
 
         let num_queues = std::cmp::min(
@@ -288,8 +294,15 @@ impl LazyRuntime {
     fn eval_single_cb(&mut self, device: &Device, container_id: ContainerId, levels: Vec<Vec<u64>>) -> Result<()> {
         let order: Vec<u64> = levels.into_iter().flat_map(|l| l.into_iter()).collect();
         let queue = crate::compute::get_shared_queue(device);
-        let batch_cb = crate::compute::begin_batch(queue);
-        let use_batch = !batch_cb.is_null();
+        let streaming = crate::compute::streaming_is_active();
+
+        // If streaming, the CB is already open — don't create a new one
+        let use_batch = if streaming {
+            true // ops encode into the existing streaming CB
+        } else {
+            let batch_cb = crate::compute::begin_batch(queue);
+            !batch_cb.is_null()
+        };
         let mut last_cb: Option<*mut std::ffi::c_void> = None;
 
         let loop_result: Result<()> = (|| {
@@ -331,6 +344,9 @@ impl LazyRuntime {
                     self.tensors.insert(node_id, out);
                     self.scheduler.allocate_tensor(container_id, indices_id, idx_size)?;
                     self.tensors.insert(indices_id, idx_tensor);
+                    if streaming {
+                        crate::compute::streaming_tick();
+                    }
                     continue;
                 }
 
@@ -342,11 +358,19 @@ impl LazyRuntime {
                 let size = node.out_shape.numel() * node.out_dtype.size_bytes();
                 self.scheduler.allocate_tensor(container_id, node_id, size)?;
                 self.tensors.insert(node_id, out);
+                if streaming {
+                    crate::compute::streaming_tick();
+                }
             }
             Ok(())
         })();
 
-        if use_batch {
+        if streaming {
+            if loop_result.is_err() {
+                crate::compute::abort_and_reopen_streaming_batch();
+            }
+            // Don't commit on success — CB stays open for next eval() call
+        } else if use_batch {
             if loop_result.is_ok() {
                 let cb = crate::compute::end_batch();
                 if !cb.is_null() {
@@ -2440,18 +2464,27 @@ impl LazyRuntime {
 
     /// Read tensor data as raw bytes. Requires the tensor to be materialized.
     pub fn read_bytes(&self, id: u64) -> Result<Vec<u8>> {
+        if crate::compute::streaming_is_active() {
+            crate::compute::flush_streaming_batch();
+        }
         let t = self.get_tensor(id)?;
         Ok(t.as_bytes()?.to_vec())
     }
 
     /// Read tensor data as f16 slice (raw u16 bit patterns). Requires the tensor to be materialized.
     pub fn read_f16(&self, id: u64) -> Result<Vec<u16>> {
+        if crate::compute::streaming_is_active() {
+            crate::compute::flush_streaming_batch();
+        }
         let t = self.get_tensor(id)?;
         Ok(t.as_f16_slice()?.to_vec())
     }
 
     /// Read tensor data as f32 slice. Requires the tensor to be materialized.
     pub fn read_f32(&self, id: u64) -> Result<Vec<f32>> {
+        if crate::compute::streaming_is_active() {
+            crate::compute::flush_streaming_batch();
+        }
         let t = self.get_tensor(id)?;
         Ok(t.as_f32_slice()?.to_vec())
     }
