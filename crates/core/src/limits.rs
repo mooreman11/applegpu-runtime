@@ -15,12 +15,14 @@ pub struct ResourceLimits {
 }
 
 impl ResourceLimits {
-    /// Default limits: 512MB per tensor, 2GB total, 10000 tensors.
+    /// Default limits: 1GB per tensor, 8GB total, 100000 tensors.
+    /// Generous defaults to avoid quota errors during multi-epoch training
+    /// with large models. Use set_limits() or env vars to restrict.
     pub fn default_limits() -> Self {
         ResourceLimits {
-            max_tensor_size_bytes: 512 * 1024 * 1024,
-            max_total_memory_bytes: 2_usize * 1024 * 1024 * 1024,
-            max_tensor_count: 10_000,
+            max_tensor_size_bytes: 1024 * 1024 * 1024,
+            max_total_memory_bytes: 8_usize * 1024 * 1024 * 1024,
+            max_tensor_count: 100_000,
         }
     }
 
@@ -129,9 +131,9 @@ mod tests {
     #[test]
     fn default_limits_are_reasonable() {
         let limits = ResourceLimits::default_limits();
-        assert_eq!(limits.max_tensor_size_bytes, 512 * 1024 * 1024);
-        assert_eq!(limits.max_total_memory_bytes, 2_usize * 1024 * 1024 * 1024);
-        assert_eq!(limits.max_tensor_count, 10_000);
+        assert_eq!(limits.max_tensor_size_bytes, 1024 * 1024 * 1024);
+        assert_eq!(limits.max_total_memory_bytes, 8_usize * 1024 * 1024 * 1024);
+        assert_eq!(limits.max_tensor_count, 100_000);
     }
 
     #[test]
