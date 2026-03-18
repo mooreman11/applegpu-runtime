@@ -879,6 +879,11 @@ def _op_t(a):
 
 @register_op(torch.ops.aten.transpose.int)
 def _op_transpose_int(a, dim0, dim1):
+    ndim = len(a.shape)
+    if dim0 < 0:
+        dim0 += ndim
+    if dim1 < 0:
+        dim1 += ndim
     return _wrap(gpu.transpose_dims(_unwrap(a), dim0, dim1))
 
 
@@ -886,6 +891,11 @@ def _op_transpose_int(a, dim0, dim1):
 def _op_transpose_inplace(a, dim0, dim1):
     # transpose_ is a view op that swaps dims. Return a new wrapped tensor
     # with the correct shape since we can't modify PyTorch's internal metadata.
+    ndim = len(a.shape)
+    if dim0 < 0:
+        dim0 += ndim
+    if dim1 < 0:
+        dim1 += ndim
     return _wrap(gpu.transpose_dims(_unwrap(a), dim0, dim1))
 
 
