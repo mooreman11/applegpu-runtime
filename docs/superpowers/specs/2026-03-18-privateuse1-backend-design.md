@@ -34,13 +34,15 @@ Tensor IDs are stored in `c10::DataPtr`'s opaque `void* context`. The custom all
 
 ### Memory
 
-Custom `c10::Allocator` backed by Metal `storageModeShared` buffers via Rust's `BufferPool`. PyTorch's `at::Tensor` directly holds Metal buffer pointers (zero-copy). Deallocation callback calls `applegpu_ffi_free(tensor_id)` which returns the buffer to the pool.
+Custom `c10::Allocator` backed by Metal `storageModeShared` buffers via Rust's `BufferPool`. PyTorch's `at::Tensor` directly holds Metal buffer pointers (zero-copy). BufferPool rounds allocations to next power-of-two (e.g., 100 bytes → 128 bytes); the logical size is tracked separately in TensorMeta.
+
+**Deferred-free**: The DataPtr deleter calls `applegpu_ffi_free(tensor_id)`. However, `free` must check whether the tensor_id is still referenced as an input by any pending graph node. If referenced, the tensor is marked for deferred release — the buffer is only returned to the pool after `eval()` materializes all dependent ops. Without this, optimizer parameter tensors (simultaneously held by PyTorch and referenced by gradient graph nodes) would be freed prematurely, crashing training.
 
 Pre-allocated output buffers: `empty_strided` allocates the Metal buffer immediately and inserts it into `LazyRuntime::tensors` as a pre-allocated tensor. When an op records with this tensor as output, `eval_single_cb()` writes into the existing buffer instead of calling `pool.acquire()`.
 
 ### Autograd
 
-Works automatically at the PrivateUse1 dispatch key. No `AutogradPrivateUse1` registration needed. PyTorch's built-in differentiation rules apply.
+Works automatically for aten ops at the PrivateUse1 dispatch key via PyTorch's built-in differentiation rules (`derivatives.yaml`). `AutogradPrivateUse1` registration is NOT needed for Phases 2-3 (aten ops only). If custom non-aten ops are registered later (e.g., fused LSTM kernel), `AutogradPrivateUse1` + custom backward formulas will be required.
 
 ### CPU Fallback
 
@@ -50,13 +52,14 @@ A BackendFallback kernel (~60 lines) handles unregistered ops. It MUST flush the
 
 ### Component 1: Rust FFI Bridge (`crates/core/src/backend_ffi.rs`, ~500 lines)
 
-New module in `applegpu-core`. Global `Mutex<LazyRuntime>`. Exposes:
+New module in `applegpu-core`. Global `Mutex<LazyRuntime>` (acceptable because Python's GIL serializes all calls; multi-threaded Rust callers would need a different strategy). Uses a `OnceCell` init guard to prevent double-initialization if both the C++ shim and PyO3 module are loaded (panics with a clear error message). Exposes:
 
 - `applegpu_ffi_init() → bool`
 - `applegpu_ffi_alloc(size, dtype_i8, *out_tensor_id) → *mut u8`
 - `applegpu_ffi_free(tensor_id)`
+- `applegpu_ffi_copy(src_id, dst_id, src_offset, dst_offset, nbytes)` — critical for CPU fallback H2D/D2H
 - `applegpu_ffi_add(a_id, b_id, a_offset, a_sizes_ptr, a_ndim, ...) → u64`
-- ... (one per op)
+- ... (one per op, all return new tensor_id or error code)
 - `applegpu_ffi_eval(tensor_id)`
 - `applegpu_ffi_synchronize()` — flush streaming batch, wait
 - `applegpu_ffi_shape(tensor_id, *out_dims, *out_ndim)`
@@ -64,18 +67,19 @@ New module in `applegpu-core`. Global `Mutex<LazyRuntime>`. Exposes:
 
 ### Component 2: C++ Shim (`backend_cpp/applegpu_backend.cpp`, ~400 lines)
 
-Links against libtorch + `libapplegpu_core.a` + `libAppleGPUBridge.a` + `-lswiftCore -framework Metal -framework MetalPerformanceShaders -framework Foundation`.
+Links against libtorch + `libapplegpu_core.a` + `libAppleGPUBridge.a` + same framework/runtime flags as `crates/core/build.rs` (source of truth for link dependencies — includes `-lswiftCore`, `-framework Metal`, `-framework Foundation`, and any others `build.rs` specifies).
 
 - **Custom Allocator** (~60 lines): `allocate()` calls `applegpu_ffi_alloc()`. Returns `c10::DataPtr` with tensor_id in context. Deleter calls `applegpu_ffi_free()`.
 - **Op Registrations** (~200 lines): `TORCH_LIBRARY_IMPL(aten, PrivateUse1, m)`. 13 minimum ops + top-20 hot ops incrementally. Each wrapper: extract tensor_id from DataPtr context → call extern "C" Rust → wrap result.
-- **CPU Fallback** (~60 lines): Flush streaming batch → copy to CPU → dispatch → copy back.
+- **CPU Fallback** (~60 lines): Flush streaming batch → copy to CPU → dispatch → copy back. All errors from Rust FFI are propagated via `TORCH_CHECK` (PyTorch's standard error reporting macro).
 - **DeviceGuardImpl** (~50 lines): Single device, single stream. `synchronize()` calls `applegpu_ffi_synchronize()`.
 
 ### Component 3: Modified LazyRuntime (`crates/core/src/lazy.rs`)
 
 - `insert_preallocated(id, buffer)`: stores a Tensor in `self.tensors` with pre-allocated buffer, no graph node. Compatible with topo_sort (treated as materialized leaf).
-- `eval_single_cb()`: before `pool.acquire()`, check if tensor_id already in `self.tensors`. If yes, use existing buffer.
+- `eval_single_cb()`: before EACH `pool.acquire()` call, check if tensor_id already in `self.tensors`. If yes, use existing buffer. This applies to ALL allocation sites including multi-output ops like `MaxPool2dWithIndices` (which allocates both values and indices buffers).
 - Tensor quota: remove or make configurable for PrivateUse1 (PyTorch manages lifetime via refcounting).
+- Deferred-free tracking: maintain a set of tensor_ids referenced by pending graph nodes. `applegpu_ffi_free` checks this set before releasing buffers.
 
 ### Component 4: Op Recording Optimizations (`crates/core/src/ops.rs`)
 
@@ -159,3 +163,5 @@ def load_cpp_backend():
 | CNN 22K ops recording | 440ms | 4.4-8.8ms (→ 1.1-2.2ms optimized) |
 | Metal readback | 5ms (streaming) | 5ms (unchanged) |
 | GPU eval (fused) | depends on model | single batched dispatch per sync point |
+
+**Note on LSTM**: Even at 50ns/op, LSTM h=128 recording overhead (583K × 50ns = 29ms) exceeds CPU time (15ms). LSTM may require a dedicated fused Metal kernel (single dispatch per timestep) to beat CPU. This is a separate optimization on top of PrivateUse1, not a blocker for the backend itself.
