@@ -44,9 +44,32 @@ Pre-allocated output buffers: `empty_strided` allocates the Metal buffer immedia
 
 Works automatically for aten ops at the PrivateUse1 dispatch key via PyTorch's built-in differentiation rules (`derivatives.yaml`). `AutogradPrivateUse1` registration is NOT needed for Phases 2-3 (aten ops only). If custom non-aten ops are registered later (e.g., fused LSTM kernel), `AutogradPrivateUse1` + custom backward formulas will be required.
 
+### View/Stride Handling
+
+PyTorch view ops (`transpose`, `reshape`, `slice`, `expand`, `as_strided`) create tensors that share storage with a different offset/strides. The C++ shim passes `(tensor_id, storage_offset, sizes, strides)` for every op argument. The Rust FFI bridge handles views by:
+
+1. **For contiguous inputs**: use the tensor_id directly (most ops).
+2. **For non-contiguous/viewed inputs**: record a view node in the graph that references the base tensor's buffer with the given offset/strides. The view node is lightweight (no allocation, just metadata).
+3. **`contiguous()` op**: if a kernel requires contiguous input, record a copy op that materializes the view into a fresh buffer. The C++ shim registers `contiguous` as a PrivateUse1 op that calls `applegpu_ffi_contiguous(tensor_id, offset, sizes, strides) → new_tensor_id`.
+
+This is the same approach MPS uses — views are metadata-only until a kernel that requires contiguous layout forces a copy.
+
+### Error Propagation
+
+Rust `extern "C"` functions return error codes (0 = success, negative = error). On error, the Rust side stores the error message in a thread-local `String`. The C++ shim calls `applegpu_ffi_last_error() → *const c_char` to retrieve it, then calls `TORCH_CHECK(false, error_msg)` to propagate to PyTorch. This matches the existing pattern in `ffi.rs` where null/zero returns indicate failure and the caller maps to `GpuError`.
+
 ### CPU Fallback
 
 A BackendFallback kernel (~60 lines) handles unregistered ops. It MUST flush the streaming batch first, then copy tensors to CPU, dispatch the CPU op, copy results back.
+
+### Design Rationale
+
+This design was chosen after evaluating alternatives in the same session:
+
+1. **Streaming command buffer (Phase B)** — implemented first, reduced Metal readback 300ms → 5ms. But Python dispatch overhead (583K × 20µs) still dominated. Streaming is a prerequisite, not a replacement.
+2. **Deferred CPU sync (Phase A)** — attempted and reverted. Removing `_sync_cpu_backing_from_gpu()` from `_update_inplace()` broke training because tensors ARE freed by the lazy runtime in eager mode. Revealed that tensor lifetime management is a real issue.
+3. **Lazy training mode** — proven correct (autograd works in non-eager mode, 9x faster). But crashes on complex models due to graph node removal after eval + 100K tensor quota. Pre-allocated buffers solve this.
+4. **torch.library + PyO3** — evaluated as a pure-Rust alternative. ~200-500ns/op vs ~200ns for C++ shim. Rejected per CLAUDE.md's "hyperoptimized" mandate: 200-500ns with GIL acquisition is not hyperoptimized.
 
 ## Components
 
@@ -126,10 +149,18 @@ def load_cpp_backend():
 - Build with `torch.utils.cpp_extension`
 - `make test-cpp-backend`
 
-### Phase 3: Op Migration (incremental)
+### Phase 3a: Op Migration — MLP checkpoint
 **Test each op**: register → run → verify against CPU reference
-- Top 20: matmul, add, mul, sub, div, relu, softmax, layer_norm, embedding, transpose, reshape, cat, slice, copy, neg, exp, log, gelu, sigmoid, tanh
-- Run full Python test suite after each batch
+- Ops: matmul, add, mul, relu, softmax, embedding, reshape, transpose, copy
+- **Checkpoint**: run MLP training benchmark (GPU vs CPU)
+
+### Phase 3b: Op Migration — CNN checkpoint
+- Ops: conv2d, max_pool2d, batch_norm, cat, sub, div
+- **Checkpoint**: run CNN training benchmark (GPU vs CPU)
+
+### Phase 3c: Op Migration — Transformer checkpoint
+- Ops: layer_norm, gelu, sigmoid, tanh, neg, exp, log, slice, contiguous
+- **Checkpoint**: run Transformer training benchmark (GPU vs CPU)
 
 ### Phase 4: Training Validation + Op Recording Optimization
 - SmallVec, cached shapes for ~50-100ns per op recording
