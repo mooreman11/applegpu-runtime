@@ -1780,6 +1780,19 @@ class ApplegpuTensor(torch.Tensor):
         except Exception:
             pass
 
+    def __reduce_ex__(self, protocol):
+        """Pickle support for torch.save — single GPU→CPU DMA, then serialize.
+
+        Serialization requires host memory (pickle writes bytes, not GPU buffers).
+        to_torch_cpu() uses direct data_ptr() copy — one DMA transfer, no
+        intermediate Python objects. Same approach as CUDA and MPS backends.
+
+        On load, tensors are plain CPU torch.Tensors. Call to_applegpu() to
+        move back to GPU.
+        """
+        cpu_tensor = self.to_torch_cpu()
+        return cpu_tensor.__reduce_ex__(protocol)
+
     @classmethod
     def __torch_function__(cls, func, types, args=(), kwargs=None):
         """Intercept torch functions — pass through to __torch_dispatch__ with autograd."""
@@ -1933,6 +1946,42 @@ def _move_module_to_applegpu(module):
     # Recurse into child modules
     for child in module.children():
         _move_module_to_applegpu(child)
+
+    # Patch GRU/RNN batch_first — their C++ implementation applies transpose_
+    # internally, bypassing __torch_dispatch__. We intercept at the module level.
+    _patch_rnn_batch_first(module)
+
+
+def _patch_rnn_batch_first(module):
+    """Wrap GRU/RNN forward to handle batch_first in Python instead of C++.
+
+    PyTorch's C++ GRU/RNN implementation applies transpose_(0,1) internally
+    when batch_first=True. This bypasses __torch_dispatch__, producing wrong
+    output shapes. We disable batch_first on the module and do the transposes
+    ourselves in Python where they flow through our dispatch.
+
+    LSTM is NOT patched — its C++ batch_first implementation works correctly
+    with __torch_dispatch__.
+    """
+    import torch.nn as nn
+    # Only patch GRU and RNN (not LSTM — LSTM works fine with batch_first=True)
+    if isinstance(module, (nn.GRU, nn.RNN)) and module.batch_first:
+        original_forward = module.forward
+
+        def patched_forward(input, hx=None):
+            # Transpose (batch, seq, feat) → (seq, batch, feat)
+            input = input.transpose(0, 1)
+            # Run with batch_first=False
+            module.batch_first = False
+            try:
+                output, hidden = original_forward(input, hx)
+            finally:
+                module.batch_first = True
+            # Transpose output back: (seq, batch, feat) → (batch, seq, feat)
+            output = output.transpose(0, 1)
+            return output, hidden
+
+        module.forward = patched_forward
 
 
 def _cpu_fallback(func, args, kwargs):
