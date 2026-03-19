@@ -12,3 +12,4 @@ applegpu-wire = { path = "../wire" }
 
 [lib]
 name = "applegpu_core"
+crate-type = ["lib", "staticlib"]
