@@ -449,45 +449,17 @@ at::Tensor& applegpu_add_(at::Tensor& self, const at::Tensor& other, const at::S
     auto self_r = ensure_op_ready(self);
     auto other_r = ensure_op_ready(other);
 
-    if (alpha.toDouble() != 1.0) {
-        // self += alpha * other → scalar_mul(other, alpha) → add(self, scaled)
-        uint64_t scaled_id = 0;
-        void* scaled_ptr = applegpu_ffi_scalar_mul_out(
-            get_tensor_id(other_r), static_cast<float>(alpha.toDouble()), &scaled_id);
-        TORCH_CHECK(scaled_ptr != nullptr, "applegpu add_: scalar_mul failed");
+    // Eval inputs so we can read their data
+    eval_applegpu_tensor_if_needed(self_r);
+    eval_applegpu_tensor_if_needed(other_r);
+    applegpu_ffi_synchronize();
 
-        uint64_t out_id = 0;
-        void* out_ptr = applegpu_ffi_add_out(get_tensor_id(self_r), scaled_id, &out_id);
-        TORCH_CHECK(out_ptr != nullptr, "applegpu add_: add failed");
-
-        // Swap self's storage to point to the result buffer (lazy — no eval yet)
-        auto* impl = self.unsafeGetTensorImpl();
-        auto new_dptr = c10::DataPtr{out_ptr, new TensorContext{out_id},
-            [](void* ctx) { auto* tc = static_cast<TensorContext*>(ctx); applegpu_ffi_free(tc->tensor_id); delete tc; },
-            c10::Device(c10::DeviceType::PrivateUse1, 0)};
-        auto new_storage = c10::Storage(c10::Storage::use_byte_size_t(),
-            self.nbytes(), std::move(new_dptr), &global_allocator);
-        impl->set_storage_and_dtype(std::move(new_storage), self.dtype());
-
-        // Old self storage is released by DataPtr deleter when refcount drops.
-        // Scaled intermediate is consumed by the add op — freed after eval.
-        return self;
-    }
-
-    // alpha=1: self += other → add(self, other), swap storage
-    uint64_t out_id = 0;
-    void* out_ptr = applegpu_ffi_add_out(get_tensor_id(self_r), get_tensor_id(other_r), &out_id);
-    TORCH_CHECK(out_ptr != nullptr, "applegpu add_: add failed");
-
-    auto* impl = self.unsafeGetTensorImpl();
-    auto new_dptr = c10::DataPtr{out_ptr, new TensorContext{out_id},
-        [](void* ctx) { auto* tc = static_cast<TensorContext*>(ctx); applegpu_ffi_free(tc->tensor_id); delete tc; },
-        c10::Device(c10::DeviceType::PrivateUse1, 0)};
-    auto new_storage = c10::Storage(c10::Storage::use_byte_size_t(),
-        self.nbytes(), std::move(new_dptr), &global_allocator);
-    impl->set_storage_and_dtype(std::move(new_storage), self.dtype());
-
-    // Old self storage released by DataPtr deleter when refcount drops.
+    // Direct CPU manipulation on storageModeShared buffers (no H2D/D2H copy).
+    auto self_cpu = at::from_blob(self.data_ptr(), self.sizes(), self.strides(),
+        at::TensorOptions().dtype(self.dtype()).device(at::kCPU));
+    auto other_cpu = at::from_blob(other_r.data_ptr(), other_r.sizes(), other_r.strides(),
+        at::TensorOptions().dtype(other_r.dtype()).device(at::kCPU));
+    self_cpu.add_(other_cpu, alpha);
     return self;
 }
 
