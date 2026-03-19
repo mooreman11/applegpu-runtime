@@ -8,7 +8,19 @@ Usage:
     uv run python benchmarks/bench_mlp_cpp.py --hidden 256 --layers 4 --iters 100
 """
 import argparse
+import sys
 import time
+import types
+
+# Prevent applegpu_runtime's __init__.py from loading the PyO3 native extension.
+# Both the PyO3 .so and the C++ backend .so link libAppleGPUBridge.a — loading
+# both causes ObjC class conflicts. We only need the C++ backend here.
+if 'applegpu_runtime' not in sys.modules:
+    _stub = types.ModuleType('applegpu_runtime')
+    _stub.__path__ = [__import__('os').path.join(
+        __import__('os').path.dirname(__file__), '..', 'python', 'applegpu_runtime')]
+    sys.modules['applegpu_runtime'] = _stub
+
 import torch
 import torch.nn as nn
 

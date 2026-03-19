@@ -7,6 +7,7 @@
 #include <torch/library.h>
 #include <ATen/native/CPUFallback.h>
 #include <c10/core/impl/DeviceGuardImplInterface.h>
+#include <ATen/detail/PrivateUse1HooksInterface.h>
 #include "applegpu_ffi.h"
 
 // ── Helpers ──────────────────────────────────────────────────────
@@ -173,12 +174,31 @@ at::Tensor& applegpu_copy_(at::Tensor& self, const at::Tensor& src, bool non_blo
         return self;
     }
 
-    // Non-contiguous or dtype cast: fall back to element-wise copy via CPU
-    auto src_cpu = src.device().is_cpu() ? src : src.to(at::kCPU);
-    auto self_cpu = self.device().is_cpu() ? self : at::empty_like(self, at::kCPU);
-    self_cpu.copy_(src_cpu);
-    if (!self.device().is_cpu()) {
-        std::memcpy(self.data_ptr(), self_cpu.data_ptr(), self.nbytes());
+    // Non-contiguous or dtype mismatch: use CPU view of shared-memory buffer.
+    // Our Metal buffers are storageModeShared, so the data pointer is CPU-accessible.
+    // We create a CPU tensor that aliases the same memory (via from_blob) to avoid
+    // recursive copy_ calls that would crash on non-contiguous PrivateUse1 tensors.
+    at::Tensor src_cpu_view;
+    if (src.device().is_cpu()) {
+        src_cpu_view = src;
+    } else {
+        // Create CPU tensor aliasing the applegpu buffer (storageModeShared = CPU-accessible)
+        src_cpu_view = at::from_blob(
+            src.data_ptr(), src.sizes(), src.strides(),
+            at::TensorOptions().dtype(src.dtype()).device(at::kCPU));
+    }
+    auto src_contig = src_cpu_view.contiguous().to(self.dtype());
+
+    if (self.is_contiguous()) {
+        std::memcpy(self.data_ptr(), src_contig.data_ptr(), self.nbytes());
+    } else if (self.device().is_cpu()) {
+        self.copy_(src_contig);
+    } else {
+        // dst is applegpu + non-contiguous: create CPU alias and copy through it
+        auto dst_cpu_view = at::from_blob(
+            self.data_ptr(), self.sizes(), self.strides(),
+            at::TensorOptions().dtype(self.dtype()).device(at::kCPU));
+        dst_cpu_view.copy_(src_contig);
     }
     return self;
 }
@@ -301,6 +321,16 @@ at::Tensor applegpu_neg(const at::Tensor& self) {
     return wrap_ffi_output(ptr, out_id, query_output_shape(out_id), self.scalar_type());
 }
 
+// addmm: bias + mm(mat1, mat2). Decomposed to CPU because mat2 is typically
+// transposed (non-contiguous view) which our Rust graph engine doesn't handle yet.
+at::Tensor applegpu_addmm(const at::Tensor& self, const at::Tensor& mat1,
+                           const at::Tensor& mat2, const at::Scalar& beta,
+                           const at::Scalar& alpha) {
+    applegpu_ffi_synchronize();
+    return at::addmm(self.cpu(), mat1.cpu(), mat2.cpu(), beta, alpha)
+        .to(c10::Device(c10::DeviceType::PrivateUse1, 0));
+}
+
 // CPU fallback for unregistered ops
 void applegpu_cpu_fallback(
     const c10::OperatorHandle& op,
@@ -326,6 +356,7 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("mm", applegpu_mm);
     m.impl("relu", applegpu_relu);
     m.impl("neg", applegpu_neg);
+    m.impl("addmm", applegpu_addmm);
 }
 
 TORCH_LIBRARY_IMPL(_, PrivateUse1, m) {
@@ -376,6 +407,20 @@ struct ApplegpuGuardImpl final : public c10::impl::DeviceGuardImplInterface {
 
 static ApplegpuGuardImpl guard_impl;
 C10_REGISTER_GUARD_IMPL(PrivateUse1, ApplegpuGuardImpl);
+
+// ── PrivateUse1 Hooks ────────────────────────────────────────────
+
+// Required for autograd backward pass to create tensors on the correct device.
+struct ApplegpuHooksInterface : public at::PrivateUse1HooksInterface {
+    bool hasPrimaryContext(c10::DeviceIndex device_index) const override {
+        return true;
+    }
+};
+
+static auto hooks_registered = []() {
+    at::RegisterPrivateUse1HooksInterface(new ApplegpuHooksInterface());
+    return true;
+}();
 
 // ── Module init ──────────────────────────────────────────────────
 
