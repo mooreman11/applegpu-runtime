@@ -304,8 +304,11 @@ at::Tensor applegpu_sub(const at::Tensor& self, const at::Tensor& other, const a
 }
 
 at::Tensor applegpu_mm(const at::Tensor& self, const at::Tensor& mat2) {
+    auto self_c = self.is_contiguous() ? self : self.contiguous();
+    auto mat2_c = mat2.is_contiguous() ? mat2 : mat2.contiguous();
     uint64_t out_id = 0;
-    void* ptr = applegpu_ffi_matmul_out(get_tensor_id(self), get_tensor_id(mat2), &out_id);
+    void* ptr = applegpu_ffi_matmul_out(
+        get_tensor_id(self_c), get_tensor_id(mat2_c), &out_id);
     return wrap_ffi_output(ptr, out_id, query_output_shape(out_id), self.scalar_type());
 }
 
@@ -321,14 +324,44 @@ at::Tensor applegpu_neg(const at::Tensor& self) {
     return wrap_ffi_output(ptr, out_id, query_output_shape(out_id), self.scalar_type());
 }
 
-// addmm: bias + mm(mat1, mat2). Decomposed to CPU because mat2 is typically
-// transposed (non-contiguous view) which our Rust graph engine doesn't handle yet.
+// addmm: bias + mm(mat1, mat2).
+// For alpha=1, beta=1 (the common case in nn.Linear): fully GPU-native.
+// mat2 is often weight.t() — a non-contiguous transposed view — so we
+// make it contiguous first. Non-unit alpha/beta falls back to CPU (rare).
 at::Tensor applegpu_addmm(const at::Tensor& self, const at::Tensor& mat1,
                            const at::Tensor& mat2, const at::Scalar& beta,
                            const at::Scalar& alpha) {
-    applegpu_ffi_synchronize();
-    return at::addmm(self.cpu(), mat1.cpu(), mat2.cpu(), beta, alpha)
-        .to(c10::Device(c10::DeviceType::PrivateUse1, 0));
+    double alpha_val = alpha.toDouble();
+    double beta_val = beta.toDouble();
+
+    // Non-unit alpha/beta: fall back to CPU (rare)
+    if (alpha_val != 1.0 || beta_val != 1.0) {
+        applegpu_ffi_synchronize();
+        eval_applegpu_tensor_if_needed(mat1);
+        eval_applegpu_tensor_if_needed(mat2);
+        eval_applegpu_tensor_if_needed(self);
+        return at::addmm(self.cpu(), mat1.cpu(), mat2.cpu(), beta, alpha)
+            .to(c10::Device(c10::DeviceType::PrivateUse1, 0));
+    }
+
+    // Ensure inputs are contiguous (mat2 is often weight.t())
+    auto mat1_c = mat1.is_contiguous() ? mat1 : mat1.contiguous();
+    auto mat2_c = mat2.is_contiguous() ? mat2 : mat2.contiguous();
+    auto self_c = self.is_contiguous() ? self : self.contiguous();
+
+    // mm(mat1, mat2) → [M, N]
+    uint64_t mm_out_id = 0;
+    void* mm_ptr = applegpu_ffi_matmul_out(
+        get_tensor_id(mat1_c), get_tensor_id(mat2_c), &mm_out_id);
+    auto mm_result = wrap_ffi_output(
+        mm_ptr, mm_out_id, query_output_shape(mm_out_id), mat1.scalar_type());
+
+    // add(mm_result, bias) → [M, N] (bias broadcasts from [N])
+    uint64_t add_out_id = 0;
+    void* add_ptr = applegpu_ffi_add_out(
+        get_tensor_id(mm_result), get_tensor_id(self_c), &add_out_id);
+    return wrap_ffi_output(
+        add_ptr, add_out_id, query_output_shape(add_out_id), mat1.scalar_type());
 }
 
 // CPU fallback for unregistered ops
