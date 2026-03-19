@@ -265,6 +265,39 @@ pub extern "C" fn applegpu_ffi_relu(input_id: u64) -> u64 {
     }
 }
 
+/// Record a mul op. Returns the output tensor_id, or 0 on failure.
+#[no_mangle]
+pub extern "C" fn applegpu_ffi_mul(a_id: u64, b_id: u64) -> u64 {
+    let state = get_state();
+    let mut rt = state.runtime.lock().unwrap();
+    match crate::ops::mul(&mut rt, a_id, b_id) {
+        Ok(id) => id,
+        Err(e) => { set_error(format!("mul failed: {}", e)); 0 }
+    }
+}
+
+/// Record a sub op. Returns the output tensor_id, or 0 on failure.
+#[no_mangle]
+pub extern "C" fn applegpu_ffi_sub(a_id: u64, b_id: u64) -> u64 {
+    let state = get_state();
+    let mut rt = state.runtime.lock().unwrap();
+    match crate::ops::sub(&mut rt, a_id, b_id) {
+        Ok(id) => id,
+        Err(e) => { set_error(format!("sub failed: {}", e)); 0 }
+    }
+}
+
+/// Record a neg op. Returns the output tensor_id, or 0 on failure.
+#[no_mangle]
+pub extern "C" fn applegpu_ffi_neg(input_id: u64) -> u64 {
+    let state = get_state();
+    let mut rt = state.runtime.lock().unwrap();
+    match crate::ops::neg(&mut rt, input_id) {
+        Ok(id) => id,
+        Err(e) => { set_error(format!("neg failed: {}", e)); 0 }
+    }
+}
+
 /// Copy tensor data from src to dst buffer.
 /// Returns 0 on success, -1 on failure.
 #[no_mangle]
@@ -304,6 +337,65 @@ pub extern "C" fn applegpu_ffi_copy(
 }
 
 // ── Readback ──────────────────────────────────────────────────────
+
+// ── Op variants with output allocation ───────────────────────────────────────
+
+fn alloc_output(rt: &mut LazyRuntime, device: &Device, result_id: u64, out_id: *mut u64) -> *mut u8 {
+    let (shape, dtype) = match (rt.shape(result_id), rt.dtype(result_id)) {
+        (Ok(s), Ok(d)) => (s, d),
+        _ => { set_error("cannot determine output shape".into()); return std::ptr::null_mut(); }
+    };
+    let size = shape.iter().product::<usize>() * dtype.size_bytes();
+    if size == 0 {
+        unsafe { *out_id = result_id; }
+        return std::ptr::null_mut();
+    }
+    let buffer = match rt.pool.acquire(device, size) {
+        Ok(b) => b,
+        Err(e) => { set_error(format!("alloc output failed: {}", e)); return std::ptr::null_mut(); }
+    };
+    let ptr = buffer.contents();
+    rt.insert_preallocated_buffer(result_id, buffer);
+    unsafe { *out_id = result_id; }
+    ptr
+}
+
+macro_rules! ffi_binary_op_out {
+    ($fn_name:ident, $op_fn:path, $op_name:expr) => {
+        #[no_mangle]
+        pub extern "C" fn $fn_name(a_id: u64, b_id: u64, out_id: *mut u64) -> *mut u8 {
+            let state = get_state();
+            let mut rt = state.runtime.lock().unwrap();
+            let result_id = match $op_fn(&mut rt, a_id, b_id) {
+                Ok(id) => id,
+                Err(e) => { set_error(format!("{} failed: {}", $op_name, e)); return std::ptr::null_mut(); }
+            };
+            alloc_output(&mut rt, &state.device, result_id, out_id)
+        }
+    };
+}
+
+macro_rules! ffi_unary_op_out {
+    ($fn_name:ident, $op_fn:path, $op_name:expr) => {
+        #[no_mangle]
+        pub extern "C" fn $fn_name(input_id: u64, out_id: *mut u64) -> *mut u8 {
+            let state = get_state();
+            let mut rt = state.runtime.lock().unwrap();
+            let result_id = match $op_fn(&mut rt, input_id) {
+                Ok(id) => id,
+                Err(e) => { set_error(format!("{} failed: {}", $op_name, e)); return std::ptr::null_mut(); }
+            };
+            alloc_output(&mut rt, &state.device, result_id, out_id)
+        }
+    };
+}
+
+ffi_binary_op_out!(applegpu_ffi_add_out, crate::ops::add, "add");
+ffi_binary_op_out!(applegpu_ffi_mul_out, crate::ops::mul, "mul");
+ffi_binary_op_out!(applegpu_ffi_sub_out, crate::ops::sub, "sub");
+ffi_binary_op_out!(applegpu_ffi_matmul_out, crate::ops::matmul, "matmul");
+ffi_unary_op_out!(applegpu_ffi_relu_out, crate::ops::relu, "relu");
+ffi_unary_op_out!(applegpu_ffi_neg_out, crate::ops::neg, "neg");
 
 /// Read tensor data as f32 into the provided buffer.
 /// Flushes streaming batch and evaluates if needed.

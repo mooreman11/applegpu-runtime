@@ -25,7 +25,18 @@ int8_t applegpu_ffi_dtype(uint64_t tensor_id);
 uint64_t applegpu_ffi_add(uint64_t a_id, uint64_t b_id);
 uint64_t applegpu_ffi_matmul(uint64_t a_id, uint64_t b_id);
 uint64_t applegpu_ffi_relu(uint64_t input_id);
+uint64_t applegpu_ffi_mul(uint64_t a_id, uint64_t b_id);
+uint64_t applegpu_ffi_sub(uint64_t a_id, uint64_t b_id);
+uint64_t applegpu_ffi_neg(uint64_t input_id);
 int32_t applegpu_ffi_copy(uint64_t src_id, uint64_t dst_id);
+
+/* Ops with output allocation (return data_ptr, write tensor_id to *out_id) */
+uint8_t* applegpu_ffi_add_out(uint64_t a_id, uint64_t b_id, uint64_t* out_id);
+uint8_t* applegpu_ffi_mul_out(uint64_t a_id, uint64_t b_id, uint64_t* out_id);
+uint8_t* applegpu_ffi_sub_out(uint64_t a_id, uint64_t b_id, uint64_t* out_id);
+uint8_t* applegpu_ffi_matmul_out(uint64_t a_id, uint64_t b_id, uint64_t* out_id);
+uint8_t* applegpu_ffi_relu_out(uint64_t input_id, uint64_t* out_id);
+uint8_t* applegpu_ffi_neg_out(uint64_t input_id, uint64_t* out_id);
 
 /* Eval / sync */
 int32_t applegpu_ffi_eval(uint64_t tensor_id);
