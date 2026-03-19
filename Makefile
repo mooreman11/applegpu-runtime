@@ -1,4 +1,4 @@
-.PHONY: all build test clean setup check ci release bench bench-ops bench-training
+.PHONY: all build test clean setup check ci release bench bench-ops bench-training build-cpp-backend test-cpp-backend
 
 all: build test
 
@@ -59,6 +59,12 @@ release-local:
 	cp swift/GPUContainer/.build/release/gpu-container dist/
 	cd dist && shasum -a 256 * > checksums.txt
 	@echo "Artifacts in dist/"
+
+build-cpp-backend: build-rust
+	cd backend_cpp && uv run python setup.py build_ext --inplace
+
+test-cpp-backend: build-cpp-backend
+	uv run pytest python/tests/test_cpp_backend.py -v
 
 bench: bench-ops bench-training
 
