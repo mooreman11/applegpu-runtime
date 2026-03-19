@@ -26,6 +26,53 @@ uint64_t get_tensor_id(const at::Tensor& t) {
     return ctx->tensor_id;
 }
 
+// Ensure a tensor is "op-ready": contiguous AND its logical shape matches
+// the Rust runtime's registered shape. View tensors (e.g., weight.t()) share
+// storage with a different tensor_id, so their logical shape may differ from
+// what Rust knows. Force a contiguous copy in that case.
+at::Tensor ensure_op_ready(const at::Tensor& t) {
+    if (!t.device().is_privateuseone()) return t;
+    if (!t.is_contiguous()) return t.contiguous();
+
+    auto* ctx = static_cast<TensorContext*>(t.storage().data_ptr().get_context());
+    if (ctx == nullptr) return t;
+
+    // Query the registered shape from Rust and compare with PyTorch's shape
+    uint64_t rust_dims[8];
+    uint32_t rust_ndim = 0;
+    int32_t rc = applegpu_ffi_shape(ctx->tensor_id, rust_dims, &rust_ndim);
+    if (rc != 0) return t; // tensor not in Rust runtime — let op handle it
+
+    // Compare shapes
+    bool shape_matches = (rust_ndim == (uint32_t)t.dim());
+    if (shape_matches) {
+        for (uint32_t i = 0; i < rust_ndim; i++) {
+            if (rust_dims[i] != (uint64_t)t.size(i)) {
+                shape_matches = false;
+                break;
+            }
+        }
+    }
+
+    if (!shape_matches) {
+        // This is a view with different shape — copy to fresh tensor
+        auto fresh = torch::empty(t.sizes(),
+            at::TensorOptions().dtype(t.dtype()).device(t.device()));
+        fresh.copy_(t);
+        return fresh;
+    }
+
+    // Also check for storage_offset (subview)
+    if (t.storage_offset() != 0) {
+        auto fresh = torch::empty(t.sizes(),
+            at::TensorOptions().dtype(t.dtype()).device(t.device()));
+        fresh.copy_(t);
+        return fresh;
+    }
+
+    return t;
+}
+
 // Map PyTorch ScalarType to our wire DType discriminant.
 // Wire: 0=f32, 1=f16, 2=f64, 3=i8, 4=i16, 5=i32, 6=i64, 7=u8, 8=u32, 9=bool, 10=bf16
 int8_t scalar_type_to_wire(at::ScalarType st) {
@@ -305,8 +352,8 @@ at::Tensor applegpu_sub(const at::Tensor& self, const at::Tensor& other, const a
 }
 
 at::Tensor applegpu_mm(const at::Tensor& self, const at::Tensor& mat2) {
-    auto self_c = self.is_contiguous() ? self : self.contiguous();
-    auto mat2_c = mat2.is_contiguous() ? mat2 : mat2.contiguous();
+    auto self_c = ensure_op_ready(self);
+    auto mat2_c = ensure_op_ready(mat2);
     uint64_t out_id = 0;
     void* ptr = applegpu_ffi_matmul_out(
         get_tensor_id(self_c), get_tensor_id(mat2_c), &out_id);
@@ -345,10 +392,10 @@ at::Tensor applegpu_addmm(const at::Tensor& self, const at::Tensor& mat1,
             .to(c10::Device(c10::DeviceType::PrivateUse1, 0));
     }
 
-    // Ensure inputs are contiguous (mat2 is often weight.t())
-    auto mat1_c = mat1.is_contiguous() ? mat1 : mat1.contiguous();
-    auto mat2_c = mat2.is_contiguous() ? mat2 : mat2.contiguous();
-    auto self_c = self.is_contiguous() ? self : self.contiguous();
+    // Ensure inputs are contiguous and not views (mat2 is often weight.t())
+    auto mat1_c = ensure_op_ready(mat1);
+    auto mat2_c = ensure_op_ready(mat2);
+    auto self_c = ensure_op_ready(self);
 
     // mm(mat1, mat2) → [M, N]
     uint64_t mm_out_id = 0;
