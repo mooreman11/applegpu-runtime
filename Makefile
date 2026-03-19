@@ -18,7 +18,7 @@ build-python: build-rust
 build-service: build-rust
 	cargo build -p applegpu-service
 
-build: build-swift build-rust build-python build-service
+build: build-swift build-rust build-python build-cpp-backend build-service
 
 test-rust: build-swift
 	cargo test -p applegpu-core
@@ -29,7 +29,7 @@ test-swift:
 test-python: build-python
 	uv run pytest -v
 
-test: test-rust test-swift test-python
+test: test-rust test-swift test-python test-cpp-backend
 
 check:
 	cargo check --workspace
@@ -61,7 +61,7 @@ release-local:
 	@echo "Artifacts in dist/"
 
 build-cpp-backend: build-rust
-	cd backend_cpp && uv run python setup.py build_ext --inplace
+	cd backend_cpp && ARCHFLAGS="-arch arm64" uv run python setup.py build_ext --inplace
 
 test-cpp-backend: build-cpp-backend
 	uv run pytest python/tests/test_cpp_backend.py -v
@@ -81,3 +81,4 @@ clean:
 	cargo clean
 	cd swift && swift package clean
 	rm -rf target dist
+	rm -rf backend_cpp/build backend_cpp/*.so
