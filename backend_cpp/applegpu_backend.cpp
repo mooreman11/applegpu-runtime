@@ -8,6 +8,7 @@
 #include <ATen/native/CPUFallback.h>
 #include <c10/core/impl/DeviceGuardImplInterface.h>
 #include <ATen/detail/PrivateUse1HooksInterface.h>
+#include <ATen/InferSize.h>
 #include "applegpu_ffi.h"
 
 // ── Helpers ──────────────────────────────────────────────────────
@@ -23,6 +24,53 @@ uint64_t get_tensor_id(const at::Tensor& t) {
     auto* ctx = static_cast<TensorContext*>(t.storage().data_ptr().get_context());
     TORCH_CHECK(ctx != nullptr, "applegpu: tensor has no context (not an applegpu tensor?)");
     return ctx->tensor_id;
+}
+
+// Ensure a tensor is "op-ready": contiguous AND its logical shape matches
+// the Rust runtime's registered shape. View tensors (e.g., weight.t()) share
+// storage with a different tensor_id, so their logical shape may differ from
+// what Rust knows. Force a contiguous copy in that case.
+at::Tensor ensure_op_ready(const at::Tensor& t) {
+    if (!t.device().is_privateuseone()) return t;
+    if (!t.is_contiguous()) return t.contiguous();
+
+    auto* ctx = static_cast<TensorContext*>(t.storage().data_ptr().get_context());
+    if (ctx == nullptr) return t;
+
+    // Query the registered shape from Rust and compare with PyTorch's shape
+    uint64_t rust_dims[8];
+    uint32_t rust_ndim = 0;
+    int32_t rc = applegpu_ffi_shape(ctx->tensor_id, rust_dims, &rust_ndim);
+    if (rc != 0) return t; // tensor not in Rust runtime — let op handle it
+
+    // Compare shapes
+    bool shape_matches = (rust_ndim == (uint32_t)t.dim());
+    if (shape_matches) {
+        for (uint32_t i = 0; i < rust_ndim; i++) {
+            if (rust_dims[i] != (uint64_t)t.size(i)) {
+                shape_matches = false;
+                break;
+            }
+        }
+    }
+
+    if (!shape_matches) {
+        // This is a view with different shape — copy to fresh tensor
+        auto fresh = torch::empty(t.sizes(),
+            at::TensorOptions().dtype(t.dtype()).device(t.device()));
+        fresh.copy_(t);
+        return fresh;
+    }
+
+    // Also check for storage_offset (subview)
+    if (t.storage_offset() != 0) {
+        auto fresh = torch::empty(t.sizes(),
+            at::TensorOptions().dtype(t.dtype()).device(t.device()));
+        fresh.copy_(t);
+        return fresh;
+    }
+
+    return t;
 }
 
 // Map PyTorch ScalarType to our wire DType discriminant.
@@ -304,8 +352,8 @@ at::Tensor applegpu_sub(const at::Tensor& self, const at::Tensor& other, const a
 }
 
 at::Tensor applegpu_mm(const at::Tensor& self, const at::Tensor& mat2) {
-    auto self_c = self.is_contiguous() ? self : self.contiguous();
-    auto mat2_c = mat2.is_contiguous() ? mat2 : mat2.contiguous();
+    auto self_c = ensure_op_ready(self);
+    auto mat2_c = ensure_op_ready(mat2);
     uint64_t out_id = 0;
     void* ptr = applegpu_ffi_matmul_out(
         get_tensor_id(self_c), get_tensor_id(mat2_c), &out_id);
@@ -344,10 +392,10 @@ at::Tensor applegpu_addmm(const at::Tensor& self, const at::Tensor& mat1,
             .to(c10::Device(c10::DeviceType::PrivateUse1, 0));
     }
 
-    // Ensure inputs are contiguous (mat2 is often weight.t())
-    auto mat1_c = mat1.is_contiguous() ? mat1 : mat1.contiguous();
-    auto mat2_c = mat2.is_contiguous() ? mat2 : mat2.contiguous();
-    auto self_c = self.is_contiguous() ? self : self.contiguous();
+    // Ensure inputs are contiguous and not views (mat2 is often weight.t())
+    auto mat1_c = ensure_op_ready(mat1);
+    auto mat2_c = ensure_op_ready(mat2);
+    auto self_c = ensure_op_ready(self);
 
     // mm(mat1, mat2) → [M, N]
     uint64_t mm_out_id = 0;
@@ -364,6 +412,125 @@ at::Tensor applegpu_addmm(const at::Tensor& self, const at::Tensor& mat1,
         add_ptr, add_out_id, query_output_shape(add_out_id), mat1.scalar_type());
 }
 
+// threshold_backward: ReLU backward (grad * (input > threshold))
+at::Tensor applegpu_threshold_backward(const at::Tensor& grad_output,
+                                        const at::Tensor& self,
+                                        const at::Scalar& threshold) {
+    uint64_t out_id = 0;
+    void* ptr = applegpu_ffi_threshold_backward_out(
+        get_tensor_id(grad_output), get_tensor_id(self),
+        threshold.toFloat(), &out_id);
+    return wrap_ffi_output(ptr, out_id, query_output_shape(out_id), grad_output.scalar_type());
+}
+
+// t: transpose last two dimensions. Returns a view with swapped strides.
+at::Tensor applegpu_t(const at::Tensor& self) {
+    TORCH_CHECK(self.dim() == 2, "t expects a 2D tensor, got ", self.dim(), "D");
+    auto sizes = self.sizes().vec();
+    auto strides = self.strides().vec();
+    std::swap(sizes[0], sizes[1]);
+    std::swap(strides[0], strides[1]);
+    auto result = self.as_strided(sizes, strides);
+    return result;
+}
+
+// div.Tensor
+at::Tensor applegpu_div(const at::Tensor& self, const at::Tensor& other) {
+    auto self_c = self.is_contiguous() ? self : self.contiguous();
+    auto other_c = other.is_contiguous() ? other : other.contiguous();
+    uint64_t out_id = 0;
+    void* ptr = applegpu_ffi_div_out(
+        get_tensor_id(self_c), get_tensor_id(other_c), &out_id);
+    return wrap_ffi_output(ptr, out_id, query_output_shape(out_id), self.scalar_type());
+}
+
+// add_.Tensor: in-place add. Decompose to out-of-place add + copy back.
+at::Tensor& applegpu_add_(at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {
+    if (alpha.toDouble() != 1.0) {
+        // scaled add: self += alpha * other
+        // Fall back to CPU for now
+        applegpu_ffi_synchronize();
+        eval_applegpu_tensor_if_needed(self);
+        eval_applegpu_tensor_if_needed(other);
+        auto self_cpu = self.cpu();
+        self_cpu.add_(other.cpu(), alpha);
+        std::memcpy(self.data_ptr(), self_cpu.data_ptr(), self.nbytes());
+        return self;
+    }
+    eval_applegpu_tensor_if_needed(self);
+    eval_applegpu_tensor_if_needed(other);
+    applegpu_ffi_synchronize();
+    // For alpha=1: compute add, then copy result into self's buffer
+    uint64_t out_id = 0;
+    void* ptr = applegpu_ffi_add_out(get_tensor_id(self), get_tensor_id(other), &out_id);
+    if (ptr == nullptr) {
+        TORCH_CHECK(false, "applegpu add_ failed: ", applegpu_ffi_last_error());
+    }
+    // Eval the add op to materialize the result
+    applegpu_ffi_eval(out_id);
+    applegpu_ffi_synchronize();
+    // Copy result back into self's buffer
+    std::memcpy(self.data_ptr(), ptr, self.nbytes());
+    // Free the temporary
+    applegpu_ffi_free(out_id);
+    return self;
+}
+
+// mul_.Tensor: in-place multiply
+at::Tensor& applegpu_mul_(at::Tensor& self, const at::Tensor& other) {
+    eval_applegpu_tensor_if_needed(self);
+    eval_applegpu_tensor_if_needed(other);
+    applegpu_ffi_synchronize();
+    uint64_t out_id = 0;
+    void* ptr = applegpu_ffi_mul_out(get_tensor_id(self), get_tensor_id(other), &out_id);
+    if (ptr == nullptr) {
+        TORCH_CHECK(false, "applegpu mul_ failed: ", applegpu_ffi_last_error());
+    }
+    applegpu_ffi_eval(out_id);
+    applegpu_ffi_synchronize();
+    std::memcpy(self.data_ptr(), ptr, self.nbytes());
+    applegpu_ffi_free(out_id);
+    return self;
+}
+
+// mul_.Scalar: in-place scalar multiply
+at::Tensor& applegpu_mul_scalar_(at::Tensor& self, const at::Scalar& other) {
+    eval_applegpu_tensor_if_needed(self);
+    applegpu_ffi_synchronize();
+    float scale = other.toFloat();
+    // Direct CPU manipulation on shared memory buffer
+    if (self.scalar_type() == at::ScalarType::Float && self.is_contiguous()) {
+        float* data = static_cast<float*>(self.data_ptr());
+        int64_t n = self.numel();
+        for (int64_t i = 0; i < n; i++) data[i] *= scale;
+        return self;
+    }
+    // Fallback for other dtypes
+    auto cpu_view = at::from_blob(self.data_ptr(), self.sizes(), self.strides(),
+        at::TensorOptions().dtype(self.dtype()).device(at::kCPU));
+    cpu_view.mul_(other);
+    return self;
+}
+
+// fill_.Scalar: fill tensor with a constant value
+at::Tensor& applegpu_fill_(at::Tensor& self, const at::Scalar& value) {
+    eval_applegpu_tensor_if_needed(self);
+    applegpu_ffi_synchronize();
+    // Direct CPU manipulation on shared memory buffer
+    auto cpu_view = at::from_blob(self.data_ptr(), self.sizes(), self.strides(),
+        at::TensorOptions().dtype(self.dtype()).device(at::kCPU));
+    cpu_view.fill_(value);
+    return self;
+}
+
+// zero_: fill with zeros
+at::Tensor& applegpu_zero_(at::Tensor& self) {
+    eval_applegpu_tensor_if_needed(self);
+    applegpu_ffi_synchronize();
+    std::memset(self.data_ptr(), 0, self.nbytes());
+    return self;
+}
+
 // CPU fallback for unregistered ops
 void applegpu_cpu_fallback(
     const c10::OperatorHandle& op,
@@ -372,6 +539,73 @@ void applegpu_cpu_fallback(
     // Flush streaming batch before reading any tensor data
     applegpu_ffi_synchronize();
     at::native::cpu_fallback(op, stack);
+}
+
+// view: reshape with compatible strides. Shares storage.
+at::Tensor applegpu_view(const at::Tensor& self, c10::SymIntArrayRef size) {
+    // Convert SymIntArrayRef to concrete int64 sizes (our tensors have no symbolic dims)
+    std::vector<int64_t> size_int64;
+    size_int64.reserve(size.size());
+    for (const auto& s : size) {
+        size_int64.push_back(s.expect_int());
+    }
+    auto inferred = at::infer_size_dv(c10::IntArrayRef(size_int64), self.numel());
+    auto strides = at::detail::computeStride(self.sizes(), self.strides(), inferred);
+    TORCH_CHECK(strides.has_value(), "view size is not compatible with input tensor's size and stride");
+    auto result = at::detail::make_tensor<c10::TensorImpl>(
+        c10::Storage(self.storage()),
+        c10::DispatchKeySet(c10::DispatchKey::PrivateUse1),
+        self.dtype());
+    result.unsafeGetTensorImpl()->set_sizes_and_strides(
+        c10::IntArrayRef(inferred), c10::IntArrayRef(*strides));
+    result.unsafeGetTensorImpl()->set_storage_offset(self.storage_offset());
+    return result;
+}
+
+// as_strided: create a view with explicit sizes, strides, and offset.
+at::Tensor applegpu_as_strided(const at::Tensor& self, c10::IntArrayRef size,
+                                c10::IntArrayRef stride,
+                                std::optional<int64_t> storage_offset) {
+    auto offset = storage_offset.value_or(self.storage_offset());
+    auto result = at::detail::make_tensor<c10::TensorImpl>(
+        c10::Storage(self.storage()),
+        c10::DispatchKeySet(c10::DispatchKey::PrivateUse1),
+        self.dtype());
+    result.unsafeGetTensorImpl()->set_sizes_and_strides(size, stride);
+    result.unsafeGetTensorImpl()->set_storage_offset(offset);
+    return result;
+}
+
+// mse_loss: compute via CPU view of shared-memory buffer (no H2D/D2H copy).
+at::Tensor applegpu_mse_loss(const at::Tensor& self, const at::Tensor& target, int64_t reduction) {
+    eval_applegpu_tensor_if_needed(self);
+    eval_applegpu_tensor_if_needed(target);
+    applegpu_ffi_synchronize();
+    auto self_cpu = at::from_blob(self.data_ptr(), self.sizes(), self.strides(),
+        at::TensorOptions().dtype(self.dtype()).device(at::kCPU));
+    auto target_cpu = at::from_blob(target.data_ptr(), target.sizes(), target.strides(),
+        at::TensorOptions().dtype(target.dtype()).device(at::kCPU));
+    auto result_cpu = at::mse_loss(self_cpu, target_cpu, reduction);
+    return result_cpu.to(c10::Device(c10::DeviceType::PrivateUse1, 0));
+}
+
+// mse_loss_backward
+at::Tensor applegpu_mse_loss_backward(const at::Tensor& grad_output,
+                                       const at::Tensor& self,
+                                       const at::Tensor& target,
+                                       int64_t reduction) {
+    eval_applegpu_tensor_if_needed(grad_output);
+    eval_applegpu_tensor_if_needed(self);
+    eval_applegpu_tensor_if_needed(target);
+    applegpu_ffi_synchronize();
+    auto grad_cpu = at::from_blob(grad_output.data_ptr(), grad_output.sizes(), grad_output.strides(),
+        at::TensorOptions().dtype(grad_output.dtype()).device(at::kCPU));
+    auto self_cpu = at::from_blob(self.data_ptr(), self.sizes(), self.strides(),
+        at::TensorOptions().dtype(self.dtype()).device(at::kCPU));
+    auto target_cpu = at::from_blob(target.data_ptr(), target.sizes(), target.strides(),
+        at::TensorOptions().dtype(target.dtype()).device(at::kCPU));
+    auto result_cpu = at::mse_loss_backward(grad_cpu, self_cpu, target_cpu, reduction);
+    return result_cpu.to(c10::Device(c10::DeviceType::PrivateUse1, 0));
 }
 
 // ── Registration ─────────────────────────────────────────────────
@@ -390,6 +624,18 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("relu", applegpu_relu);
     m.impl("neg", applegpu_neg);
     m.impl("addmm", applegpu_addmm);
+    m.impl("threshold_backward", applegpu_threshold_backward);
+    m.impl("t", applegpu_t);
+    m.impl("div.Tensor", applegpu_div);
+    m.impl("add_.Tensor", applegpu_add_);
+    m.impl("mul_.Tensor", applegpu_mul_);
+    m.impl("mul_.Scalar", applegpu_mul_scalar_);
+    m.impl("fill_.Scalar", applegpu_fill_);
+    m.impl("zero_", applegpu_zero_);
+    m.impl("view", applegpu_view);
+    m.impl("as_strided", applegpu_as_strided);
+    m.impl("mse_loss", applegpu_mse_loss);
+    m.impl("mse_loss_backward", applegpu_mse_loss_backward);
 }
 
 TORCH_LIBRARY_IMPL(_, PrivateUse1, m) {
