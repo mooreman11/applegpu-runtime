@@ -398,6 +398,18 @@ ffi_unary_op_out!(applegpu_ffi_relu_out, crate::ops::relu, "relu");
 ffi_unary_op_out!(applegpu_ffi_neg_out, crate::ops::neg, "neg");
 ffi_binary_op_out!(applegpu_ffi_div_out, crate::ops::div, "div");
 
+/// Full mean reduction to scalar [1]. Returns output ptr, writes tensor_id to *out_id.
+#[no_mangle]
+pub extern "C" fn applegpu_ffi_mean_all_out(input_id: u64, out_id: *mut u64) -> *mut u8 {
+    let state = get_state();
+    let mut rt = state.runtime.lock().unwrap();
+    let result_id = match crate::ops::mean_all(&mut rt, input_id) {
+        Ok(id) => id,
+        Err(e) => { set_error(format!("mean_all failed: {}", e)); return std::ptr::null_mut(); }
+    };
+    alloc_output(&mut rt, &state.device, result_id, out_id)
+}
+
 /// Multiply tensor by scalar. Returns output ptr, writes tensor_id to *out_id.
 #[no_mangle]
 pub extern "C" fn applegpu_ffi_scalar_mul_out(

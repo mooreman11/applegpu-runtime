@@ -40,6 +40,7 @@ uint8_t* applegpu_ffi_neg_out(uint64_t input_id, uint64_t* out_id);
 uint8_t* applegpu_ffi_div_out(uint64_t a_id, uint64_t b_id, uint64_t* out_id);
 uint8_t* applegpu_ffi_threshold_backward_out(uint64_t grad_id, uint64_t input_id, float threshold, uint64_t* out_id);
 uint8_t* applegpu_ffi_scalar_mul_out(uint64_t input_id, float scale, uint64_t* out_id);
+uint8_t* applegpu_ffi_mean_all_out(uint64_t input_id, uint64_t* out_id);
 
 /* Eval / sync */
 int32_t applegpu_ffi_eval(uint64_t tensor_id);

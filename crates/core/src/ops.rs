@@ -1458,6 +1458,21 @@ pub fn mean(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
     Ok(out_id)
 }
 
+/// Full mean reduction — reduces all dimensions to a scalar [1].
+/// Chains mean() calls from last dimension inward.
+pub fn mean_all(rt: &mut LazyRuntime, input_id: u64) -> Result<u64> {
+    let shape = rt.shape(input_id)?;
+    let ndim = shape.len();
+    if ndim == 0 {
+        return Err(GpuError::InvalidTensor("mean_all requires at least 1D tensor".into()));
+    }
+    let mut current_id = input_id;
+    for _ in 0..ndim {
+        current_id = mean(rt, current_id)?;
+    }
+    Ok(current_id)
+}
+
 /// Variance reduction along last dimension. N-D supported.
 /// correction=1 for sample variance (Bessel's correction), 0 for population variance.
 pub fn var(rt: &mut LazyRuntime, input_id: u64, correction: u32) -> Result<u64> {

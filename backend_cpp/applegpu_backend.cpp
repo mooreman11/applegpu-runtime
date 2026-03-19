@@ -563,36 +563,82 @@ at::Tensor applegpu_as_strided(const at::Tensor& self, c10::IntArrayRef size,
     return result;
 }
 
-// mse_loss: compute via CPU view of shared-memory buffer (no H2D/D2H copy).
+// mse_loss: native graph decomposition — no eval, fully lazy.
+// mse_loss(input, target, reduction) = mean((input - target)²)
 at::Tensor applegpu_mse_loss(const at::Tensor& self, const at::Tensor& target, int64_t reduction) {
-    eval_applegpu_tensor_if_needed(self);
-    eval_applegpu_tensor_if_needed(target);
-    applegpu_ffi_synchronize();
-    auto self_cpu = at::from_blob(self.data_ptr(), self.sizes(), self.strides(),
-        at::TensorOptions().dtype(self.dtype()).device(at::kCPU));
-    auto target_cpu = at::from_blob(target.data_ptr(), target.sizes(), target.strides(),
-        at::TensorOptions().dtype(target.dtype()).device(at::kCPU));
-    auto result_cpu = at::mse_loss(self_cpu, target_cpu, reduction);
-    return result_cpu.to(c10::Device(c10::DeviceType::PrivateUse1, 0));
+    auto self_r = ensure_op_ready(self);
+    auto target_r = ensure_op_ready(target);
+
+    // diff = self - target
+    uint64_t diff_id = 0;
+    void* diff_ptr = applegpu_ffi_sub_out(get_tensor_id(self_r), get_tensor_id(target_r), &diff_id);
+    TORCH_CHECK(diff_ptr, "applegpu mse_loss: sub failed");
+
+    // sq = diff * diff
+    uint64_t sq_id = 0;
+    void* sq_ptr = applegpu_ffi_mul_out(diff_id, diff_id, &sq_id);
+    TORCH_CHECK(sq_ptr, "applegpu mse_loss: mul failed");
+
+    // reduction: 1=mean, 2=sum, 0=none
+    if (reduction == 1) {  // Mean
+        uint64_t mean_id = 0;
+        void* mean_ptr = applegpu_ffi_mean_all_out(sq_id, &mean_id);
+        TORCH_CHECK(mean_ptr, "applegpu mse_loss: mean_all failed");
+        // Scalar output shape [1]
+        return wrap_ffi_output(mean_ptr, mean_id, {1}, self.scalar_type());
+    } else if (reduction == 2) {  // Sum — not yet native, fall back
+        applegpu_ffi_synchronize();
+        eval_applegpu_tensor_if_needed(self_r);
+        eval_applegpu_tensor_if_needed(target_r);
+        auto s = at::from_blob(self.data_ptr(), self.sizes(), self.strides(),
+            at::TensorOptions().dtype(self.dtype()).device(at::kCPU));
+        auto t = at::from_blob(target.data_ptr(), target.sizes(), target.strides(),
+            at::TensorOptions().dtype(target.dtype()).device(at::kCPU));
+        return at::mse_loss(s, t, reduction).to(self.device());
+    }
+    // None: return sq as-is
+    return wrap_ffi_output(sq_ptr, sq_id, query_output_shape(sq_id), self.scalar_type());
 }
 
-// mse_loss_backward
+// mse_loss_backward: native graph decomposition.
+// grad_input = 2/n * (input - target) * grad_output  (for reduction=mean)
 at::Tensor applegpu_mse_loss_backward(const at::Tensor& grad_output,
                                        const at::Tensor& self,
                                        const at::Tensor& target,
                                        int64_t reduction) {
-    eval_applegpu_tensor_if_needed(grad_output);
-    eval_applegpu_tensor_if_needed(self);
-    eval_applegpu_tensor_if_needed(target);
+    auto grad_r = ensure_op_ready(grad_output);
+    auto self_r = ensure_op_ready(self);
+    auto target_r = ensure_op_ready(target);
+
+    // diff = self - target
+    uint64_t diff_id = 0;
+    applegpu_ffi_sub_out(get_tensor_id(self_r), get_tensor_id(target_r), &diff_id);
+
+    if (reduction == 1) {  // Mean: scale by 2/n
+        int64_t n = self.numel();
+        float scale = 2.0f / static_cast<float>(n);
+        uint64_t scaled_id = 0;
+        applegpu_ffi_scalar_mul_out(diff_id, scale, &scaled_id);
+
+        // Multiply by grad_output (broadcasts scalar grad to diff shape)
+        uint64_t out_id = 0;
+        void* out_ptr = applegpu_ffi_mul_out(scaled_id, get_tensor_id(grad_r), &out_id);
+        TORCH_CHECK(out_ptr, "applegpu mse_loss_backward: mul failed");
+        return wrap_ffi_output(out_ptr, out_id, query_output_shape(out_id), self.scalar_type());
+    }
+
+    // Sum or None: fall back to CPU
+    eval_applegpu_tensor_if_needed(grad_r);
+    eval_applegpu_tensor_if_needed(self_r);
+    eval_applegpu_tensor_if_needed(target_r);
     applegpu_ffi_synchronize();
-    auto grad_cpu = at::from_blob(grad_output.data_ptr(), grad_output.sizes(), grad_output.strides(),
+    auto g = at::from_blob(grad_output.data_ptr(), grad_output.sizes(), grad_output.strides(),
         at::TensorOptions().dtype(grad_output.dtype()).device(at::kCPU));
-    auto self_cpu = at::from_blob(self.data_ptr(), self.sizes(), self.strides(),
+    auto s = at::from_blob(self.data_ptr(), self.sizes(), self.strides(),
         at::TensorOptions().dtype(self.dtype()).device(at::kCPU));
-    auto target_cpu = at::from_blob(target.data_ptr(), target.sizes(), target.strides(),
+    auto t = at::from_blob(target.data_ptr(), target.sizes(), target.strides(),
         at::TensorOptions().dtype(target.dtype()).device(at::kCPU));
-    auto result_cpu = at::mse_loss_backward(grad_cpu, self_cpu, target_cpu, reduction);
-    return result_cpu.to(c10::Device(c10::DeviceType::PrivateUse1, 0));
+    return at::mse_loss_backward(g, s, t, reduction).to(self.device());
 }
 
 // ── Registration ─────────────────────────────────────────────────
@@ -621,8 +667,8 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("zero_", applegpu_zero_);
     m.impl("view", applegpu_view);
     m.impl("as_strided", applegpu_as_strided);
-    // mse_loss and mse_loss_backward: handled by CPU fallback.
-    // Custom implementations force eval (0.6ms overhead); fallback is no worse.
+    m.impl("mse_loss", applegpu_mse_loss);
+    m.impl("mse_loss_backward", applegpu_mse_loss_backward);
 }
 
 TORCH_LIBRARY_IMPL(_, PrivateUse1, m) {
