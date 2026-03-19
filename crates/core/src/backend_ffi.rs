@@ -398,6 +398,20 @@ ffi_unary_op_out!(applegpu_ffi_relu_out, crate::ops::relu, "relu");
 ffi_unary_op_out!(applegpu_ffi_neg_out, crate::ops::neg, "neg");
 ffi_binary_op_out!(applegpu_ffi_div_out, crate::ops::div, "div");
 
+/// Multiply tensor by scalar. Returns output ptr, writes tensor_id to *out_id.
+#[no_mangle]
+pub extern "C" fn applegpu_ffi_scalar_mul_out(
+    input_id: u64, scale: f32, out_id: *mut u64,
+) -> *mut u8 {
+    let state = get_state();
+    let mut rt = state.runtime.lock().unwrap();
+    let result_id = match crate::ops::scalar_mul(&mut rt, input_id, scale) {
+        Ok(id) => id,
+        Err(e) => { set_error(format!("scalar_mul failed: {}", e)); return std::ptr::null_mut(); }
+    };
+    alloc_output(&mut rt, &state.device, result_id, out_id)
+}
+
 /// threshold_backward: ReLU backward. Returns output ptr.
 #[no_mangle]
 pub extern "C" fn applegpu_ffi_threshold_backward_out(

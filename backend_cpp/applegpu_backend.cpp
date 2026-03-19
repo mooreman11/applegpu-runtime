@@ -446,33 +446,48 @@ at::Tensor applegpu_div(const at::Tensor& self, const at::Tensor& other) {
 
 // add_.Tensor: in-place add. Decompose to out-of-place add + copy back.
 at::Tensor& applegpu_add_(at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {
+    auto self_r = ensure_op_ready(self);
+    auto other_r = ensure_op_ready(other);
+
     if (alpha.toDouble() != 1.0) {
-        // scaled add: self += alpha * other
-        // Fall back to CPU for now
-        applegpu_ffi_synchronize();
-        eval_applegpu_tensor_if_needed(self);
-        eval_applegpu_tensor_if_needed(other);
-        auto self_cpu = self.cpu();
-        self_cpu.add_(other.cpu(), alpha);
-        std::memcpy(self.data_ptr(), self_cpu.data_ptr(), self.nbytes());
+        // self += alpha * other → scalar_mul(other, alpha) → add(self, scaled)
+        uint64_t scaled_id = 0;
+        void* scaled_ptr = applegpu_ffi_scalar_mul_out(
+            get_tensor_id(other_r), static_cast<float>(alpha.toDouble()), &scaled_id);
+        TORCH_CHECK(scaled_ptr != nullptr, "applegpu add_: scalar_mul failed");
+
+        uint64_t out_id = 0;
+        void* out_ptr = applegpu_ffi_add_out(get_tensor_id(self_r), scaled_id, &out_id);
+        TORCH_CHECK(out_ptr != nullptr, "applegpu add_: add failed");
+
+        // Swap self's storage to point to the result buffer (lazy — no eval yet)
+        auto* impl = self.unsafeGetTensorImpl();
+        auto new_dptr = c10::DataPtr{out_ptr, new TensorContext{out_id},
+            [](void* ctx) { auto* tc = static_cast<TensorContext*>(ctx); applegpu_ffi_free(tc->tensor_id); delete tc; },
+            c10::Device(c10::DeviceType::PrivateUse1, 0)};
+        auto new_storage = c10::Storage(c10::Storage::use_byte_size_t(),
+            self.nbytes(), std::move(new_dptr), &global_allocator);
+        impl->set_storage_and_dtype(std::move(new_storage), self.dtype());
+
+        // Old self storage is released by DataPtr deleter when refcount drops.
+        // Scaled intermediate is consumed by the add op — freed after eval.
         return self;
     }
-    eval_applegpu_tensor_if_needed(self);
-    eval_applegpu_tensor_if_needed(other);
-    applegpu_ffi_synchronize();
-    // For alpha=1: compute add, then copy result into self's buffer
+
+    // alpha=1: self += other → add(self, other), swap storage
     uint64_t out_id = 0;
-    void* ptr = applegpu_ffi_add_out(get_tensor_id(self), get_tensor_id(other), &out_id);
-    if (ptr == nullptr) {
-        TORCH_CHECK(false, "applegpu add_ failed: ", applegpu_ffi_last_error());
-    }
-    // Eval the add op to materialize the result
-    applegpu_ffi_eval(out_id);
-    applegpu_ffi_synchronize();
-    // Copy result back into self's buffer
-    std::memcpy(self.data_ptr(), ptr, self.nbytes());
-    // Free the temporary
-    applegpu_ffi_free(out_id);
+    void* out_ptr = applegpu_ffi_add_out(get_tensor_id(self_r), get_tensor_id(other_r), &out_id);
+    TORCH_CHECK(out_ptr != nullptr, "applegpu add_: add failed");
+
+    auto* impl = self.unsafeGetTensorImpl();
+    auto new_dptr = c10::DataPtr{out_ptr, new TensorContext{out_id},
+        [](void* ctx) { auto* tc = static_cast<TensorContext*>(ctx); applegpu_ffi_free(tc->tensor_id); delete tc; },
+        c10::Device(c10::DeviceType::PrivateUse1, 0)};
+    auto new_storage = c10::Storage(c10::Storage::use_byte_size_t(),
+        self.nbytes(), std::move(new_dptr), &global_allocator);
+    impl->set_storage_and_dtype(std::move(new_storage), self.dtype());
+
+    // Old self storage released by DataPtr deleter when refcount drops.
     return self;
 }
 
@@ -634,8 +649,8 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("zero_", applegpu_zero_);
     m.impl("view", applegpu_view);
     m.impl("as_strided", applegpu_as_strided);
-    m.impl("mse_loss", applegpu_mse_loss);
-    m.impl("mse_loss_backward", applegpu_mse_loss_backward);
+    // mse_loss and mse_loss_backward: handled by CPU fallback.
+    // Custom implementations force eval (0.6ms overhead); fallback is no worse.
 }
 
 TORCH_LIBRARY_IMPL(_, PrivateUse1, m) {
