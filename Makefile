@@ -14,6 +14,10 @@ build-rust: build-swift
 
 build-python: build-rust
 	uv run maturin develop
+	@# Add @loader_path rpath so the PyO3 .so finds libAppleGPUBridge.dylib
+	@for so in python/applegpu_runtime/applegpu_runtime.cpython-*-darwin.so; do \
+		install_name_tool -add_rpath @loader_path "$$so" 2>/dev/null || true; \
+	done
 
 build-service: build-rust
 	cargo build -p applegpu-service

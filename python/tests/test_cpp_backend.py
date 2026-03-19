@@ -154,6 +154,7 @@ def test_inplace_add():
     assert torch.allclose(result, torch.tensor([11.0, 22.0, 33.0]))
 
 
+@pytest.mark.filterwarnings("ignore:An output with one or more elements was resized")
 def test_mlp_training_step():
     """Full MLP training step (forward + backward + optimizer) works."""
     _load()
