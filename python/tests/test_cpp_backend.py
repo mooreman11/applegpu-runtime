@@ -1,16 +1,5 @@
 """Integration tests for the PrivateUse1 C++ backend."""
-import os
-import sys
-import types
 import pytest
-
-# Prevent applegpu_runtime's __init__.py from loading the PyO3 native extension.
-# Both .so files link libAppleGPUBridge.a — loading both causes ObjC class conflicts.
-if 'applegpu_runtime' not in sys.modules:
-    _stub = types.ModuleType('applegpu_runtime')
-    _stub.__path__ = [os.path.join(os.path.dirname(__file__), '..', 'applegpu_runtime')]
-    sys.modules['applegpu_runtime'] = _stub
-
 import torch
 
 

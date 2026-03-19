@@ -7,7 +7,7 @@ let package = Package(
     products: [
         .library(
             name: "AppleGPUBridge",
-            type: .static,
+            type: .dynamic,
             targets: ["AppleGPUBridge"]
         ),
     ],

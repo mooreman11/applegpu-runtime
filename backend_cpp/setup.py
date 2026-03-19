@@ -22,15 +22,15 @@ subprocess.check_call(
     cwd=workspace_root,
 )
 
-# Locate static libraries
+# Locate Rust static library (includes Swift bridge symbols from build.rs)
 rust_lib = os.path.join(workspace_root, "target", "release", "libapplegpu_core.a")
-swift_build_dir = os.path.join(workspace_root, "swift", ".build", "release")
-swift_lib = os.path.join(swift_build_dir, "libAppleGPUBridge.a")
 
-# Verify they exist
-for lib in [rust_lib, swift_lib]:
-    if not os.path.exists(lib):
-        raise FileNotFoundError(f"Required static library not found: {lib}")
+if not os.path.exists(rust_lib):
+    raise FileNotFoundError(f"Required static library not found: {rust_lib}")
+
+# NOTE: Do NOT link libAppleGPUBridge.a separately — it's already linked into
+# libapplegpu_core.a by build.rs. Double-linking causes ObjC class duplication
+# when the PyO3 module (which also links it) is loaded in the same process.
 
 # Find Swift runtime paths (mirrors crates/core/build.rs)
 sdk_path = subprocess.check_output(["xcrun", "--show-sdk-path"]).decode().strip()
@@ -43,12 +43,13 @@ swift_lib_path = os.path.join(
 
 setup(
     name="applegpu_backend",
+    packages=[],
     ext_modules=[
         CppExtension(
             name="applegpu_backend",
             sources=["applegpu_backend.cpp"],
             include_dirs=["."],
-            extra_objects=[rust_lib, swift_lib],
+            extra_objects=[rust_lib],
             extra_link_args=[
                 f"-L{swift_lib_path}",
                 f"-L{sdk_path}/usr/lib/swift",

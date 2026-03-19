@@ -22,7 +22,24 @@ fn main() {
         "cargo:rustc-link-search=native={}",
         swift_build_dir.display()
     );
-    println!("cargo:rustc-link-lib=static=AppleGPUBridge");
+    println!("cargo:rustc-link-lib=dylib=AppleGPUBridge");
+
+    // Set rpath so the dylib is found at runtime (Cargo test binaries, Python extensions)
+    println!(
+        "cargo:rustc-link-arg=-Wl,-rpath,{}",
+        swift_build_dir.display()
+    );
+
+    // Also copy dylib next to Python extensions for @loader_path resolution
+    let dylib_src = swift_build_dir.join("libAppleGPUBridge.dylib");
+    if dylib_src.exists() {
+        let python_dir = workspace_root.join("python/applegpu_runtime");
+        let _ = std::fs::copy(&dylib_src, python_dir.join("libAppleGPUBridge.dylib"));
+        let backend_dir = workspace_root.join("backend_cpp");
+        if backend_dir.exists() {
+            let _ = std::fs::copy(&dylib_src, backend_dir.join("libAppleGPUBridge.dylib"));
+        }
+    }
 
     // Link Swift runtime and Apple frameworks
     println!("cargo:rustc-link-lib=dylib=swiftCore");
