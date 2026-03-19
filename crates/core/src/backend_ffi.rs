@@ -396,6 +396,21 @@ ffi_binary_op_out!(applegpu_ffi_sub_out, crate::ops::sub, "sub");
 ffi_binary_op_out!(applegpu_ffi_matmul_out, crate::ops::matmul, "matmul");
 ffi_unary_op_out!(applegpu_ffi_relu_out, crate::ops::relu, "relu");
 ffi_unary_op_out!(applegpu_ffi_neg_out, crate::ops::neg, "neg");
+ffi_binary_op_out!(applegpu_ffi_div_out, crate::ops::div, "div");
+
+/// threshold_backward: ReLU backward. Returns output ptr.
+#[no_mangle]
+pub extern "C" fn applegpu_ffi_threshold_backward_out(
+    grad_id: u64, input_id: u64, threshold: f32, out_id: *mut u64,
+) -> *mut u8 {
+    let state = get_state();
+    let mut rt = state.runtime.lock().unwrap();
+    let result_id = match crate::ops::threshold_backward(&mut rt, grad_id, input_id, threshold) {
+        Ok(id) => id,
+        Err(e) => { set_error(format!("threshold_backward failed: {}", e)); return std::ptr::null_mut(); }
+    };
+    alloc_output(&mut rt, &state.device, result_id, out_id)
+}
 
 /// Read tensor data as f32 into the provided buffer.
 /// Flushes streaming batch and evaluates if needed.

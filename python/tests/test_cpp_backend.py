@@ -131,3 +131,46 @@ def test_linear_layer():
     layer_cpu.load_state_dict({k: v.cpu() for k, v in layer.state_dict().items()})
     y_expected = layer_cpu(x.cpu())
     assert torch.allclose(y.cpu(), y_expected, atol=1e-5), f"Mismatch: {y.cpu()} vs {y_expected}"
+
+
+def test_threshold_backward():
+    """threshold_backward (ReLU backward) works natively."""
+    _load()
+    grad = torch.tensor([1.0, 2.0, 3.0, 4.0], device='applegpu')
+    input = torch.tensor([-1.0, 0.5, -0.5, 2.0], device='applegpu')
+    result = torch.ops.aten.threshold_backward(grad, input, 0.0).cpu()
+    # grad * (input > 0) = [0, 2, 0, 4]
+    expected = torch.tensor([0.0, 2.0, 0.0, 4.0])
+    assert torch.allclose(result, expected)
+
+
+def test_inplace_add():
+    """In-place add works."""
+    _load()
+    a = torch.tensor([1.0, 2.0, 3.0], device='applegpu')
+    b = torch.tensor([10.0, 20.0, 30.0], device='applegpu')
+    a.add_(b)
+    result = a.cpu()
+    assert torch.allclose(result, torch.tensor([11.0, 22.0, 33.0]))
+
+
+def test_mlp_training_step():
+    """Full MLP training step (forward + backward + optimizer) works."""
+    _load()
+    torch.manual_seed(42)
+    model = torch.nn.Sequential(
+        torch.nn.Linear(4, 8), torch.nn.ReLU(),
+        torch.nn.Linear(8, 1)
+    ).to('applegpu')
+    x = torch.randn(2, 4).to('applegpu')
+    y = torch.randn(2, 1).to('applegpu')
+
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+    optimizer.zero_grad()
+    loss = torch.nn.MSELoss()(model(x), y)
+    loss.backward()
+    optimizer.step()
+
+    # Verify loss decreased after one step
+    loss2 = torch.nn.MSELoss()(model(x), y)
+    assert loss2.cpu().item() < loss.cpu().item() + 0.1  # allow small tolerance

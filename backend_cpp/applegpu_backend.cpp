@@ -364,6 +364,125 @@ at::Tensor applegpu_addmm(const at::Tensor& self, const at::Tensor& mat1,
         add_ptr, add_out_id, query_output_shape(add_out_id), mat1.scalar_type());
 }
 
+// threshold_backward: ReLU backward (grad * (input > threshold))
+at::Tensor applegpu_threshold_backward(const at::Tensor& grad_output,
+                                        const at::Tensor& self,
+                                        const at::Scalar& threshold) {
+    uint64_t out_id = 0;
+    void* ptr = applegpu_ffi_threshold_backward_out(
+        get_tensor_id(grad_output), get_tensor_id(self),
+        threshold.toFloat(), &out_id);
+    return wrap_ffi_output(ptr, out_id, query_output_shape(out_id), grad_output.scalar_type());
+}
+
+// t: transpose last two dimensions. Returns a view with swapped strides.
+at::Tensor applegpu_t(const at::Tensor& self) {
+    TORCH_CHECK(self.dim() == 2, "t expects a 2D tensor, got ", self.dim(), "D");
+    auto sizes = self.sizes().vec();
+    auto strides = self.strides().vec();
+    std::swap(sizes[0], sizes[1]);
+    std::swap(strides[0], strides[1]);
+    auto result = self.as_strided(sizes, strides);
+    return result;
+}
+
+// div.Tensor
+at::Tensor applegpu_div(const at::Tensor& self, const at::Tensor& other) {
+    auto self_c = self.is_contiguous() ? self : self.contiguous();
+    auto other_c = other.is_contiguous() ? other : other.contiguous();
+    uint64_t out_id = 0;
+    void* ptr = applegpu_ffi_div_out(
+        get_tensor_id(self_c), get_tensor_id(other_c), &out_id);
+    return wrap_ffi_output(ptr, out_id, query_output_shape(out_id), self.scalar_type());
+}
+
+// add_.Tensor: in-place add. Decompose to out-of-place add + copy back.
+at::Tensor& applegpu_add_(at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {
+    if (alpha.toDouble() != 1.0) {
+        // scaled add: self += alpha * other
+        // Fall back to CPU for now
+        applegpu_ffi_synchronize();
+        eval_applegpu_tensor_if_needed(self);
+        eval_applegpu_tensor_if_needed(other);
+        auto self_cpu = self.cpu();
+        self_cpu.add_(other.cpu(), alpha);
+        std::memcpy(self.data_ptr(), self_cpu.data_ptr(), self.nbytes());
+        return self;
+    }
+    eval_applegpu_tensor_if_needed(self);
+    eval_applegpu_tensor_if_needed(other);
+    applegpu_ffi_synchronize();
+    // For alpha=1: compute add, then copy result into self's buffer
+    uint64_t out_id = 0;
+    void* ptr = applegpu_ffi_add_out(get_tensor_id(self), get_tensor_id(other), &out_id);
+    if (ptr == nullptr) {
+        TORCH_CHECK(false, "applegpu add_ failed: ", applegpu_ffi_last_error());
+    }
+    // Eval the add op to materialize the result
+    applegpu_ffi_eval(out_id);
+    applegpu_ffi_synchronize();
+    // Copy result back into self's buffer
+    std::memcpy(self.data_ptr(), ptr, self.nbytes());
+    // Free the temporary
+    applegpu_ffi_free(out_id);
+    return self;
+}
+
+// mul_.Tensor: in-place multiply
+at::Tensor& applegpu_mul_(at::Tensor& self, const at::Tensor& other) {
+    eval_applegpu_tensor_if_needed(self);
+    eval_applegpu_tensor_if_needed(other);
+    applegpu_ffi_synchronize();
+    uint64_t out_id = 0;
+    void* ptr = applegpu_ffi_mul_out(get_tensor_id(self), get_tensor_id(other), &out_id);
+    if (ptr == nullptr) {
+        TORCH_CHECK(false, "applegpu mul_ failed: ", applegpu_ffi_last_error());
+    }
+    applegpu_ffi_eval(out_id);
+    applegpu_ffi_synchronize();
+    std::memcpy(self.data_ptr(), ptr, self.nbytes());
+    applegpu_ffi_free(out_id);
+    return self;
+}
+
+// mul_.Scalar: in-place scalar multiply
+at::Tensor& applegpu_mul_scalar_(at::Tensor& self, const at::Scalar& other) {
+    eval_applegpu_tensor_if_needed(self);
+    applegpu_ffi_synchronize();
+    float scale = other.toFloat();
+    // Direct CPU manipulation on shared memory buffer
+    if (self.scalar_type() == at::ScalarType::Float && self.is_contiguous()) {
+        float* data = static_cast<float*>(self.data_ptr());
+        int64_t n = self.numel();
+        for (int64_t i = 0; i < n; i++) data[i] *= scale;
+        return self;
+    }
+    // Fallback for other dtypes
+    auto cpu_view = at::from_blob(self.data_ptr(), self.sizes(), self.strides(),
+        at::TensorOptions().dtype(self.dtype()).device(at::kCPU));
+    cpu_view.mul_(other);
+    return self;
+}
+
+// fill_.Scalar: fill tensor with a constant value
+at::Tensor& applegpu_fill_(at::Tensor& self, const at::Scalar& value) {
+    eval_applegpu_tensor_if_needed(self);
+    applegpu_ffi_synchronize();
+    // Direct CPU manipulation on shared memory buffer
+    auto cpu_view = at::from_blob(self.data_ptr(), self.sizes(), self.strides(),
+        at::TensorOptions().dtype(self.dtype()).device(at::kCPU));
+    cpu_view.fill_(value);
+    return self;
+}
+
+// zero_: fill with zeros
+at::Tensor& applegpu_zero_(at::Tensor& self) {
+    eval_applegpu_tensor_if_needed(self);
+    applegpu_ffi_synchronize();
+    std::memset(self.data_ptr(), 0, self.nbytes());
+    return self;
+}
+
 // CPU fallback for unregistered ops
 void applegpu_cpu_fallback(
     const c10::OperatorHandle& op,
@@ -390,6 +509,14 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("relu", applegpu_relu);
     m.impl("neg", applegpu_neg);
     m.impl("addmm", applegpu_addmm);
+    m.impl("threshold_backward", applegpu_threshold_backward);
+    m.impl("t", applegpu_t);
+    m.impl("div.Tensor", applegpu_div);
+    m.impl("add_.Tensor", applegpu_add_);
+    m.impl("mul_.Tensor", applegpu_mul_);
+    m.impl("mul_.Scalar", applegpu_mul_scalar_);
+    m.impl("fill_.Scalar", applegpu_fill_);
+    m.impl("zero_", applegpu_zero_);
 }
 
 TORCH_LIBRARY_IMPL(_, PrivateUse1, m) {
