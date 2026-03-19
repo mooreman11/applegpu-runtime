@@ -8,6 +8,7 @@
 #include <ATen/native/CPUFallback.h>
 #include <c10/core/impl/DeviceGuardImplInterface.h>
 #include <ATen/detail/PrivateUse1HooksInterface.h>
+#include <ATen/InferSize.h>
 #include "applegpu_ffi.h"
 
 // ── Helpers ──────────────────────────────────────────────────────
@@ -493,6 +494,73 @@ void applegpu_cpu_fallback(
     at::native::cpu_fallback(op, stack);
 }
 
+// view: reshape with compatible strides. Shares storage.
+at::Tensor applegpu_view(const at::Tensor& self, c10::SymIntArrayRef size) {
+    // Convert SymIntArrayRef to concrete int64 sizes (our tensors have no symbolic dims)
+    std::vector<int64_t> size_int64;
+    size_int64.reserve(size.size());
+    for (const auto& s : size) {
+        size_int64.push_back(s.expect_int());
+    }
+    auto inferred = at::infer_size_dv(c10::IntArrayRef(size_int64), self.numel());
+    auto strides = at::detail::computeStride(self.sizes(), self.strides(), inferred);
+    TORCH_CHECK(strides.has_value(), "view size is not compatible with input tensor's size and stride");
+    auto result = at::detail::make_tensor<c10::TensorImpl>(
+        c10::Storage(self.storage()),
+        c10::DispatchKeySet(c10::DispatchKey::PrivateUse1),
+        self.dtype());
+    result.unsafeGetTensorImpl()->set_sizes_and_strides(
+        c10::IntArrayRef(inferred), c10::IntArrayRef(*strides));
+    result.unsafeGetTensorImpl()->set_storage_offset(self.storage_offset());
+    return result;
+}
+
+// as_strided: create a view with explicit sizes, strides, and offset.
+at::Tensor applegpu_as_strided(const at::Tensor& self, c10::IntArrayRef size,
+                                c10::IntArrayRef stride,
+                                std::optional<int64_t> storage_offset) {
+    auto offset = storage_offset.value_or(self.storage_offset());
+    auto result = at::detail::make_tensor<c10::TensorImpl>(
+        c10::Storage(self.storage()),
+        c10::DispatchKeySet(c10::DispatchKey::PrivateUse1),
+        self.dtype());
+    result.unsafeGetTensorImpl()->set_sizes_and_strides(size, stride);
+    result.unsafeGetTensorImpl()->set_storage_offset(offset);
+    return result;
+}
+
+// mse_loss: compute via CPU view of shared-memory buffer (no H2D/D2H copy).
+at::Tensor applegpu_mse_loss(const at::Tensor& self, const at::Tensor& target, int64_t reduction) {
+    eval_applegpu_tensor_if_needed(self);
+    eval_applegpu_tensor_if_needed(target);
+    applegpu_ffi_synchronize();
+    auto self_cpu = at::from_blob(self.data_ptr(), self.sizes(), self.strides(),
+        at::TensorOptions().dtype(self.dtype()).device(at::kCPU));
+    auto target_cpu = at::from_blob(target.data_ptr(), target.sizes(), target.strides(),
+        at::TensorOptions().dtype(target.dtype()).device(at::kCPU));
+    auto result_cpu = at::mse_loss(self_cpu, target_cpu, reduction);
+    return result_cpu.to(c10::Device(c10::DeviceType::PrivateUse1, 0));
+}
+
+// mse_loss_backward
+at::Tensor applegpu_mse_loss_backward(const at::Tensor& grad_output,
+                                       const at::Tensor& self,
+                                       const at::Tensor& target,
+                                       int64_t reduction) {
+    eval_applegpu_tensor_if_needed(grad_output);
+    eval_applegpu_tensor_if_needed(self);
+    eval_applegpu_tensor_if_needed(target);
+    applegpu_ffi_synchronize();
+    auto grad_cpu = at::from_blob(grad_output.data_ptr(), grad_output.sizes(), grad_output.strides(),
+        at::TensorOptions().dtype(grad_output.dtype()).device(at::kCPU));
+    auto self_cpu = at::from_blob(self.data_ptr(), self.sizes(), self.strides(),
+        at::TensorOptions().dtype(self.dtype()).device(at::kCPU));
+    auto target_cpu = at::from_blob(target.data_ptr(), target.sizes(), target.strides(),
+        at::TensorOptions().dtype(target.dtype()).device(at::kCPU));
+    auto result_cpu = at::mse_loss_backward(grad_cpu, self_cpu, target_cpu, reduction);
+    return result_cpu.to(c10::Device(c10::DeviceType::PrivateUse1, 0));
+}
+
 // ── Registration ─────────────────────────────────────────────────
 
 TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
@@ -517,6 +585,10 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("mul_.Scalar", applegpu_mul_scalar_);
     m.impl("fill_.Scalar", applegpu_fill_);
     m.impl("zero_", applegpu_zero_);
+    m.impl("view", applegpu_view);
+    m.impl("as_strided", applegpu_as_strided);
+    m.impl("mse_loss", applegpu_mse_loss);
+    m.impl("mse_loss_backward", applegpu_mse_loss_backward);
 }
 
 TORCH_LIBRARY_IMPL(_, PrivateUse1, m) {
