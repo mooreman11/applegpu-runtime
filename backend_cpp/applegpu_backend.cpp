@@ -43,6 +43,17 @@ int8_t scalar_type_to_wire(at::ScalarType st) {
     }
 }
 
+// Query output shape from Rust graph node (handles broadcasting).
+std::vector<int64_t> query_output_shape(uint64_t tid) {
+    uint64_t dims[8];
+    uint32_t ndim = 0;
+    int32_t rc = applegpu_ffi_shape(tid, dims, &ndim);
+    TORCH_CHECK(rc == 0, "applegpu: failed to query output shape");
+    std::vector<int64_t> sizes(ndim);
+    for (uint32_t i = 0; i < ndim; i++) sizes[i] = static_cast<int64_t>(dims[i]);
+    return sizes;
+}
+
 } // namespace
 
 // ── Allocator ────────────────────────────────────────────────────
@@ -128,12 +139,27 @@ at::Tensor applegpu_empty_memory_format(
     return applegpu_empty_strided(size, strides, dtype_opt, layout_opt, device_opt, pin_memory_opt);
 }
 
+// Eval a pending applegpu tensor before reading its data.
+// Needed when an op result (recorded lazily) is about to be copied out.
+void eval_applegpu_tensor_if_needed(const at::Tensor& t) {
+    if (!t.device().is_privateuseone()) return;
+    auto* ctx = static_cast<TensorContext*>(t.storage().data_ptr().get_context());
+    if (ctx == nullptr) return;
+    // applegpu_ffi_eval is idempotent on already-materialized tensors
+    int32_t rc = applegpu_ffi_eval(ctx->tensor_id);
+    TORCH_CHECK(rc == 0, "applegpu: eval failed before copy: ",
+                applegpu_ffi_last_error() ? applegpu_ffi_last_error() : "unknown");
+}
+
 // _copy_from: handles both GPU→CPU and CPU→GPU copies.
 // Our Metal buffers are storageModeShared, so they're CPU-accessible —
 // we just memcpy between the raw data pointers.
 at::Tensor& applegpu_copy_(at::Tensor& self, const at::Tensor& src, bool non_blocking) {
     // Flush any pending GPU work before reading source data
     applegpu_ffi_synchronize();
+
+    // If src is an applegpu tensor with a pending lazy graph op, evaluate it now
+    eval_applegpu_tensor_if_needed(src);
 
     TORCH_CHECK(self.numel() == src.numel(),
         "applegpu copy_: size mismatch (", self.numel(), " vs ", src.numel(), ")");
@@ -196,6 +222,85 @@ const at::Tensor& applegpu_resize_(const at::Tensor& self, c10::IntArrayRef size
     return self;
 }
 
+// ── Native Op Wrappers ────────────────────────────────────────────
+
+// Create a PyTorch tensor wrapping an FFI op result.
+at::Tensor wrap_ffi_output(void* ptr, uint64_t tid, const std::vector<int64_t>& sizes, at::ScalarType dtype) {
+    if (ptr == nullptr) {
+        const char* err = applegpu_ffi_last_error();
+        TORCH_CHECK(false, "applegpu op failed: ", err ? err : "unknown");
+    }
+
+    auto strides = c10::contiguous_strides(c10::IntArrayRef(sizes));
+    int64_t nbytes = at::detail::computeStorageNbytes(
+        c10::IntArrayRef(sizes), strides, at::elementSize(dtype));
+
+    auto* ctx = new TensorContext{tid};
+    auto deleter = [](void* ctx_ptr) {
+        auto* tc = static_cast<TensorContext*>(ctx_ptr);
+        applegpu_ffi_free(tc->tensor_id);
+        delete tc;
+    };
+    c10::DataPtr dptr{ptr, ctx, deleter, c10::Device(c10::DeviceType::PrivateUse1, 0)};
+
+    auto storage = c10::Storage(
+        c10::Storage::use_byte_size_t(), nbytes,
+        std::move(dptr), &global_allocator);
+
+    auto tensor = at::detail::make_tensor<c10::TensorImpl>(
+        std::move(storage),
+        c10::DispatchKeySet(c10::DispatchKey::PrivateUse1),
+        at::scalarTypeToTypeMeta(dtype));
+    tensor.unsafeGetTensorImpl()->set_sizes_and_strides(
+        c10::IntArrayRef(sizes), strides);
+    return tensor;
+}
+
+at::Tensor applegpu_add(const at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {
+    if (alpha.toDouble() != 1.0) {
+        // Fall back to CPU for scaled add (SGD optimizer uses alpha=-lr)
+        applegpu_ffi_synchronize();
+        return at::add(self.cpu(), other.cpu(), alpha).to(self.device());
+    }
+    uint64_t out_id = 0;
+    void* ptr = applegpu_ffi_add_out(get_tensor_id(self), get_tensor_id(other), &out_id);
+    return wrap_ffi_output(ptr, out_id, query_output_shape(out_id), self.scalar_type());
+}
+
+at::Tensor applegpu_mul_tensor(const at::Tensor& self, const at::Tensor& other) {
+    uint64_t out_id = 0;
+    void* ptr = applegpu_ffi_mul_out(get_tensor_id(self), get_tensor_id(other), &out_id);
+    return wrap_ffi_output(ptr, out_id, query_output_shape(out_id), self.scalar_type());
+}
+
+at::Tensor applegpu_sub(const at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {
+    if (alpha.toDouble() != 1.0) {
+        applegpu_ffi_synchronize();
+        return at::sub(self.cpu(), other.cpu(), alpha).to(self.device());
+    }
+    uint64_t out_id = 0;
+    void* ptr = applegpu_ffi_sub_out(get_tensor_id(self), get_tensor_id(other), &out_id);
+    return wrap_ffi_output(ptr, out_id, query_output_shape(out_id), self.scalar_type());
+}
+
+at::Tensor applegpu_mm(const at::Tensor& self, const at::Tensor& mat2) {
+    uint64_t out_id = 0;
+    void* ptr = applegpu_ffi_matmul_out(get_tensor_id(self), get_tensor_id(mat2), &out_id);
+    return wrap_ffi_output(ptr, out_id, query_output_shape(out_id), self.scalar_type());
+}
+
+at::Tensor applegpu_relu(const at::Tensor& self) {
+    uint64_t out_id = 0;
+    void* ptr = applegpu_ffi_relu_out(get_tensor_id(self), &out_id);
+    return wrap_ffi_output(ptr, out_id, query_output_shape(out_id), self.scalar_type());
+}
+
+at::Tensor applegpu_neg(const at::Tensor& self) {
+    uint64_t out_id = 0;
+    void* ptr = applegpu_ffi_neg_out(get_tensor_id(self), &out_id);
+    return wrap_ffi_output(ptr, out_id, query_output_shape(out_id), self.scalar_type());
+}
+
 // CPU fallback for unregistered ops
 void applegpu_cpu_fallback(
     const c10::OperatorHandle& op,
@@ -215,6 +320,12 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("resize_", applegpu_resize_);
     m.impl("_copy_from", applegpu_copy_from);
     m.impl("_copy_from_and_resize", applegpu_copy_from_and_resize);
+    m.impl("add.Tensor", applegpu_add);
+    m.impl("mul.Tensor", applegpu_mul_tensor);
+    m.impl("sub.Tensor", applegpu_sub);
+    m.impl("mm", applegpu_mm);
+    m.impl("relu", applegpu_relu);
+    m.impl("neg", applegpu_neg);
 }
 
 TORCH_LIBRARY_IMPL(_, PrivateUse1, m) {

@@ -68,3 +68,40 @@ def test_cpu_fallback_ops():
     expected = torch.sin(torch.tensor([0.0, 1.5708, 3.1416]))
     result_cpu = result.cpu() if result.device.type != 'cpu' else result
     assert torch.allclose(result_cpu, expected, atol=1e-4)
+
+
+def test_native_add():
+    """Native add op (not CPU fallback) produces correct result."""
+    _load()
+    a = torch.tensor([1.0, 2.0, 3.0, 4.0], device='applegpu')
+    b = torch.tensor([10.0, 20.0, 30.0, 40.0], device='applegpu')
+    result = (a + b).cpu()
+    expected = torch.tensor([11.0, 22.0, 33.0, 44.0])
+    assert torch.allclose(result, expected)
+
+
+def test_native_mul():
+    """Native mul op produces correct result."""
+    _load()
+    a = torch.tensor([2.0, 3.0, 4.0], device='applegpu')
+    b = torch.tensor([10.0, 20.0, 30.0], device='applegpu')
+    result = (a * b).cpu()
+    assert torch.allclose(result, torch.tensor([20.0, 60.0, 120.0]))
+
+
+def test_native_matmul():
+    """Native mm op produces correct result."""
+    _load()
+    a = torch.tensor([[1.0, 2.0], [3.0, 4.0]], device='applegpu')
+    b = torch.tensor([[5.0, 6.0], [7.0, 8.0]], device='applegpu')
+    result = torch.mm(a, b).cpu()
+    expected = torch.tensor([[19.0, 22.0], [43.0, 50.0]])
+    assert torch.allclose(result, expected)
+
+
+def test_native_relu():
+    """Native relu op produces correct result."""
+    _load()
+    a = torch.tensor([-2.0, 0.0, 3.0, -1.0], device='applegpu')
+    result = torch.relu(a).cpu()
+    assert torch.allclose(result, torch.tensor([0.0, 0.0, 3.0, 0.0]))
