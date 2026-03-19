@@ -157,6 +157,45 @@ at::Tensor& applegpu_copy_(at::Tensor& self, const at::Tensor& src, bool non_blo
     return self;
 }
 
+// _copy_from: copy src (any device) into dst (PrivateUse1).
+at::Tensor applegpu_copy_from(const at::Tensor& self, const at::Tensor& dst, bool non_blocking) {
+    applegpu_ffi_synchronize();
+    at::Tensor dst_mut = dst;
+    dst_mut.copy_(self);
+    return dst_mut;
+}
+
+// _copy_from_and_resize: resize dst to match self, then copy.
+at::Tensor applegpu_copy_from_and_resize(const at::Tensor& self, const at::Tensor& dst) {
+    applegpu_ffi_synchronize();
+    at::Tensor dst_mut = dst;
+    dst_mut.resize_(self.sizes());
+    dst_mut.copy_(self);
+    return dst_mut;
+}
+
+// resize_: explicit resize for PrivateUse1 tensors.
+// Registered so _copy_from_and_resize->resize_ doesn't recurse through the fallback.
+const at::Tensor& applegpu_resize_(const at::Tensor& self, c10::IntArrayRef size,
+                                    std::optional<at::MemoryFormat> fmt) {
+    auto* impl = self.unsafeGetTensorImpl();
+    auto strides = c10::contiguous_strides(size);
+    auto nbytes = at::detail::computeStorageNbytes(size, strides, self.dtype().itemsize());
+    if (nbytes > (int64_t)self.storage().nbytes()) {
+        auto new_storage = c10::Storage(
+            c10::Storage::use_byte_size_t(), nbytes,
+            global_allocator.allocate(nbytes), &global_allocator);
+        impl->set_storage_and_dtype(std::move(new_storage), self.dtype());
+    }
+    impl->set_sizes_and_strides(size, strides);
+    if (nbytes > 0 && self.storage().data_ptr().get_context()) {
+        uint64_t tid = get_tensor_id(self);
+        std::vector<uint64_t> dims(size.begin(), size.end());
+        applegpu_ffi_register_tensor(tid, dims.data(), dims.size(), scalar_type_to_wire(self.scalar_type()));
+    }
+    return self;
+}
+
 // CPU fallback for unregistered ops
 void applegpu_cpu_fallback(
     const c10::OperatorHandle& op,
@@ -173,6 +212,9 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("empty.memory_format", applegpu_empty_memory_format);
     m.impl("empty_strided", applegpu_empty_strided);
     m.impl("copy_", applegpu_copy_);
+    m.impl("resize_", applegpu_resize_);
+    m.impl("_copy_from", applegpu_copy_from);
+    m.impl("_copy_from_and_resize", applegpu_copy_from_and_resize);
 }
 
 TORCH_LIBRARY_IMPL(_, PrivateUse1, m) {

@@ -59,7 +59,6 @@ def test_copy_roundtrip():
     assert torch.allclose(back, src)
 
 
-@pytest.mark.skip(reason="CPU fallback copy-back crashes (Phase 3 fix)")
 def test_cpu_fallback_ops():
     """Unregistered ops fall back to CPU and produce correct results."""
     _load()
