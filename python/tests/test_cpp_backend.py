@@ -105,3 +105,29 @@ def test_native_relu():
     a = torch.tensor([-2.0, 0.0, 3.0, -1.0], device='applegpu')
     result = torch.relu(a).cpu()
     assert torch.allclose(result, torch.tensor([0.0, 0.0, 3.0, 0.0]))
+
+
+def test_native_addmm():
+    """addmm with transposed weight runs on GPU (not CPU fallback)."""
+    _load()
+    bias = torch.tensor([1.0, 2.0], device='applegpu')
+    input = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], device='applegpu')
+    weight = torch.tensor([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], device='applegpu')
+    result = torch.addmm(bias, input, weight.t()).cpu()
+    expected = torch.tensor([[2.0, 4.0], [5.0, 7.0]])
+    assert torch.allclose(result, expected), f"Expected {expected}, got {result}"
+
+
+def test_linear_layer():
+    """nn.Linear forward pass works end-to-end on GPU."""
+    _load()
+    torch.manual_seed(42)
+    layer = torch.nn.Linear(4, 3).to('applegpu')
+    x = torch.randn(2, 4).to('applegpu')
+    y = layer(x)
+    assert y.device.type == 'applegpu'
+    assert y.shape == (2, 3)
+    layer_cpu = torch.nn.Linear(4, 3)
+    layer_cpu.load_state_dict({k: v.cpu() for k, v in layer.state_dict().items()})
+    y_expected = layer_cpu(x.cpu())
+    assert torch.allclose(y.cpu(), y_expected, atol=1e-5), f"Mismatch: {y.cpu()} vs {y_expected}"
