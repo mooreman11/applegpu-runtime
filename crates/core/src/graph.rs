@@ -619,6 +619,11 @@ impl Graph {
         Ok(levels)
     }
 
+    /// Check if a tensor ID is referenced as input by any pending graph node.
+    pub fn is_referenced(&self, id: u64) -> bool {
+        self.nodes.values().any(|node| node.inputs.contains(&id))
+    }
+
     /// Remove all nodes belonging to a container. Returns their IDs.
     pub fn remove_nodes_for_container(&mut self, container_id: ContainerId) -> Vec<u64> {
         let ids: Vec<u64> = self.nodes.iter()

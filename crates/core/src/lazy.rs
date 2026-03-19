@@ -31,6 +31,8 @@ pub struct LazyRuntime {
     /// Pre-allocated buffers awaiting graph eval to write output data.
     /// Maps tensor_id -> Buffer. Used by PrivateUse1 backend.
     preallocated: HashMap<u64, crate::buffer::Buffer>,
+    /// Tensor IDs marked for deferred free. Processed after each eval.
+    deferred_frees: Vec<u64>,
 }
 
 impl LazyRuntime {
@@ -42,6 +44,7 @@ impl LazyRuntime {
             pool: BufferPool::new(256 * 1024 * 1024),
             secondary_outputs: HashMap::new(),
             preallocated: HashMap::new(),
+            deferred_frees: Vec::new(),
         }
     }
 
@@ -108,6 +111,36 @@ impl LazyRuntime {
         let tensor = Tensor::from_raw(id, dims, dtype, buffer);
         self.tensors.insert(id, tensor);
         Ok(())
+    }
+
+    /// Try to free a tensor. If referenced by pending graph nodes, defer the free.
+    /// Returns true if freed immediately, false if deferred.
+    pub fn try_deferred_free(&mut self, id: u64) -> bool {
+        if self.graph.is_referenced(id) {
+            if !self.deferred_frees.contains(&id) {
+                self.deferred_frees.push(id);
+            }
+            return false;
+        }
+        // Safe to free now
+        if let Some(tensor) = self.tensors.remove(&id) {
+            self.pool.release(tensor.buffer);
+        }
+        self.preallocated.remove(&id);
+        self.graph.remove_node(id);
+        true
+    }
+
+    /// Process deferred frees. Called at the end of eval.
+    fn process_deferred_frees(&mut self) {
+        let ids: Vec<u64> = self.deferred_frees.drain(..).collect();
+        for id in ids {
+            if self.graph.is_referenced(id) {
+                self.deferred_frees.push(id); // still referenced, re-defer
+            } else if let Some(tensor) = self.tensors.remove(&id) {
+                self.pool.release(tensor.buffer);
+            }
+        }
     }
 
     /// Record a lazy operation. Returns the output node ID.
@@ -327,6 +360,7 @@ impl LazyRuntime {
             }
         }
 
+        self.process_deferred_frees();
         loop_result
     }
 
@@ -435,6 +469,7 @@ impl LazyRuntime {
         } else if let Some(cb) = last_cb {
             crate::compute::wait_command_buffer(cb);
         }
+        self.process_deferred_frees();
         loop_result
     }
 
