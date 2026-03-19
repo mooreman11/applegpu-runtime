@@ -154,3 +154,75 @@ fn ffi_relu_eval_readback() {
     backend_ffi::applegpu_ffi_free(a_id);
     backend_ffi::applegpu_ffi_free(result_id);
 }
+
+#[test]
+fn ffi_mul_eval_readback() {
+    backend_ffi::applegpu_ffi_init();
+    let mut a_id: u64 = 0;
+    let mut b_id: u64 = 0;
+    let a_ptr = backend_ffi::applegpu_ffi_alloc(16, 0, &mut a_id);
+    let b_ptr = backend_ffi::applegpu_ffi_alloc(16, 0, &mut b_id);
+    unsafe {
+        let a = a_ptr as *mut f32;
+        let b = b_ptr as *mut f32;
+        for i in 0..4 {
+            *a.add(i) = (i + 1) as f32;
+            *b.add(i) = (i + 1) as f32 * 2.0;
+        }
+    }
+    let dims: [u64; 1] = [4];
+    assert_eq!(backend_ffi::applegpu_ffi_register_tensor(a_id, dims.as_ptr(), 1, 0), 0);
+    assert_eq!(backend_ffi::applegpu_ffi_register_tensor(b_id, dims.as_ptr(), 1, 0), 0);
+    let result_id = backend_ffi::applegpu_ffi_mul(a_id, b_id);
+    assert!(result_id > 0);
+    assert_eq!(backend_ffi::applegpu_ffi_eval(result_id), 0);
+    let mut out = [0.0f32; 4];
+    assert_eq!(backend_ffi::applegpu_ffi_read_f32(result_id, out.as_mut_ptr(), 4), 0);
+    assert_eq!(out, [2.0, 8.0, 18.0, 32.0]);
+    backend_ffi::applegpu_ffi_free(a_id);
+    backend_ffi::applegpu_ffi_free(b_id);
+    backend_ffi::applegpu_ffi_free(result_id);
+}
+
+#[test]
+fn ffi_sub_eval_readback() {
+    backend_ffi::applegpu_ffi_init();
+    let mut a_id: u64 = 0;
+    let mut b_id: u64 = 0;
+    let a_ptr = backend_ffi::applegpu_ffi_alloc(16, 0, &mut a_id);
+    let b_ptr = backend_ffi::applegpu_ffi_alloc(16, 0, &mut b_id);
+    unsafe {
+        let a = a_ptr as *mut f32;
+        let b = b_ptr as *mut f32;
+        *a.add(0) = 10.0; *a.add(1) = 20.0; *a.add(2) = 30.0; *a.add(3) = 40.0;
+        *b.add(0) = 1.0;  *b.add(1) = 2.0;  *b.add(2) = 3.0;  *b.add(3) = 4.0;
+    }
+    let dims: [u64; 1] = [4];
+    assert_eq!(backend_ffi::applegpu_ffi_register_tensor(a_id, dims.as_ptr(), 1, 0), 0);
+    assert_eq!(backend_ffi::applegpu_ffi_register_tensor(b_id, dims.as_ptr(), 1, 0), 0);
+    let result_id = backend_ffi::applegpu_ffi_sub(a_id, b_id);
+    assert!(result_id > 0);
+    assert_eq!(backend_ffi::applegpu_ffi_eval(result_id), 0);
+    let mut out = [0.0f32; 4];
+    assert_eq!(backend_ffi::applegpu_ffi_read_f32(result_id, out.as_mut_ptr(), 4), 0);
+    assert_eq!(out, [9.0, 18.0, 27.0, 36.0]);
+}
+
+#[test]
+fn ffi_neg_eval_readback() {
+    backend_ffi::applegpu_ffi_init();
+    let mut a_id: u64 = 0;
+    let a_ptr = backend_ffi::applegpu_ffi_alloc(16, 0, &mut a_id);
+    unsafe {
+        let a = a_ptr as *mut f32;
+        *a.add(0) = -2.0; *a.add(1) = 0.0; *a.add(2) = 3.0; *a.add(3) = -1.0;
+    }
+    let dims: [u64; 1] = [4];
+    assert_eq!(backend_ffi::applegpu_ffi_register_tensor(a_id, dims.as_ptr(), 1, 0), 0);
+    let result_id = backend_ffi::applegpu_ffi_neg(a_id);
+    assert!(result_id > 0);
+    assert_eq!(backend_ffi::applegpu_ffi_eval(result_id), 0);
+    let mut out = [0.0f32; 4];
+    assert_eq!(backend_ffi::applegpu_ffi_read_f32(result_id, out.as_mut_ptr(), 4), 0);
+    assert_eq!(out, [2.0, 0.0, -3.0, 1.0]);
+}

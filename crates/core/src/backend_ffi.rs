@@ -265,6 +265,39 @@ pub extern "C" fn applegpu_ffi_relu(input_id: u64) -> u64 {
     }
 }
 
+/// Record a mul op. Returns the output tensor_id, or 0 on failure.
+#[no_mangle]
+pub extern "C" fn applegpu_ffi_mul(a_id: u64, b_id: u64) -> u64 {
+    let state = get_state();
+    let mut rt = state.runtime.lock().unwrap();
+    match crate::ops::mul(&mut rt, a_id, b_id) {
+        Ok(id) => id,
+        Err(e) => { set_error(format!("mul failed: {}", e)); 0 }
+    }
+}
+
+/// Record a sub op. Returns the output tensor_id, or 0 on failure.
+#[no_mangle]
+pub extern "C" fn applegpu_ffi_sub(a_id: u64, b_id: u64) -> u64 {
+    let state = get_state();
+    let mut rt = state.runtime.lock().unwrap();
+    match crate::ops::sub(&mut rt, a_id, b_id) {
+        Ok(id) => id,
+        Err(e) => { set_error(format!("sub failed: {}", e)); 0 }
+    }
+}
+
+/// Record a neg op. Returns the output tensor_id, or 0 on failure.
+#[no_mangle]
+pub extern "C" fn applegpu_ffi_neg(input_id: u64) -> u64 {
+    let state = get_state();
+    let mut rt = state.runtime.lock().unwrap();
+    match crate::ops::neg(&mut rt, input_id) {
+        Ok(id) => id,
+        Err(e) => { set_error(format!("neg failed: {}", e)); 0 }
+    }
+}
+
 /// Copy tensor data from src to dst buffer.
 /// Returns 0 on success, -1 on failure.
 #[no_mangle]
