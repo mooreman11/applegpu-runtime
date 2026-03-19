@@ -1,4 +1,4 @@
-.PHONY: all build test clean setup check ci release bench bench-ops bench-training build-cpp-backend test-cpp-backend
+.PHONY: all build test clean setup check ci release bench bench-ops bench-training build-cpp-backend test-cpp-backend bench-mlp-cpp
 
 all: build test
 
@@ -65,6 +65,9 @@ build-cpp-backend: build-rust
 
 test-cpp-backend: build-cpp-backend
 	uv run pytest python/tests/test_cpp_backend.py -v
+
+bench-mlp-cpp: build-cpp-backend
+	uv run python benchmarks/bench_mlp_cpp.py --hidden 128 --layers 3 --iters 50
 
 bench: bench-ops bench-training
 
