@@ -14,10 +14,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ### 1. PrivateUse1 C++ Path (primary, `device='applegpu'`)
 - Entry: `from applegpu_runtime.cpp_backend import load_cpp_backend` → `load_cpp_backend()`
 - C++ shim (`backend_cpp/applegpu_backend.cpp`) registers ops at PrivateUse1 dispatch key
-- 17 native ops: add, sub, mul, div, mm, relu, neg, addmm, threshold_backward, view, as_strided, t, mse_loss, fill_, zero_, add_, mul_
-- MLP training works end-to-end, zero CPU fallback except sum (bias gradients)
-- 15 Python tests passing
-- **Transitioning to Eager Metal Dispatch** (see P1 below)
+- **Eager Metal Dispatch**: ops encode directly into streaming Metal command buffer via `EagerRuntime` (Rust). No graph engine in hot path.
+- MLP training end-to-end, **zero CPU fallback**. Forward/loss/step all sub-0.1ms.
+- `torch.compile` supported via aot_autograd backend (`python/applegpu_runtime/compile_backend.py`)
+- 16 Python + 26 Rust eager integration tests passing
+- **Bottleneck**: PyTorch C++ Dispatcher overhead (7.5µs/op) dominates backward pass. Next: custom FX interpreter to bypass dispatcher.
 
 ### 2. PyO3 Path (original, `__torch_dispatch__`)
 - Entry: `import applegpu_runtime as gpu` → `gpu.init_backend()` → `torch_backend.py`
@@ -54,14 +55,17 @@ Swift Compat Layer  ←  Metal, AVF, Apple frameworks via @_cdecl C ABI (.dylib)
 ### P0: Dual `.so` Conflict — RESOLVED
 Both PyO3 and C++ backends previously statically linked `libAppleGPUBridge.a`, causing ObjC class duplication when both were loaded in the same process. **Fixed** by switching `libAppleGPUBridge` to a dynamic library (`.dylib`). Both backends now link dynamically against the shared `.dylib`, eliminating class conflicts.
 
-### P1: Per-Op Dispatch Overhead
-Each op dispatches a separate Metal command buffer with commit+waitUntilCompleted (~275µs overhead per CB). At batch_size=32, hidden=256 (MLP), Metal kernel compute is ~1µs but dispatch overhead dominates. GPU is slower than CPU. **Fix: Eager Metal Dispatch** — bypass the graph engine entirely, encode Metal commands directly into a streaming command buffer (MPS model). Ops encode into an open command buffer; commit only at sync points (`.item()`, `.cpu()`, backward boundary). This eliminates per-op eval overhead. See spec: `docs/superpowers/specs/2026-03-20-eager-metal-dispatch-design.md`. **Target**: GPU faster than CPU at hidden>=512.
+### P1: Per-Op Metal Dispatch — RESOLVED
+Eager Metal Dispatch (D1-D4) complete. Ops encode directly into a streaming Metal command buffer. Forward/loss/step are all sub-0.1ms. Zero CPU fallback. See spec: `docs/superpowers/specs/2026-03-20-eager-metal-dispatch-design.md`.
 
-### P2: View Tensor Identity
-PyTorch view ops (`t()`, `reshape`, `slice`, `as_strided`) create tensors sharing storage with different shapes/strides. Our Rust runtime tracks tensor_ids per storage, not per view. **Symptoms**: `applegpu: failed to query output shape` errors, GPT-2 crashes. **Workaround**: `ensure_op_ready()` detects shape mismatches and forces a contiguous copy. **Fix**: The eager runtime will use stride-aware tensor metadata — each tensor carries its own shape, strides, and storage offset, referencing a shared underlying Metal buffer. This eliminates the `ensure_op_ready()` workaround entirely.
+### P2: View Tensor Identity — RESOLVED
+The eager runtime (`crates/core/src/eager.rs`) uses stride-aware `EagerTensor` with `Arc<Buffer>` sharing. Views carry their own shape/strides/offset referencing a shared Metal buffer. `ensure_op_ready()` eliminated. `binary_op` dispatches with actual tensor strides for correct view handling.
 
-### P3: torch.compile Backend
-The graph engine (`crates/core/src/lazy.rs`, `crates/core/src/fusion.rs`) will be repurposed as a `torch.compile` backend for optimizing static graphs with kernel fusion (e.g. matmul+add+gelu into single Metal kernels). This is the correct use of a graph engine — optimizing known-static computation graphs, not as the default execution model.
+### P3: PyTorch C++ Dispatcher Overhead
+The remaining bottleneck. PyTorch's `Dispatcher::call()` adds ~7.5µs per op for PrivateUse1 (vs 0.6µs for CPU). With ~60 ops in backward, this is ~4.4ms of overhead that dominates training at all tensor sizes. GPU compute itself is fast (2.3ms at h=1024 measured via sync delta). **torch.compile passthrough gives 8% speedup** — the real fix needs a custom FX interpreter that calls Rust eager FFI directly, bypassing the dispatcher. Scaffold at `python/applegpu_runtime/compile_backend.py`.
+
+### P4: Kernel Fusion (Future)
+The graph engine (`lazy.rs`, `fusion.rs`) can be repurposed to fuse elementwise chains (matmul+add+relu → single Metal kernel) for the torch.compile backend. This is the correct use of a graph engine — optimizing known-static computation graphs.
 
 ## Build & Test Commands
 
@@ -145,12 +149,13 @@ This library must be **hyperoptimized**. Every layer is chosen for maximum perfo
 
 Always prefer the fastest path. Profile before and after changes to performance-critical code.
 
-**Current reality**:
-- mse_loss is now native (48x faster via graph decomposition: 0.58ms → 0.01ms)
-- Forward pass is already fast (0.02ms lazy recording)
-- Bottleneck is eval overhead (~275µs per Metal command buffer commit+waitUntilCompleted)
-- Adding more native ops will not fix this — the bottleneck is dispatch, not missing ops
-- **Solution**: Eager Metal Dispatch eliminates per-op eval entirely by encoding into a streaming command buffer. Targets GPU faster than CPU at hidden>=512.
+**Current reality** (after Eager Metal Dispatch D1-D4):
+- Forward: 0.037ms, Loss: 0.026ms, Optimizer step: 0.052ms — all sub-0.1ms
+- Zero CPU fallback for MLP training
+- Backward: 4.4ms (97% of training time) — dominated by PyTorch C++ Dispatcher overhead (7.5µs/op × 60 ops)
+- GPU compute is only 2.3ms (at h=1024) — the Metal kernels ARE fast
+- **Bottleneck is NOT our code** — it's PyTorch's `Dispatcher::call()` for PrivateUse1 devices
+- **Next step**: Custom FX interpreter for torch.compile that bypasses the dispatcher entirely
 
 ## Development Workflow
 

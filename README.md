@@ -101,7 +101,7 @@ loss.backward()
 optimizer.step()
 ```
 
-Eager Metal dispatch — ops encode directly into streaming Metal command buffer. Zero CPU fallback for MLP training. Forward/loss/optimizer all sub-0.1ms.
+Eager Metal dispatch — ops encode directly into streaming Metal command buffer. Zero CPU fallback for MLP training. Forward/loss/optimizer all sub-0.1ms. Supports `torch.compile` via aot_autograd backend.
 
 ## GPT-2 Text Generation
 

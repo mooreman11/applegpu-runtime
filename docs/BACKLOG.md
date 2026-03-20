@@ -208,11 +208,14 @@ _Design spec: `docs/superpowers/specs/2026-03-20-eager-metal-dispatch-design.md`
 - [x] D4: Strided N-D sum kernel + eliminated hidden flushes (copy_, mean_all chain, binary_op strides). Zero CPU fallback. Forward/loss/step all sub-0.1ms.
 
 ### PRIORITY 2: Custom FX Interpreter for torch.compile
-_The remaining bottleneck is PyTorch's C++ dispatcher overhead (7.5µs/op × 60 backward ops = 4.4ms). torch.compile with passthrough doesn't help — ops still dispatch through the same C++ machinery. The fix: a custom FX graph interpreter that calls our Rust eager FFI directly via ctypes, bypassing PyTorch's Dispatcher entirely._
-- [ ] Register `applegpu` as torch.compile backend with aot_autograd
-- [ ] Custom FX interpreter: walk graph nodes, map to eager FFI calls
-- [ ] Op mapping: aten.mm → applegpu_eager_matmul, aten.add → applegpu_eager_add, etc.
-- [ ] Benchmark: target GPU > CPU at h>=512 (eliminates 4ms autograd overhead)
+_The remaining bottleneck is PyTorch's C++ dispatcher overhead (7.5µs/op × 60 backward ops = 4.4ms). torch.compile with passthrough gives 8% speedup but ops still dispatch through C++ machinery. The fix: a custom FX graph interpreter that calls our Rust eager FFI directly via ctypes, bypassing PyTorch's Dispatcher entirely._
+_Scaffold: `python/applegpu_runtime/compile_backend.py` (aot_autograd + accelerator registration working)_
+- [x] Register `applegpu` as torch accelerator (torch._C._rename_privateuse1_backend)
+- [x] aot_autograd integration — captures forward (6 ops) + backward (16 ops) as separate FX graphs
+- [x] Passthrough compiler with boxed args — 8% speedup (skips some autograd overhead)
+- [ ] Custom FX interpreter: walk graph nodes, map to eager FFI calls via ctypes
+- [ ] Op mapping: aten.mm → applegpu_eager_matmul, aten.t → applegpu_eager_create_view, etc.
+- [ ] Benchmark: target GPU > CPU at h>=512 (eliminates 4ms dispatcher overhead)
 - [ ] Future: kernel fusion (matmul+add+relu → single Metal kernel)
 
 ### PRIORITY 3: Stable Diffusion / `group_norm`
