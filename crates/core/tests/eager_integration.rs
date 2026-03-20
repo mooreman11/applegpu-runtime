@@ -382,9 +382,10 @@ fn test_eager_mean_all_2d() {
     }
 
     let (_, out_ptr) = rt.mean_all(&device, a_id).unwrap();
+    rt.flush_and_wait(); // GPU must finish before CPU reads
 
     let result = unsafe { std::slice::from_raw_parts(out_ptr as *const f32, 1) };
-    assert_eq!(result[0], 3.5); // (1+2+3+4+5+6)/6 = 3.5
+    assert!((result[0] - 3.5).abs() < 0.001, "expected 3.5, got {}", result[0]);
 
     rt.end_streaming();
 }
@@ -408,7 +409,7 @@ fn test_eager_threshold_backward() {
     }
 
     let (out_id, out_ptr) = rt.threshold_backward(&device, grad_id, input_id, 0.0).unwrap();
-    // No flush needed — threshold_backward flushes internally
+    rt.flush_and_wait(); // GPU must finish before CPU reads
 
     let result = unsafe { std::slice::from_raw_parts(out_ptr as *const f32, 4) };
     assert_eq!(result, &[0.0, 2.0, 0.0, 4.0]);
@@ -435,6 +436,7 @@ fn test_eager_threshold_backward_nonzero_threshold() {
 
     // threshold = 1.0: only input[1]=1.5 and input[3]=2.0 pass
     let (_, out_ptr) = rt.threshold_backward(&device, grad_id, input_id, 1.0).unwrap();
+    rt.flush_and_wait();
 
     let result = unsafe { std::slice::from_raw_parts(out_ptr as *const f32, 4) };
     assert_eq!(result, &[0.0, 20.0, 0.0, 40.0]);
@@ -514,4 +516,92 @@ fn test_eager_matmul_non_contiguous_errors() {
     assert!(result.is_err());
     let err_msg = format!("{}", result.unwrap_err());
     assert!(err_msg.contains("contiguous"), "Expected contiguity error, got: {}", err_msg);
+}
+
+// ── Debug test: chained mean reduction ──
+
+#[test]
+fn test_mean_chain_debug() {
+    let _lock = STREAMING_LOCK.lock().unwrap();
+    let device = Device::new().unwrap();
+    let mut pool = applegpu_core::pool::BufferPool::new(64 * 1024 * 1024);
+    let registry = applegpu_core::compute::KernelRegistry::new();
+
+    let queue = applegpu_core::compute::get_shared_queue(&device);
+    applegpu_core::compute::begin_streaming_batch(queue);
+
+    // [2,3] = [[1,2,3],[4,5,6]]
+    let buf_in = pool.acquire(&device, 6 * 4).unwrap();
+    unsafe {
+        std::slice::from_raw_parts_mut(buf_in.contents() as *mut f32, 6)
+            .copy_from_slice(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    }
+
+    // Step 1: [2,3] → [2], rows=2 cols=3
+    let buf_mid = pool.acquire(&device, 2 * 4).unwrap();
+    let _cb1 = registry.dispatch_mean_typed_nb(
+        &device, DType::Float32, queue, &buf_in, &buf_mid, 2, 3,
+    ).unwrap();
+    applegpu_core::compute::streaming_tick();
+
+    // Flush to ensure step 1 completes
+    applegpu_core::compute::flush_streaming_batch();
+
+    // Read intermediate
+    let mid = unsafe { std::slice::from_raw_parts(buf_mid.contents() as *const f32, 2) };
+    eprintln!("Step 1 result (expected [2.0, 5.0]): {:?}", mid);
+
+    // Step 2: [2] → [1], rows=1 cols=2
+    let buf_out = pool.acquire(&device, 1 * 4).unwrap();
+    let _cb2 = registry.dispatch_mean_typed_nb(
+        &device, DType::Float32, queue, &buf_mid, &buf_out, 1, 2,
+    ).unwrap();
+    applegpu_core::compute::streaming_tick();
+    applegpu_core::compute::flush_streaming_batch();
+
+    let result = unsafe { *(buf_out.contents() as *const f32) };
+    eprintln!("Step 2 result (expected 3.5): {}", result);
+
+    applegpu_core::compute::end_streaming_batch();
+
+    assert!((mid[0] - 2.0).abs() < 0.01, "Step 1[0]: expected 2.0, got {}", mid[0]);
+    assert!((mid[1] - 5.0).abs() < 0.01, "Step 1[1]: expected 5.0, got {}", mid[1]);
+    assert!((result - 3.5).abs() < 0.01, "Step 2: expected 3.5, got {}", result);
+}
+
+#[test]
+fn test_mean_chain_no_flush() {
+    let _lock = STREAMING_LOCK.lock().unwrap();
+    let device = Device::new().unwrap();
+    let mut pool = applegpu_core::pool::BufferPool::new(64 * 1024 * 1024);
+    let registry = applegpu_core::compute::KernelRegistry::new();
+
+    let queue = applegpu_core::compute::get_shared_queue(&device);
+    applegpu_core::compute::begin_streaming_batch(queue);
+
+    let buf_in = pool.acquire(&device, 6 * 4).unwrap();
+    unsafe {
+        std::slice::from_raw_parts_mut(buf_in.contents() as *mut f32, 6)
+            .copy_from_slice(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    }
+
+    // Step 1 and 2 WITHOUT flush between them
+    let buf_mid = pool.acquire(&device, 2 * 4).unwrap();
+    let _cb1 = registry.dispatch_mean_typed_nb(
+        &device, DType::Float32, queue, &buf_in, &buf_mid, 2, 3,
+    ).unwrap();
+
+    let buf_out = pool.acquire(&device, 1 * 4).unwrap();
+    let _cb2 = registry.dispatch_mean_typed_nb(
+        &device, DType::Float32, queue, &buf_mid, &buf_out, 1, 2,
+    ).unwrap();
+
+    // Only flush at the end
+    applegpu_core::compute::flush_streaming_batch();
+
+    let result = unsafe { *(buf_out.contents() as *const f32) };
+    eprintln!("No-flush result (expected 3.5): {}", result);
+
+    applegpu_core::compute::end_streaming_batch();
+    assert!((result - 3.5).abs() < 0.01, "Expected 3.5, got {}", result);
 }
