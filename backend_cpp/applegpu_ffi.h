@@ -49,6 +49,36 @@ void applegpu_ffi_synchronize(void);
 /* Readback */
 int32_t applegpu_ffi_read_f32(uint64_t tensor_id, float* out_ptr, uint64_t max_elements);
 
+/* ── Eager dispatch (bypasses graph engine) ── */
+bool applegpu_eager_init(void);
+const char* applegpu_eager_last_error(void);
+
+uint8_t* applegpu_eager_alloc(const uint64_t* dims, uint32_t ndim, int8_t dtype, uint64_t* out_id);
+void applegpu_eager_free(uint64_t id);
+int32_t applegpu_eager_register_shape(uint64_t id, const uint64_t* dims, uint32_t ndim);
+int32_t applegpu_eager_shape(uint64_t id, uint64_t* out_dims, uint32_t* out_ndim);
+int8_t applegpu_eager_dtype(uint64_t id);
+
+uint8_t* applegpu_eager_add(uint64_t a_id, uint64_t b_id, uint64_t* out_id);
+uint8_t* applegpu_eager_sub(uint64_t a_id, uint64_t b_id, uint64_t* out_id);
+uint8_t* applegpu_eager_mul(uint64_t a_id, uint64_t b_id, uint64_t* out_id);
+uint8_t* applegpu_eager_div(uint64_t a_id, uint64_t b_id, uint64_t* out_id);
+uint8_t* applegpu_eager_relu(uint64_t input_id, uint64_t* out_id);
+uint8_t* applegpu_eager_neg(uint64_t input_id, uint64_t* out_id);
+uint8_t* applegpu_eager_matmul(uint64_t a_id, uint64_t b_id, uint64_t* out_id);
+
+uint8_t* applegpu_eager_threshold_backward(uint64_t grad_id, uint64_t input_id, float threshold, uint64_t* out_id);
+uint8_t* applegpu_eager_scalar_mul(uint64_t input_id, float scale, uint64_t* out_id);
+uint8_t* applegpu_eager_mean_all(uint64_t input_id, uint64_t* out_id);
+
+uint8_t* applegpu_eager_create_view(uint64_t base_id, const uint64_t* shape, const uint64_t* strides, uint32_t ndim, uint64_t offset, uint64_t* out_id);
+
+int32_t applegpu_eager_add_inplace(uint64_t self_id, uint64_t other_id);
+int32_t applegpu_eager_add_scaled_inplace(uint64_t self_id, uint64_t other_id, float alpha);
+
+void applegpu_eager_flush_and_wait(void);
+void applegpu_eager_synchronize(void);
+
 #ifdef __cplusplus
 }
 #endif

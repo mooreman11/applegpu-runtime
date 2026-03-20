@@ -4,6 +4,7 @@ pub mod buffer;
 pub mod compute;
 pub mod device;
 pub mod eager;
+pub mod eager_ffi;
 pub mod error;
 pub mod ffi;
 pub mod fusion;
