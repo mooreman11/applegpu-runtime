@@ -282,6 +282,143 @@ impl EagerRuntime {
         Ok((out_id, out_ptr))
     }
 
+    // ── Unary ops ─────────────────────────────────────────────────────
+
+    /// Encode a unary element-wise op (relu, neg, abs, tanh, sigmoid, etc.) into
+    /// the streaming command buffer. Returns (output_tensor_id, raw data pointer).
+    /// Data is only valid after `flush_and_wait()`.
+    pub fn unary_op(
+        &mut self,
+        device: &Device,
+        base_kernel: &str,
+        input_id: u64,
+    ) -> Result<(u64, *mut u8)> {
+        // 1. Extract data from immutable borrow
+        let (shape, dtype, in_buf, in_strides_u32) = {
+            let t = self.get(input_id)?;
+            (t.layout.shape, t.dtype, Arc::clone(&t.buffer), t.strides_u32())
+        };
+
+        let numel = shape.numel();
+        let ndim = shape.ndim();
+        let mut shape_u32 = [0u32; MAX_DIMS];
+        for i in 0..ndim {
+            shape_u32[i] = shape.dims()[i] as u32;
+        }
+
+        // 2. Allocate output buffer
+        let nbytes = numel * dtype.size_bytes();
+        let alloc_bytes = if nbytes == 0 { 4 } else { nbytes };
+        let out_buffer = Arc::new(self.pool.acquire(device, alloc_bytes)?);
+        let out_ptr = out_buffer.contents();
+
+        // 3. Dispatch into streaming CB
+        let pipeline = self.get_pipeline(device, base_kernel, dtype)?;
+        let queue = compute::get_shared_queue(device);
+        let _cb = pipeline.dispatch_unary_nd_nb(
+            queue,
+            &*in_buf, &in_strides_u32,
+            &*out_buffer, &shape_u32,
+            ndim as u32, numel as u32,
+        )?;
+        compute::streaming_tick();
+
+        // 4. Register output tensor
+        let out_id = next_tensor_id();
+        let out_layout = TensorLayout::contiguous(shape);
+        self.tensors.insert(out_id, EagerTensor {
+            buffer: out_buffer,
+            layout: out_layout,
+            dtype,
+            offset: 0,
+        });
+
+        Ok((out_id, out_ptr))
+    }
+
+    // ── Matmul ───────────────────────────────────────────────────────
+
+    /// Encode a matmul [M,K] @ [K,N] → [M,N] (or batched) into the streaming
+    /// command buffer. Inputs must be contiguous. Returns (output_tensor_id,
+    /// raw data pointer). Data is only valid after `flush_and_wait()`.
+    pub fn matmul(
+        &mut self,
+        device: &Device,
+        a_id: u64,
+        b_id: u64,
+    ) -> Result<(u64, *mut u8)> {
+        // 1. Extract data from immutable borrows
+        let (a_shape, a_dtype, a_buf, a_contig, b_shape, b_buf, b_contig) = {
+            let a = self.get(a_id)?;
+            let b = self.get(b_id)?;
+            if a.dtype != b.dtype {
+                return Err(GpuError::InvalidTensor(format!(
+                    "dtype mismatch: {:?} vs {:?}", a.dtype, b.dtype
+                )));
+            }
+            (a.layout.shape, a.dtype, Arc::clone(&a.buffer), a.is_contiguous(),
+             b.layout.shape, Arc::clone(&b.buffer), b.is_contiguous())
+        };
+
+        // 2. Validate contiguity (D5 will add make_contiguous)
+        if !a_contig || !b_contig {
+            return Err(GpuError::InvalidTensor("matmul requires contiguous inputs".into()));
+        }
+
+        // 3. Extract dimensions
+        let a_dims = a_shape.dims();
+        let b_dims = b_shape.dims();
+        if a_dims.len() < 2 || b_dims.len() < 2 {
+            return Err(GpuError::InvalidTensor("matmul requires 2D+ tensors".into()));
+        }
+
+        let m = a_dims[a_dims.len() - 2];
+        let k = a_dims[a_dims.len() - 1];
+        let n = b_dims[b_dims.len() - 1];
+        if k != b_dims[b_dims.len() - 2] {
+            return Err(GpuError::InvalidTensor(format!(
+                "matmul inner dim mismatch: {} vs {}", k, b_dims[b_dims.len() - 2]
+            )));
+        }
+
+        let batch_size: usize = a_dims[..a_dims.len() - 2].iter().product::<usize>().max(1);
+
+        // 4. Compute output shape
+        let mut out_dims: Vec<usize> = a_dims[..a_dims.len() - 2].to_vec();
+        out_dims.push(m);
+        out_dims.push(n);
+        let out_shape = Shape::new(out_dims)?;
+        let out_layout = TensorLayout::contiguous(out_shape);
+
+        // 5. Allocate output buffer
+        let nbytes = out_shape.numel() * a_dtype.size_bytes();
+        let alloc_bytes = if nbytes == 0 { 4 } else { nbytes };
+        let out_buffer = Arc::new(self.pool.acquire(device, alloc_bytes)?);
+        let out_ptr = out_buffer.contents();
+
+        // 6. Dispatch into streaming CB
+        let pipeline = self.get_pipeline(device, "matmul", a_dtype)?;
+        let queue = compute::get_shared_queue(device);
+        let _cb = pipeline.dispatch_matmul_batched_nb(
+            queue,
+            &*a_buf, &*b_buf, &*out_buffer,
+            m, n, k,
+            batch_size, m * k, k * n,
+        )?;
+        compute::streaming_tick();
+
+        // 7. Register output tensor
+        let out_id = next_tensor_id();
+        self.tensors.insert(out_id, EagerTensor {
+            buffer: out_buffer,
+            layout: out_layout,
+            dtype: a_dtype,
+            offset: 0,
+        });
+
+        Ok((out_id, out_ptr))
+    }
+
     // ── Kernel pipeline resolution ───────────────────────────────────
 
     /// Resolve a kernel by base name + dtype, compile/cache the pipeline.
