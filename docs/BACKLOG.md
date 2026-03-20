@@ -202,10 +202,10 @@ _C++ PrivateUse1 backend, native ops, view system, in-place ops, CPU fallback di
 ### PRIORITY 1: Eager Metal Dispatch
 _Bypass the graph engine for the C++ PrivateUse1 path. Encode Metal commands directly into a streaming command buffer (MPS model). GPU executes in parallel with CPU encoding. Single commit+wait at sync points only._
 _Design spec: `docs/superpowers/specs/2026-03-20-eager-metal-dispatch-design.md`_
-- [ ] D1: Eager Runtime in Rust — stride-aware tensor registry, direct encode API, streaming CB management
-- [ ] D2: Stride-aware Metal kernels — strided variants with contiguous fast-path
-- [ ] D3: C++ shim rewrite — replace graph-based _out calls with eager encode
-- [ ] D4: Tests + benchmarks — target GPU faster than CPU at h>=512
+- [x] D1: EagerRuntime in Rust — stride-aware tensor registry with Arc<Buffer> views, binary/unary/matmul dispatch, make_contiguous, inplace ops, 14 integration tests
+- [x] D2: Full C++ backend switchover — all ops use eager FFI, 22 Rust + 16 Python tests pass
+- [x] D3: GPU-native threshold_backward + mean_all — no mid-pipeline flush_and_wait, 24 Rust tests
+- [ ] D4: Native eager sum.dim + benchmarks — eliminate last CPU fallback (bias grad), target GPU > CPU at h>=512
 
 ### PRIORITY 2: torch.compile Backend
 _Repurpose the graph engine (lazy.rs, fusion.rs) as a torch.compile backend. Graph capture → fusion optimization → batched Metal replay. Correct use of a graph engine — optimizing known-static graphs, not recording eager ops._
