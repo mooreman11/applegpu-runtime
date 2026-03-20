@@ -71,6 +71,8 @@ uint8_t* applegpu_eager_threshold_backward(uint64_t grad_id, uint64_t input_id, 
 uint8_t* applegpu_eager_scalar_mul(uint64_t input_id, float scale, uint64_t* out_id);
 uint8_t* applegpu_eager_mean_all(uint64_t input_id, uint64_t* out_id);
 
+uint8_t* applegpu_eager_sum_dim(uint64_t input_id, int64_t dim, bool keepdim, uint64_t* out_id);
+
 uint8_t* applegpu_eager_create_view(uint64_t base_id, const uint64_t* shape, const uint64_t* strides, uint32_t ndim, uint64_t offset, uint64_t* out_id);
 
 int32_t applegpu_eager_add_inplace(uint64_t self_id, uint64_t other_id);

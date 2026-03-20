@@ -680,6 +680,147 @@ impl EagerRuntime {
         Ok((out_id, out_ptr))
     }
 
+    // ── Sum along dimension ──────────────────────────────────────────
+
+    /// Sum reduction along a single dimension.
+    /// GPU-native via dispatch_sum_typed_nb (reduces last dim).
+    /// For non-last dims, reshapes so target dim is last, sums, then reshapes back.
+    pub fn sum_dim(
+        &mut self,
+        device: &Device,
+        input_id: u64,
+        dim: i64,
+        keepdim: bool,
+    ) -> Result<(u64, *mut u8)> {
+        let (shape_vec, dtype, ndim) = {
+            let t = self.get(input_id)?;
+            (t.shape_vec(), t.dtype, t.layout.shape.ndim())
+        };
+
+        // Normalize negative dim
+        let dim = if dim < 0 { (ndim as i64 + dim) as usize } else { dim as usize };
+        if dim >= ndim {
+            return Err(GpuError::InvalidTensor(format!(
+                "sum dim {} out of range for {}-D tensor", dim, ndim
+            )));
+        }
+
+        // If reducing last dim, dispatch directly
+        if dim == ndim - 1 {
+            let cols = shape_vec[ndim - 1];
+            let rows: usize = shape_vec[..ndim - 1].iter().product::<usize>().max(1);
+
+            let mut out_shape = shape_vec[..ndim - 1].to_vec();
+            if keepdim { out_shape.push(1); }
+            if out_shape.is_empty() { out_shape = vec![1]; }
+
+            let out_numel: usize = out_shape.iter().product();
+            let nbytes = out_numel * dtype.size_bytes();
+            let alloc_bytes = if nbytes == 0 { 4 } else { nbytes };
+
+            let in_buf = Arc::clone(&self.get(input_id)?.buffer);
+            let out_buffer = Arc::new(self.pool.acquire(device, alloc_bytes)?);
+            let out_ptr = out_buffer.contents();
+
+            let queue = compute::get_shared_queue(device);
+            let _cb = self.registry.dispatch_sum_typed_nb(
+                device, dtype, queue, &*in_buf, &*out_buffer, rows, cols,
+            )?;
+            compute::streaming_tick();
+
+            let out_id = next_tensor_id();
+            let out_s = Shape::new(out_shape)?;
+            self.tensors.insert(out_id, EagerTensor {
+                buffer: out_buffer,
+                layout: TensorLayout::contiguous(out_s),
+                dtype,
+                offset: 0,
+            });
+            return Ok((out_id, out_ptr));
+        }
+
+        // For non-last dim: reshape so target dim is last, sum, reshape back.
+        // For 2D [rows, cols] with dim=0: treat as rows=cols, cols=rows (transposed sum).
+        // General case: flatten dims before target as batch, target dim as cols.
+        //
+        // Example: [A, B, C] sum(dim=1) → reshape to [A, C, B] → sum last → [A, C]
+        // But we can avoid reshape by computing rows/cols directly:
+        //   cols = shape[dim]
+        //   rows = product of all other dims
+        //   But the data layout matters — we need contiguous dim as the summed axis.
+        //
+        // For the common case (bias gradient): [batch, hidden] sum(dim=0) → [hidden]
+        // This is: for each column j, sum across rows i: out[j] = sum_i(in[i*hidden + j])
+        // The sum kernel reduces along the LAST (contiguous) dim.
+        // So we need to transpose: [batch, hidden] → [hidden, batch] → sum → [hidden]
+        //
+        // Use CPU-via-shared-memory for now. The data is already in shared memory.
+        self.flush_and_wait();
+
+        let (data_ptr, strides) = {
+            let t = self.get(input_id)?;
+            (t.data_ptr(), t.layout.strides().to_vec())
+        };
+
+        // Compute output shape
+        let mut out_shape: Vec<usize> = shape_vec.iter().enumerate()
+            .filter(|&(i, _)| i != dim || keepdim)
+            .map(|(i, &d)| if i == dim && keepdim { 1 } else { d })
+            .collect();
+        if out_shape.is_empty() { out_shape = vec![1]; }
+
+        let out_numel: usize = out_shape.iter().product();
+        let (out_id, out_ptr) = self.alloc(device, &out_shape, dtype)?;
+
+        if dtype == DType::Float32 {
+            let data = unsafe { std::slice::from_raw_parts(data_ptr as *const f32, shape_vec.iter().product()) };
+            let out = unsafe { std::slice::from_raw_parts_mut(out_ptr as *mut f32, out_numel) };
+
+            // Initialize output to zero
+            for v in out.iter_mut() { *v = 0.0; }
+
+            // Iterate over all input elements, accumulate into output
+            let in_numel: usize = shape_vec.iter().product();
+            for linear in 0..in_numel {
+                // Convert linear index to multi-dim
+                let mut remaining = linear;
+                let mut src_offset = 0usize;
+                let mut out_idx = 0usize;
+                let mut out_stride = 1usize;
+
+                // Build output index (skip the summed dim)
+                let mut out_indices = vec![0usize; ndim];
+                for d in (0..ndim).rev() {
+                    let idx = remaining % shape_vec[d];
+                    remaining /= shape_vec[d];
+                    out_indices[d] = idx;
+                    src_offset += idx * strides[d];
+                }
+
+                // Compute output linear index
+                let mut out_linear = 0;
+                let mut out_mult = 1;
+                for d in (0..ndim).rev() {
+                    if d == dim {
+                        if keepdim {
+                            // This dim is 1 in output, contributes 0
+                            out_mult *= 1;
+                        }
+                        continue;
+                    }
+                    out_linear += out_indices[d] * out_mult;
+                    out_mult *= if d == dim && keepdim { 1 } else { shape_vec[d] };
+                }
+
+                let elem_size = dtype.size_bytes();
+                let val = unsafe { *(data_ptr.add(src_offset * elem_size) as *const f32) };
+                out[out_linear] += val;
+            }
+        }
+
+        Ok((out_id, out_ptr))
+    }
+
     // ── Add scaled in-place ──────────────────────────────────────────
 
     /// self += alpha * other. SGD optimizer parameter update.

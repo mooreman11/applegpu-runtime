@@ -338,6 +338,29 @@ pub extern "C" fn applegpu_eager_mean_all(
     }
 }
 
+// ── Sum dim ──────────────────────────────────────────────────────
+
+/// Sum reduction along a single dimension.
+/// dim: dimension to reduce. keepdim: if true, output has size 1 in that dim.
+#[no_mangle]
+pub extern "C" fn applegpu_eager_sum_dim(
+    input_id: u64, dim: i64, keepdim: bool, out_id: *mut u64,
+) -> *mut u8 {
+    ensure_eager_streaming();
+    let state = get_eager_state();
+    let mut rt = state.runtime.lock().unwrap();
+    match rt.sum_dim(&state.device, input_id, dim, keepdim) {
+        Ok((id, ptr)) => {
+            unsafe { *out_id = id; }
+            ptr
+        }
+        Err(e) => {
+            set_error(format!("{}", e));
+            std::ptr::null_mut()
+        }
+    }
+}
+
 // ── Views ─────────────────────────────────────────────────────────
 
 /// Create a view of an existing tensor with different shape/strides/offset.

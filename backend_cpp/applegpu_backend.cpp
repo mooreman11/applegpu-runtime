@@ -674,11 +674,25 @@ at::Tensor applegpu_mse_loss_backward(const at::Tensor& grad_output,
     return at::mse_loss_backward(g, s, t, reduction).to(self.device());
 }
 
-// sum.dim_IntList: reduce along specified dimensions.
+// sum.dim_IntList: reduce along specified dimensions via eager GPU dispatch.
 at::Tensor applegpu_sum_dim(const at::Tensor& self,
                              at::OptionalIntArrayRef dim,
                              bool keepdim,
                              std::optional<at::ScalarType> dtype) {
+    auto self_id = resolve_tensor_id(self);
+
+    // Single-dim reduction via eager FFI
+    if (dim.has_value() && dim.value().size() == 1) {
+        int64_t d = dim.value()[0];
+        uint64_t out_id = 0;
+        void* ptr = applegpu_eager_sum_dim(self_id, d, keepdim, &out_id);
+        if (ptr) {
+            return wrap_eager_output(ptr, out_id, query_output_shape(out_id), self.scalar_type());
+        }
+        // Fall through to CPU fallback on error
+    }
+
+    // Multi-dim or no-dim: CPU fallback via shared memory
     applegpu_eager_flush_and_wait();
     auto cpu_view = at::from_blob(self.data_ptr(), self.sizes(), self.strides(),
         at::TensorOptions().dtype(self.dtype()).device(at::kCPU));
@@ -716,6 +730,7 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("as_strided", applegpu_as_strided);
     m.impl("mse_loss", applegpu_mse_loss);
     m.impl("mse_loss_backward", applegpu_mse_loss_backward);
+    m.impl("sum.dim_IntList", applegpu_sum_dim);
 }
 
 TORCH_LIBRARY_IMPL(_, PrivateUse1, m) {
