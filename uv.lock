@@ -53,6 +53,7 @@ whisper = [
 [package.dev-dependencies]
 dev = [
     { name = "pytest" },
+    { name = "setuptools" },
 ]
 
 [package.metadata]
@@ -66,7 +67,10 @@ requires-dist = [
 provides-extras = ["torch", "transformers", "whisper"]
 
 [package.metadata.requires-dev]
-dev = [{ name = "pytest", specifier = ">=8.0" }]
+dev = [
+    { name = "pytest", specifier = ">=8.0" },
+    { name = "setuptools", specifier = ">=68.0" },
+]
 
 [[package]]
 name = "certifi"

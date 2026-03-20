@@ -563,35 +563,78 @@ impl EagerRuntime {
 
     // ── Mean all ─────────────────────────────────────────────────────
 
-    /// Full reduction to mean (scalar [1]). Flushes GPU and computes on CPU
-    /// via shared memory to avoid kernel complexity.
+    /// Full reduction to mean (scalar [1]).
+    /// Chains last-dim mean reductions on GPU until scalar.
     pub fn mean_all(
         &mut self,
         device: &Device,
         input_id: u64,
     ) -> Result<(u64, *mut u8)> {
-        self.flush_and_wait();
-        let (numel, dtype, data_ptr) = {
+        let (shape_vec, dtype) = {
             let t = self.get(input_id)?;
-            (t.numel(), t.dtype, t.data_ptr())
+            (t.shape_vec(), t.dtype)
         };
-        let mean_val = if dtype == DType::Float32 {
-            let data = unsafe { std::slice::from_raw_parts(data_ptr as *const f32, numel) };
-            data.iter().sum::<f32>() / numel as f32
-        } else {
-            return Err(GpuError::UnsupportedDtype(format!(
-                "mean_all only supports Float32, got {:?}", dtype
-            )));
-        };
-        let (out_id, out_ptr) = self.alloc(device, &[1], dtype)?;
-        unsafe { *(out_ptr as *mut f32) = mean_val; }
-        Ok((out_id, out_ptr))
+        let ndim = shape_vec.len();
+        if ndim == 0 {
+            return Err(GpuError::InvalidTensor("mean_all requires at least 1D tensor".into()));
+        }
+
+        // Chain mean reductions: reduce last dim at each step
+        let mut current_id = input_id;
+        let mut current_shape = shape_vec.clone();
+
+        for step in 0..ndim {
+            // Flush between chained reductions — the mean kernel reads the
+            // previous output, so the GPU must finish writing it first.
+            if step > 0 {
+                self.flush_and_wait();
+            }
+            let cols = *current_shape.last().unwrap();
+            let rows: usize = current_shape[..current_shape.len() - 1].iter().product::<usize>().max(1);
+
+            // Output shape: drop last dim (or [1] if scalar)
+            let mut out_shape = current_shape[..current_shape.len() - 1].to_vec();
+            if out_shape.is_empty() { out_shape = vec![1]; }
+
+            let out_numel: usize = out_shape.iter().product();
+            let nbytes = out_numel * dtype.size_bytes();
+            let alloc_bytes = if nbytes == 0 { 4 } else { nbytes };
+
+            let cur_buf = {
+                let t = self.get(current_id)?;
+                Arc::clone(&t.buffer)
+            };
+
+            let out_buffer = Arc::new(self.pool.acquire(device, alloc_bytes)?);
+            let out_ptr = out_buffer.contents();
+
+            let queue = compute::get_shared_queue(device);
+            let _cb = self.registry.dispatch_mean_typed_nb(
+                device, dtype, queue, &*cur_buf, &*out_buffer, rows, cols,
+            )?;
+            compute::streaming_tick();
+
+            let out_id = next_tensor_id();
+            let out_s = Shape::new(out_shape.clone())?;
+            self.tensors.insert(out_id, EagerTensor {
+                buffer: out_buffer,
+                layout: TensorLayout::contiguous(out_s),
+                dtype,
+                offset: 0,
+            });
+
+            current_id = out_id;
+            current_shape = out_shape;
+        }
+
+        let ptr = self.get(current_id)?.data_ptr();
+        Ok((current_id, ptr))
     }
 
     // ── Threshold backward ───────────────────────────────────────────
 
     /// threshold_backward: grad * (input > threshold). ReLU backward.
-    /// Flushes GPU and computes on CPU via shared memory.
+    /// GPU-native via dispatch_cnn_3d_nb.
     pub fn threshold_backward(
         &mut self,
         device: &Device,
@@ -599,8 +642,7 @@ impl EagerRuntime {
         input_id: u64,
         threshold: f32,
     ) -> Result<(u64, *mut u8)> {
-        self.flush_and_wait();
-        let (shape, dtype, numel, grad_ptr, input_ptr) = {
+        let (shape, dtype, numel, grad_buf, input_buf) = {
             let g = self.get(grad_id)?;
             let i = self.get(input_id)?;
             if g.dtype != i.dtype {
@@ -608,22 +650,33 @@ impl EagerRuntime {
                     "dtype mismatch: {:?} vs {:?}", g.dtype, i.dtype
                 )));
             }
-            let numel = g.numel();
-            (g.layout.shape, g.dtype, numel, g.data_ptr(), i.data_ptr())
+            (g.layout.shape, g.dtype, g.numel(),
+             Arc::clone(&g.buffer), Arc::clone(&i.buffer))
         };
-        let (out_id, out_ptr) = self.alloc(device, shape.dims(), dtype)?;
-        if dtype == DType::Float32 {
-            let grad = unsafe { std::slice::from_raw_parts(grad_ptr as *const f32, numel) };
-            let input = unsafe { std::slice::from_raw_parts(input_ptr as *const f32, numel) };
-            let out = unsafe { std::slice::from_raw_parts_mut(out_ptr as *mut f32, numel) };
-            for idx in 0..numel {
-                out[idx] = if input[idx] > threshold { grad[idx] } else { 0.0 };
-            }
-        } else {
-            return Err(GpuError::UnsupportedDtype(format!(
-                "threshold_backward only supports Float32, got {:?}", dtype
-            )));
-        }
+
+        let nbytes = numel * dtype.size_bytes();
+        let alloc_bytes = if nbytes == 0 { 4 } else { nbytes };
+        let out_buffer = Arc::new(self.pool.acquire(device, alloc_bytes)?);
+        let out_ptr = out_buffer.contents();
+
+        let (k_src, k_fn) = KernelRegistry::resolve_kernel("threshold_backward", dtype);
+        let queue = compute::get_shared_queue(device);
+        let _cb = self.registry.dispatch_cnn_3d_nb(
+            device, &k_src, &k_fn, queue,
+            &[&*grad_buf, &*input_buf], &*out_buffer,
+            &[numel as u32], &[threshold],
+            (numel as u32, 1, 1),
+        )?;
+        compute::streaming_tick();
+
+        let out_id = next_tensor_id();
+        self.tensors.insert(out_id, EagerTensor {
+            buffer: out_buffer,
+            layout: TensorLayout::contiguous(shape),
+            dtype,
+            offset: 0,
+        });
+
         Ok((out_id, out_ptr))
     }
 

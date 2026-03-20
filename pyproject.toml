@@ -17,7 +17,7 @@ whisper = [
 ]
 
 [dependency-groups]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "setuptools>=68.0"]
 
 [tool.maturin]
 manifest-path = "crates/python/Cargo.toml"
