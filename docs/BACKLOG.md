@@ -180,30 +180,46 @@ _Containerization, multi-dtype completion, wire protocol v3, CI/packaging._
 
 ---
 
+## v0.9.0 — SHIPPED
+
+_C++ PrivateUse1 backend, native ops, view system, in-place ops, CPU fallback diagnostics._
+
+- [x] P0: Dual .so conflict fixed (dynamic Swift library)
+- [x] Native mse_loss via graph ops (48x faster)
+- [x] Backward ops: threshold_backward, mse_loss_backward
+- [x] View ops: view, as_strided, t (zero-copy)
+- [x] In-place ops: add_, mul_, fill_, zero_
+- [x] ensure_op_ready() view detection
+- [x] scalar_mul, div, mean_all FFI functions
+- [x] CPU fallback logging (APPLEGPU_LOG_FALLBACK=1)
+- [x] C++ backend in make build/test/clean targets
+- [x] 15 C++ backend integration tests
+
+---
+
 ## Up Next
 
-### PRIORITY 1: Dispatch Overhead Reduction
-_Benchmarks show ~0.3ms per-op dispatch overhead dominates training. GPU is slower than CPU for all model sizes tested. This is the #1 blocker for real-world GPU advantage._
-- [ ] Batched command buffer encoding — encode multiple ops into one MTLCommandBuffer, single submit+wait per eval
-- [ ] Non-blocking op pipelining — don't wait for each op, pipeline dispatch in eager mode
-- [ ] Eliminate remaining CPU fallbacks on hot paths: `empty_like`, `bernoulli_` (dropout), `div_.Scalar`
-- [ ] Benchmark: achieve GPU > CPU throughput for LSTM 128-hidden training
+### PRIORITY 1: Eager Metal Dispatch
+_Bypass the graph engine for the C++ PrivateUse1 path. Encode Metal commands directly into a streaming command buffer (MPS model). GPU executes in parallel with CPU encoding. Single commit+wait at sync points only._
+_Design spec: `docs/superpowers/specs/2026-03-20-eager-metal-dispatch-design.md`_
+- [ ] D1: Eager Runtime in Rust — stride-aware tensor registry, direct encode API, streaming CB management
+- [ ] D2: Stride-aware Metal kernels — strided variants with contiguous fast-path
+- [ ] D3: C++ shim rewrite — replace graph-based _out calls with eager encode
+- [ ] D4: Tests + benchmarks — target GPU faster than CPU at h>=512
 
-### PRIORITY 2: Eliminate CPU Fallbacks
-_Every CPU fallback causes a GPU→CPU→GPU roundtrip (~1ms each). Registered mse_loss/select_backward but more remain._
-- [ ] `fill`/`zeros`/`ones` Metal kernels — eliminates CPU fallback in model init
-- [ ] `empty_like` — tensor creation on GPU
-- [ ] `bernoulli_` / dropout — GPU RNG or bypass
-- [ ] `div_.Scalar` — in-place scalar division
-- [ ] `_safe_softmax` — PyTorch 2.10 variant
-- [ ] Audit: run full model suite, list all remaining CPU fallbacks
+### PRIORITY 2: torch.compile Backend
+_Repurpose the graph engine (lazy.rs, fusion.rs) as a torch.compile backend. Graph capture → fusion optimization → batched Metal replay. Correct use of a graph engine — optimizing known-static graphs, not recording eager ops._
+- [ ] Register as PyTorch compile backend
+- [ ] Graph capture from torch.compile()
+- [ ] Fusion optimization (matmul+add+gelu → single kernel)
+- [ ] Batched Metal replay
 
 ### PRIORITY 3: Stable Diffusion / `group_norm`
 - [ ] `group_norm` kernel — single new Metal kernel
 - [ ] Stable Diffusion model wrapper + weight loading
 - [ ] End-to-end image generation test
 
-### PRIORITY 4: PyPI Publishing
+### PRIORITY 4: PyPI publishing
 - [ ] Create PyPI account + API token
 - [ ] Publish wheels to real PyPI
 - [ ] Add `PYPI_TOKEN` GitHub secret for automated releases
@@ -218,6 +234,15 @@ _Blocked by apple/containerization framework socket staging bug (errno 20 ENOTDI
 ---
 
 ## Further Backlog
+
+### Remaining CPU Fallbacks (former P2)
+_Most will be solved by eager dispatch or are cold-path only. Kept here for tracking._
+- [ ] `fill`/`zeros`/`ones` Metal kernels — eliminates CPU fallback in model init
+- [ ] `empty_like` — tensor creation on GPU
+- [ ] `bernoulli_` / dropout — GPU RNG or bypass
+- [ ] `div_.Scalar` — in-place scalar division
+- [ ] `_safe_softmax` — PyTorch 2.10 variant
+- [ ] Audit: run full model suite, list all remaining CPU fallbacks
 
 ### GPU Op Gaps (GitHub issues)
 - [x] Forward max_pool2d with GPU-side indices output (#16) — PR #25
@@ -235,9 +260,6 @@ _Blocked by apple/containerization framework socket staging bug (errno 20 ENOTDI
 - [ ] GPU unique kernel — parallel sort + stream compaction (low priority)
 
 ### Performance Optimization
-- [ ] Batched command buffer — encode N ops per MTLCommandBuffer (reduces dispatch overhead N×)
-- [ ] Non-blocking eager dispatch — pipeline Metal commands without per-op synchronization
-- [ ] `torch.compile()` support — register as compile backend
 - [ ] Async eval — `gpu.eval_async(tensor)` returns GpuFuture
 - [ ] Fine-grained locking — split `Mutex<LazyRuntime>` per-component
 - [ ] MTLSharedEvent for concurrent queue sync (lazy.rs TODO)

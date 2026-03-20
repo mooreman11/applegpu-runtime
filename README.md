@@ -7,9 +7,9 @@ A unified Metal GPU runtime library for Apple Silicon. One API, two backends.
 ## Architecture
 
 ```
-Python API (PyO3)  ←  import applegpu_runtime as gpu
+Python API (PyO3 or C++ PrivateUse1)
         ↓
-   Rust Core       ←  lazy graph, ops, tensor management, kernel registry
+   Rust Core       ←  eager runtime, buffer pool, tensor management
         ↓
 Swift Compat Layer ←  Metal, AVF (Apple Virtualization Framework)
         ↓
@@ -74,6 +74,34 @@ result = output.to_torch_cpu() # back to CPU when needed
 ```
 
 **Validated models:** GPT-2 (small/medium/large), ResNet-18, BERT, Whisper (tiny)
+
+## PrivateUse1 C++ Backend (New)
+
+Native PyTorch device integration — use `device='applegpu'` directly.
+
+```python
+from applegpu_runtime.cpp_backend import load_cpp_backend
+load_cpp_backend()
+
+import torch
+
+model = torch.nn.Sequential(
+    torch.nn.Linear(64, 128),
+    torch.nn.ReLU(),
+    torch.nn.Linear(128, 1),
+).to('applegpu')
+
+x = torch.randn(32, 64, device='applegpu')
+y = torch.randn(32, 1, device='applegpu')
+
+optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+optimizer.zero_grad()
+loss = torch.nn.MSELoss()(model(x), y)
+loss.backward()
+optimizer.step()
+```
+
+17 native GPU ops with CPU fallback for unregistered ops. MLP training end-to-end.
 
 ## GPT-2 Text Generation
 
@@ -239,7 +267,7 @@ No TCP bridge, no port forwarding, no special networking required.
 
 ### Test Coverage
 
-~750 tests across all layers (423 Rust + 3 Swift + 326 Python)
+~760 tests across all layers (392 Rust + 18 Swift + ~340 Python + 15 C++ backend)
 
 ## Examples
 
@@ -256,8 +284,10 @@ See [`examples/`](examples/) for standalone demo scripts:
 TDD across all three layers:
 
 ```bash
-make test-rust     # cargo test -p applegpu-core
-make test-swift    # cd swift && swift test
-make test-python   # uv run pytest -v
-make ci            # run full CI locally via act
+make test-rust         # cargo test -p applegpu-core
+make test-swift        # cd swift && swift test
+make test-python       # uv run pytest -v
+make test-cpp-backend  # PrivateUse1 integration tests
+make bench-mlp-cpp     # MLP training: CPU vs applegpu
+make ci                # run full CI locally via act
 ```
