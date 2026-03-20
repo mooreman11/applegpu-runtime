@@ -763,6 +763,10 @@ static auto init = []() {
     bool ok = applegpu_ffi_init();
     TORCH_CHECK(ok, "applegpu FFI init failed: ",
                 applegpu_ffi_last_error() ? applegpu_ffi_last_error() : "unknown");
+    // Initialize eager dispatch runtime (streaming command buffer path)
+    bool eager_ok = applegpu_eager_init();
+    TORCH_CHECK(eager_ok, "applegpu eager init failed: ",
+                applegpu_eager_last_error() ? applegpu_eager_last_error() : "unknown");
     c10::SetAllocator(c10::DeviceType::PrivateUse1, &global_allocator);
     return true;
 }();
