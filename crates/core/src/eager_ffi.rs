@@ -271,38 +271,71 @@ pub extern "C" fn applegpu_eager_matmul(
 
 // ── Compound ops (stubs — will use graph-based fallback initially) ──
 
-/// threshold_backward: grad * (input > threshold). Not yet implemented in
-/// the eager path — the C++ shim should fall back to the graph-based version.
+/// threshold_backward: grad * (input > threshold). ReLU backward.
+/// Flushes GPU, computes on CPU via shared memory.
 #[no_mangle]
 pub extern "C" fn applegpu_eager_threshold_backward(
-    _grad_id: u64,
-    _input_id: u64,
-    _threshold: f32,
-    _out_id: *mut u64,
+    grad_id: u64,
+    input_id: u64,
+    threshold: f32,
+    out_id: *mut u64,
 ) -> *mut u8 {
-    set_error("threshold_backward not yet implemented in eager path".into());
-    std::ptr::null_mut()
+    ensure_eager_streaming();
+    let state = get_eager_state();
+    let mut rt = state.runtime.lock().unwrap();
+    match rt.threshold_backward(&state.device, grad_id, input_id, threshold) {
+        Ok((id, ptr)) => {
+            unsafe { *out_id = id; }
+            ptr
+        }
+        Err(e) => {
+            set_error(format!("{}", e));
+            std::ptr::null_mut()
+        }
+    }
 }
 
-/// Multiply tensor by scalar. Not yet implemented in the eager path.
+/// Multiply tensor by scalar via broadcast binary mul.
 #[no_mangle]
 pub extern "C" fn applegpu_eager_scalar_mul(
-    _input_id: u64,
-    _scale: f32,
-    _out_id: *mut u64,
+    input_id: u64,
+    scale: f32,
+    out_id: *mut u64,
 ) -> *mut u8 {
-    set_error("scalar_mul not yet implemented in eager path".into());
-    std::ptr::null_mut()
+    ensure_eager_streaming();
+    let state = get_eager_state();
+    let mut rt = state.runtime.lock().unwrap();
+    match rt.scalar_mul(&state.device, input_id, scale) {
+        Ok((id, ptr)) => {
+            unsafe { *out_id = id; }
+            ptr
+        }
+        Err(e) => {
+            set_error(format!("{}", e));
+            std::ptr::null_mut()
+        }
+    }
 }
 
-/// Full mean reduction to scalar [1]. Not yet implemented in the eager path.
+/// Full mean reduction to scalar [1]. Flushes GPU, computes on CPU via shared memory.
 #[no_mangle]
 pub extern "C" fn applegpu_eager_mean_all(
-    _input_id: u64,
-    _out_id: *mut u64,
+    input_id: u64,
+    out_id: *mut u64,
 ) -> *mut u8 {
-    set_error("mean_all not yet implemented in eager path".into());
-    std::ptr::null_mut()
+    ensure_eager_streaming();
+    let state = get_eager_state();
+    let mut rt = state.runtime.lock().unwrap();
+    match rt.mean_all(&state.device, input_id) {
+        Ok((id, ptr)) => {
+            unsafe { *out_id = id; }
+            ptr
+        }
+        Err(e) => {
+            set_error(format!("{}", e));
+            std::ptr::null_mut()
+        }
+    }
 }
 
 // ── Views ─────────────────────────────────────────────────────────
@@ -358,16 +391,24 @@ pub extern "C" fn applegpu_eager_add_inplace(self_id: u64, other_id: u64) -> i32
     }
 }
 
-/// In-place scaled add: self_id += alpha * other_id. Not yet implemented.
+/// In-place scaled add: self_id += alpha * other_id. SGD optimizer update.
 /// Returns 0 on success, -1 on failure.
 #[no_mangle]
 pub extern "C" fn applegpu_eager_add_scaled_inplace(
-    _self_id: u64,
-    _other_id: u64,
-    _alpha: f32,
+    self_id: u64,
+    other_id: u64,
+    alpha: f32,
 ) -> i32 {
-    set_error("add_scaled_inplace not yet implemented in eager path".into());
-    -1
+    ensure_eager_streaming();
+    let state = get_eager_state();
+    let mut rt = state.runtime.lock().unwrap();
+    match rt.add_scaled_inplace(&state.device, self_id, other_id, alpha) {
+        Ok(()) => 0,
+        Err(e) => {
+            set_error(format!("{}", e));
+            -1
+        }
+    }
 }
 
 // ── Sync ──────────────────────────────────────────────────────────

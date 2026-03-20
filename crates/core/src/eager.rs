@@ -543,6 +543,106 @@ impl EagerRuntime {
         Ok(())
     }
 
+    // ── Scalar mul ────────────────────────────────────────────────────
+
+    /// Multiply every element of `input_id` by a float scalar `scale`.
+    /// Implemented via broadcast binary mul: input * scalar_tensor([scale]).
+    pub fn scalar_mul(
+        &mut self,
+        device: &Device,
+        input_id: u64,
+        scale: f32,
+    ) -> Result<(u64, *mut u8)> {
+        let dtype = self.dtype(input_id)?;
+        let (scalar_id, scalar_ptr) = self.alloc(device, &[1], dtype)?;
+        unsafe { *(scalar_ptr as *mut f32) = scale; }
+        let result = self.binary_op(device, "elementwise_mul", input_id, scalar_id);
+        self.free(scalar_id);
+        result
+    }
+
+    // ── Mean all ─────────────────────────────────────────────────────
+
+    /// Full reduction to mean (scalar [1]). Flushes GPU and computes on CPU
+    /// via shared memory to avoid kernel complexity.
+    pub fn mean_all(
+        &mut self,
+        device: &Device,
+        input_id: u64,
+    ) -> Result<(u64, *mut u8)> {
+        self.flush_and_wait();
+        let (numel, dtype, data_ptr) = {
+            let t = self.get(input_id)?;
+            (t.numel(), t.dtype, t.data_ptr())
+        };
+        let mean_val = if dtype == DType::Float32 {
+            let data = unsafe { std::slice::from_raw_parts(data_ptr as *const f32, numel) };
+            data.iter().sum::<f32>() / numel as f32
+        } else {
+            return Err(GpuError::UnsupportedDtype(format!(
+                "mean_all only supports Float32, got {:?}", dtype
+            )));
+        };
+        let (out_id, out_ptr) = self.alloc(device, &[1], dtype)?;
+        unsafe { *(out_ptr as *mut f32) = mean_val; }
+        Ok((out_id, out_ptr))
+    }
+
+    // ── Threshold backward ───────────────────────────────────────────
+
+    /// threshold_backward: grad * (input > threshold). ReLU backward.
+    /// Flushes GPU and computes on CPU via shared memory.
+    pub fn threshold_backward(
+        &mut self,
+        device: &Device,
+        grad_id: u64,
+        input_id: u64,
+        threshold: f32,
+    ) -> Result<(u64, *mut u8)> {
+        self.flush_and_wait();
+        let (shape, dtype, numel, grad_ptr, input_ptr) = {
+            let g = self.get(grad_id)?;
+            let i = self.get(input_id)?;
+            if g.dtype != i.dtype {
+                return Err(GpuError::InvalidTensor(format!(
+                    "dtype mismatch: {:?} vs {:?}", g.dtype, i.dtype
+                )));
+            }
+            let numel = g.numel();
+            (g.layout.shape, g.dtype, numel, g.data_ptr(), i.data_ptr())
+        };
+        let (out_id, out_ptr) = self.alloc(device, shape.dims(), dtype)?;
+        if dtype == DType::Float32 {
+            let grad = unsafe { std::slice::from_raw_parts(grad_ptr as *const f32, numel) };
+            let input = unsafe { std::slice::from_raw_parts(input_ptr as *const f32, numel) };
+            let out = unsafe { std::slice::from_raw_parts_mut(out_ptr as *mut f32, numel) };
+            for idx in 0..numel {
+                out[idx] = if input[idx] > threshold { grad[idx] } else { 0.0 };
+            }
+        } else {
+            return Err(GpuError::UnsupportedDtype(format!(
+                "threshold_backward only supports Float32, got {:?}", dtype
+            )));
+        }
+        Ok((out_id, out_ptr))
+    }
+
+    // ── Add scaled in-place ──────────────────────────────────────────
+
+    /// self += alpha * other. SGD optimizer parameter update.
+    pub fn add_scaled_inplace(
+        &mut self,
+        device: &Device,
+        self_id: u64,
+        other_id: u64,
+        alpha: f32,
+    ) -> Result<()> {
+        let (scaled_id, _) = self.scalar_mul(device, other_id, alpha)?;
+        self.inplace_binary_op(device, "elementwise_add", self_id, scaled_id)?;
+        self.free(scaled_id);
+        Ok(())
+    }
+
     // ── Kernel pipeline resolution ───────────────────────────────────
 
     /// Resolve a kernel by base name + dtype, compile/cache the pipeline.
