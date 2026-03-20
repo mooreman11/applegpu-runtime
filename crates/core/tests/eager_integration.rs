@@ -1,6 +1,66 @@
 use applegpu_core::device::Device;
 use applegpu_core::eager::EagerRuntime;
 use applegpu_core::tensor::DType;
+use std::sync::Mutex;
+
+// Streaming batch uses global static state, so tests must run serially.
+static STREAMING_LOCK: Mutex<()> = Mutex::new(());
+
+// ── Binary op tests ──────────────────────────────────────────────────
+
+#[test]
+fn test_eager_add_contiguous() {
+    let _lock = STREAMING_LOCK.lock().unwrap();
+    let device = Device::new().unwrap();
+    let mut rt = EagerRuntime::new();
+    rt.begin_streaming(&device);
+
+    let (a_id, a_ptr) = rt.alloc(&device, &[4], DType::Float32).unwrap();
+    let (b_id, b_ptr) = rt.alloc(&device, &[4], DType::Float32).unwrap();
+    unsafe {
+        std::slice::from_raw_parts_mut(a_ptr as *mut f32, 4)
+            .copy_from_slice(&[1.0, 2.0, 3.0, 4.0]);
+        std::slice::from_raw_parts_mut(b_ptr as *mut f32, 4)
+            .copy_from_slice(&[10.0, 20.0, 30.0, 40.0]);
+    }
+
+    let (out_id, out_ptr) = rt.binary_op(&device, "elementwise_add", a_id, b_id).unwrap();
+    rt.flush_and_wait();
+
+    let result = unsafe { std::slice::from_raw_parts(out_ptr as *const f32, 4) };
+    assert_eq!(result, &[11.0, 22.0, 33.0, 44.0]);
+
+    // Verify output tensor metadata
+    assert_eq!(rt.shape(out_id).unwrap(), vec![4]);
+    assert_eq!(rt.dtype(out_id).unwrap(), DType::Float32);
+
+    rt.end_streaming();
+}
+
+#[test]
+fn test_eager_add_broadcast() {
+    let _lock = STREAMING_LOCK.lock().unwrap();
+    let device = Device::new().unwrap();
+    let mut rt = EagerRuntime::new();
+    rt.begin_streaming(&device);
+
+    let (a_id, a_ptr) = rt.alloc(&device, &[2, 3], DType::Float32).unwrap();
+    let (b_id, b_ptr) = rt.alloc(&device, &[3], DType::Float32).unwrap();
+    unsafe {
+        std::slice::from_raw_parts_mut(a_ptr as *mut f32, 6)
+            .copy_from_slice(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        std::slice::from_raw_parts_mut(b_ptr as *mut f32, 3)
+            .copy_from_slice(&[10.0, 20.0, 30.0]);
+    }
+
+    let (_, out_ptr) = rt.binary_op(&device, "elementwise_add", a_id, b_id).unwrap();
+    rt.flush_and_wait();
+
+    let result = unsafe { std::slice::from_raw_parts(out_ptr as *const f32, 6) };
+    assert_eq!(result, &[11.0, 22.0, 33.0, 14.0, 25.0, 36.0]);
+
+    rt.end_streaming();
+}
 
 #[test]
 fn test_eager_register_and_query() {
@@ -51,6 +111,7 @@ fn test_eager_pool_recycles_buffers() {
 
 #[test]
 fn test_eager_streaming_lifecycle() {
+    let _lock = STREAMING_LOCK.lock().unwrap();
     let device = Device::new().unwrap();
     let mut rt = EagerRuntime::new();
     rt.begin_streaming(&device);

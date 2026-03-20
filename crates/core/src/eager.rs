@@ -208,6 +208,80 @@ impl EagerRuntime {
         compute::streaming_is_active()
     }
 
+    // ── Binary ops ────────────────────────────────────────────────────
+
+    /// Encode a binary element-wise op (add, sub, mul, div) into the streaming
+    /// command buffer. Returns (output_tensor_id, raw data pointer). Data is
+    /// only valid after `flush_and_wait()`.
+    pub fn binary_op(
+        &mut self,
+        device: &Device,
+        base_kernel: &str,
+        a_id: u64,
+        b_id: u64,
+    ) -> Result<(u64, *mut u8)> {
+        // 1. Extract data from immutable borrows (releases borrow before mutable ops)
+        let (a_shape, a_dtype, a_buf, b_shape, b_buf) = {
+            let a = self.get(a_id)?;
+            let b = self.get(b_id)?;
+            if a.dtype != b.dtype {
+                return Err(GpuError::InvalidTensor(format!(
+                    "dtype mismatch: {:?} vs {:?}", a.dtype, b.dtype
+                )));
+            }
+            (a.layout.shape, a.dtype, Arc::clone(&a.buffer),
+             b.layout.shape, Arc::clone(&b.buffer))
+        };
+
+        // 2. Compute output shape (supports broadcasting)
+        let out_shape = a_shape.broadcast_with(&b_shape)?;
+        let out_layout = TensorLayout::contiguous(out_shape);
+        let numel = out_shape.numel();
+        let ndim = out_shape.ndim();
+
+        // 3. Compute broadcast strides
+        let a_bcast = TensorLayout::broadcast_strides_for(&a_shape, &out_shape);
+        let b_bcast = TensorLayout::broadcast_strides_for(&b_shape, &out_shape);
+
+        let mut a_strides = [0u32; MAX_DIMS];
+        let mut b_strides = [0u32; MAX_DIMS];
+        let mut shape_u32 = [0u32; MAX_DIMS];
+        for i in 0..ndim {
+            a_strides[i] = a_bcast[i] as u32;
+            b_strides[i] = b_bcast[i] as u32;
+            shape_u32[i] = out_shape.dims()[i] as u32;
+        }
+
+        // 4. Allocate output buffer (mutable borrow of pool)
+        let nbytes = numel * a_dtype.size_bytes();
+        let alloc_bytes = if nbytes == 0 { 4 } else { nbytes };
+        let out_buffer = Arc::new(self.pool.acquire(device, alloc_bytes)?);
+        let out_ptr = out_buffer.contents();
+
+        // 5. Get pipeline and dispatch into streaming CB
+        let pipeline = self.get_pipeline(device, base_kernel, a_dtype)?;
+        let queue = compute::get_shared_queue(device);
+        let _cb = pipeline.dispatch_binary_nd_nb(
+            queue,
+            &*a_buf, &a_strides,
+            &*b_buf, &b_strides,
+            &*out_buffer, &shape_u32,
+            ndim as u32, numel as u32,
+        )?;
+        compute::streaming_tick();
+
+        // 6. Register output tensor
+        let out_id = next_tensor_id();
+        self.tensors.insert(out_id, EagerTensor {
+            buffer: out_buffer,
+            layout: out_layout,
+            dtype: a_dtype,
+            offset: 0,
+        });
+
+        Ok((out_id, out_ptr))
+    }
+
     // ── Kernel pipeline resolution ───────────────────────────────────
 
     /// Resolve a kernel by base name + dtype, compile/cache the pipeline.
