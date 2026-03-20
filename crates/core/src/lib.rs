@@ -3,6 +3,7 @@ pub mod backend_ffi;
 pub mod buffer;
 pub mod compute;
 pub mod device;
+pub mod eager;
 pub mod error;
 pub mod ffi;
 pub mod fusion;
