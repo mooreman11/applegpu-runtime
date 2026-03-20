@@ -550,6 +550,83 @@ kernel void sum{s}(
     )
 }
 
+/// Generate strided N-D sum kernel that reduces along any single dimension.
+/// One thread per output element. Each thread accumulates across reduce_dim.
+/// Dispatched via dispatch_3d_nb with uint_params = [ndim, reduce_dim, reduce_size, out_numel].
+pub fn sum_strided_nd_kernel_source(dtype: DType) -> String {
+    let t = metal_type(dtype);
+    let s = dtype_suffix(dtype);
+    let acc = needs_float_acc(dtype);
+    format!(
+        r#"#include <metal_stdlib>
+using namespace metal;
+
+kernel void sum_strided_nd{s}(
+    device const {t}* input   [[buffer(0)]],
+    device const uint* in_strides [[buffer(1)]],
+    device const uint* in_shape   [[buffer(2)]],
+    device {t}* output        [[buffer(3)]],
+    constant uint& ndim       [[buffer(4)]],
+    constant uint& reduce_dim [[buffer(5)]],
+    constant uint& reduce_size [[buffer(6)]],
+    constant uint& out_numel  [[buffer(7)]],
+    uint tid [[thread_position_in_grid]]
+) {{
+    if (tid >= out_numel) return;
+
+    // Convert output linear index to N-D index (in output shape, which skips reduce_dim)
+    // Then for each position along reduce_dim, compute input N-D index and accumulate.
+    //
+    // Output shape = input shape with reduce_dim removed.
+    // We reconstruct the input N-D index by inserting the reduce_dim iteration variable.
+
+    // First, decompose tid into output multi-dim indices
+    uint out_indices[8];
+    uint remaining = tid;
+    uint out_d = 0;
+    // Build output shape (skip reduce_dim)
+    uint out_shape[8];
+    uint out_ndim = 0;
+    for (uint d = 0; d < ndim; d++) {{
+        if (d != reduce_dim) {{
+            out_shape[out_ndim] = in_shape[d];
+            out_ndim++;
+        }}
+    }}
+    // Decompose tid into output indices (row-major)
+    for (uint d = out_ndim; d > 0; d--) {{
+        uint i = d - 1;
+        out_indices[i] = remaining % out_shape[i];
+        remaining /= out_shape[i];
+    }}
+
+    // Accumulate across reduce_dim
+    float acc_val = 0.0f;
+    for (uint r = 0; r < reduce_size; r++) {{
+        // Build full input N-D index (insert r at reduce_dim)
+        uint in_offset = 0;
+        uint oi = 0;
+        for (uint d = 0; d < ndim; d++) {{
+            uint idx;
+            if (d == reduce_dim) {{
+                idx = r;
+            }} else {{
+                idx = out_indices[oi];
+                oi++;
+            }}
+            in_offset += idx * in_strides[d];
+        }}
+        acc_val += {load};
+    }}
+    output[tid] = {store};
+}}
+"#,
+        t = t, s = s,
+        load = if acc { "float(input[in_offset])".to_string() } else { "input[in_offset]".to_string() },
+        store = if acc { format!("{}(acc_val)", t) } else { "acc_val".to_string() },
+    )
+}
+
 /// Generate mean reduction kernel source. Uses float accumulation.
 pub fn mean_kernel_source(dtype: DType) -> String {
     let t = metal_type(dtype);

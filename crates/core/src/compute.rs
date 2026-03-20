@@ -1461,6 +1461,7 @@ impl KernelRegistry {
             "softmax_causal" => kt::softmax_causal_kernel_source(dtype),
             "argmax" => kt::argmax_kernel_source(dtype),
             "sum" => kt::sum_kernel_source(dtype),
+            "sum_strided_nd" => kt::sum_strided_nd_kernel_source(dtype),
             "mean" => kt::mean_kernel_source(dtype),
             "var" => kt::var_kernel_source(dtype),
             "add_bias" => kt::add_bias_kernel_source(dtype),

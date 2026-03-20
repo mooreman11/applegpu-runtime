@@ -605,3 +605,56 @@ fn test_mean_chain_no_flush() {
     applegpu_core::compute::end_streaming_batch();
     assert!((result - 3.5).abs() < 0.01, "Expected 3.5, got {}", result);
 }
+
+#[test]
+fn test_eager_sum_dim0() {
+    let _lock = STREAMING_LOCK.lock().unwrap();
+    let device = Device::new().unwrap();
+    let mut rt = EagerRuntime::new();
+    rt.begin_streaming(&device);
+
+    // [3, 4] sum(dim=0) → [4]
+    let (a_id, a_ptr) = rt.alloc(&device, &[3, 4], DType::Float32).unwrap();
+    unsafe {
+        std::slice::from_raw_parts_mut(a_ptr as *mut f32, 12)
+            .copy_from_slice(&[1.0, 2.0, 3.0, 4.0,
+                               5.0, 6.0, 7.0, 8.0,
+                               9.0, 10.0, 11.0, 12.0]);
+    }
+
+    let (out_id, out_ptr) = rt.sum_dim(&device, a_id, 0, false).unwrap();
+    rt.flush_and_wait();
+
+    let result = unsafe { std::slice::from_raw_parts(out_ptr as *const f32, 4) };
+    // sum along dim 0: [1+5+9, 2+6+10, 3+7+11, 4+8+12] = [15, 18, 21, 24]
+    assert_eq!(result, &[15.0, 18.0, 21.0, 24.0]);
+    assert_eq!(rt.shape(out_id).unwrap(), vec![4]);
+
+    rt.end_streaming();
+}
+
+#[test]
+fn test_eager_sum_dim1() {
+    let _lock = STREAMING_LOCK.lock().unwrap();
+    let device = Device::new().unwrap();
+    let mut rt = EagerRuntime::new();
+    rt.begin_streaming(&device);
+
+    // [3, 4] sum(dim=1) → [3]  (last dim, should use fast path)
+    let (a_id, a_ptr) = rt.alloc(&device, &[3, 4], DType::Float32).unwrap();
+    unsafe {
+        std::slice::from_raw_parts_mut(a_ptr as *mut f32, 12)
+            .copy_from_slice(&[1.0, 2.0, 3.0, 4.0,
+                               5.0, 6.0, 7.0, 8.0,
+                               9.0, 10.0, 11.0, 12.0]);
+    }
+
+    let (out_id, out_ptr) = rt.sum_dim(&device, a_id, 1, false).unwrap();
+    rt.flush_and_wait();
+
+    let result = unsafe { std::slice::from_raw_parts(out_ptr as *const f32, 3) };
+    // sum along dim 1: [1+2+3+4, 5+6+7+8, 9+10+11+12] = [10, 26, 42]
+    assert_eq!(result, &[10.0, 26.0, 42.0]);
+
+    rt.end_streaming();
+}
