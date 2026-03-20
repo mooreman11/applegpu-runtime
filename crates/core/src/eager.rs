@@ -221,7 +221,8 @@ impl EagerRuntime {
         b_id: u64,
     ) -> Result<(u64, *mut u8)> {
         // 1. Extract data from immutable borrows (releases borrow before mutable ops)
-        let (a_shape, a_dtype, a_buf, b_shape, b_buf) = {
+        let (a_shape, a_dtype, a_buf, a_actual_strides,
+             b_shape, b_buf, b_actual_strides) = {
             let a = self.get(a_id)?;
             let b = self.get(b_id)?;
             if a.dtype != b.dtype {
@@ -230,7 +231,9 @@ impl EagerRuntime {
                 )));
             }
             (a.layout.shape, a.dtype, Arc::clone(&a.buffer),
-             b.layout.shape, Arc::clone(&b.buffer))
+             a.layout.strides().to_vec(),
+             b.layout.shape, Arc::clone(&b.buffer),
+             b.layout.strides().to_vec())
         };
 
         // 2. Compute output shape (supports broadcasting)
@@ -239,17 +242,40 @@ impl EagerRuntime {
         let numel = out_shape.numel();
         let ndim = out_shape.ndim();
 
-        // 3. Compute broadcast strides
-        let a_bcast = TensorLayout::broadcast_strides_for(&a_shape, &out_shape);
-        let b_bcast = TensorLayout::broadcast_strides_for(&b_shape, &out_shape);
-
+        // 3. Compute strides for dispatch.
+        // For views (non-contiguous tensors), use the tensor's actual strides.
+        // For broadcasting (shape mismatch), set stride=0 for broadcast dims.
         let mut a_strides = [0u32; MAX_DIMS];
         let mut b_strides = [0u32; MAX_DIMS];
         let mut shape_u32 = [0u32; MAX_DIMS];
+
+        let a_ndim = a_shape.ndim();
+        let b_ndim = b_shape.ndim();
+
         for i in 0..ndim {
-            a_strides[i] = a_bcast[i] as u32;
-            b_strides[i] = b_bcast[i] as u32;
             shape_u32[i] = out_shape.dims()[i] as u32;
+
+            // For tensor a: map output dim to input dim (right-aligned)
+            let a_dim_offset = ndim as isize - a_ndim as isize;
+            if (i as isize) >= a_dim_offset {
+                let ai = (i as isize - a_dim_offset) as usize;
+                if a_shape.dims()[ai] == out_shape.dims()[i] {
+                    a_strides[i] = a_actual_strides[ai] as u32; // use ACTUAL strides
+                } else {
+                    a_strides[i] = 0; // broadcast: stride=0
+                }
+            }
+
+            // For tensor b: same logic
+            let b_dim_offset = ndim as isize - b_ndim as isize;
+            if (i as isize) >= b_dim_offset {
+                let bi = (i as isize - b_dim_offset) as usize;
+                if b_shape.dims()[bi] == out_shape.dims()[i] {
+                    b_strides[i] = b_actual_strides[bi] as u32; // use ACTUAL strides
+                } else {
+                    b_strides[i] = 0; // broadcast: stride=0
+                }
+            }
         }
 
         // 4. Allocate output buffer (mutable borrow of pool)
@@ -583,12 +609,7 @@ impl EagerRuntime {
         let mut current_id = input_id;
         let mut current_shape = shape_vec.clone();
 
-        for step in 0..ndim {
-            // Flush between chained reductions — the mean kernel reads the
-            // previous output, so the GPU must finish writing it first.
-            if step > 0 {
-                self.flush_and_wait();
-            }
+        for _step in 0..ndim {
             let cols = *current_shape.last().unwrap();
             let rows: usize = current_shape[..current_shape.len() - 1].iter().product::<usize>().max(1);
 

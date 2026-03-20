@@ -259,19 +259,45 @@ void eval_applegpu_tensor_if_needed(const at::Tensor& t) {
 // Our Metal buffers are storageModeShared, so they're CPU-accessible —
 // we just memcpy between the raw data pointers.
 at::Tensor& applegpu_copy_(at::Tensor& self, const at::Tensor& src, bool non_blocking) {
-    // Flush any pending GPU work before reading source data
-    applegpu_eager_synchronize();
-
     TORCH_CHECK(self.numel() == src.numel(),
         "applegpu copy_: size mismatch (", self.numel(), " vs ", src.numel(), ")");
 
     auto nbytes = self.nbytes();
     if (nbytes == 0) return self;
 
-    // Both contiguous: direct memcpy (handles GPU→CPU, CPU→GPU, GPU→GPU)
+    // GPU→GPU copy: use eager dispatch (no flush for strided copies)
+    if (self.device().is_privateuseone() && src.device().is_privateuseone()
+        && self.dtype() == src.dtype() && self.is_contiguous()) {
+        // Encode a strided copy via scalar_mul(src, 1.0).
+        // scalar_mul reads input with strides (via broadcast binary mul),
+        // writes output contiguously. No flush needed — stays in streaming CB.
+        EphemeralViewGuard evg;
+        uint64_t src_id = resolve_tensor_id(src);
+        uint64_t copy_id = 0;
+        void* copy_ptr = applegpu_eager_scalar_mul(src_id, 1.0f, &copy_id);
+        if (copy_ptr) {
+            // We have a contiguous copy in copy_id's buffer.
+            // Now we need to get the data into self's buffer.
+            // Encode an in-place "copy" by using add(self*0, copy) — but that's complex.
+            // Simpler: just swap self's storage to point to copy_id's buffer.
+            auto* impl = self.unsafeGetTensorImpl();
+            auto new_dptr = c10::DataPtr{copy_ptr, new TensorContext{copy_id},
+                [](void* ctx) { auto* tc = static_cast<TensorContext*>(ctx);
+                    applegpu_eager_free(tc->tensor_id); delete tc; },
+                c10::Device(c10::DeviceType::PrivateUse1, 0)};
+            auto new_storage = c10::Storage(c10::Storage::use_byte_size_t(),
+                nbytes, std::move(new_dptr), &global_allocator);
+            impl->set_storage_and_dtype(std::move(new_storage), self.dtype());
+            return self;
+        }
+        // Fall through to flush-based path on error
+    }
+
+    // Cross-device copy or fallback: flush + memcpy
+    applegpu_eager_flush_and_wait();
+
     if (self.is_contiguous() && src.is_contiguous() && self.dtype() == src.dtype()) {
         std::memcpy(self.data_ptr(), src.data_ptr(), nbytes);
-        // If dest is an eager tensor, re-register its shape so the runtime knows
         if (self.device().is_privateuseone() && self.storage().data_ptr().get_context()) {
             uint64_t tid = get_tensor_id(self);
             std::vector<uint64_t> dims(self.sizes().begin(), self.sizes().end());
@@ -280,7 +306,7 @@ at::Tensor& applegpu_copy_(at::Tensor& self, const at::Tensor& src, bool non_blo
         return self;
     }
 
-    // Non-contiguous or dtype mismatch: use CPU view of shared-memory buffer.
+    // Non-contiguous cross-device: CPU view of shared-memory buffer
     at::Tensor src_cpu_view;
     if (src.device().is_cpu()) {
         src_cpu_view = src;
