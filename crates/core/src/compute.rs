@@ -2556,7 +2556,7 @@ fn streaming_flush_interval() -> u32 {
         std::env::var("APPLEGPU_STREAMING_FLUSH_INTERVAL")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(512)
+            .unwrap_or(512) // Default: 512 for graph path; eager path sets env var to 65536
     });
     *INTERVAL
 }

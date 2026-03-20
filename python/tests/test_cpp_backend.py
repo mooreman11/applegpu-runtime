@@ -175,3 +175,90 @@ def test_mlp_training_step():
     # Verify loss decreased after one step
     loss2 = torch.nn.MSELoss()(model(x), y)
     assert loss2.cpu().item() < loss.cpu().item() + 0.1  # allow small tolerance
+
+
+def test_eager_add_via_ffi():
+    """Proof that eager Metal dispatch works end-to-end.
+
+    Bypasses PyTorch entirely and calls the eager FFI directly via ctypes:
+    alloc two tensors, write data, eager add, flush, read result.
+    This validates the streaming command buffer path (Rust -> Metal encode -> GPU).
+    """
+    _load()
+    import ctypes
+    import glob as _glob
+    import os
+
+    # Find the .so — it's already loaded by _load(), but we need a ctypes handle
+    # to call the eager FFI functions directly.
+    backend_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'backend_cpp')
+    so_files = _glob.glob(os.path.join(backend_dir, 'applegpu_backend*.so'))
+    assert so_files, "applegpu_backend .so not found"
+    lib = ctypes.CDLL(so_files[0])
+
+    # Set up function signatures
+    lib.applegpu_eager_init.restype = ctypes.c_bool
+
+    lib.applegpu_eager_alloc.argtypes = [
+        ctypes.POINTER(ctypes.c_uint64),  # dims
+        ctypes.c_uint32,                   # ndim
+        ctypes.c_int8,                     # dtype
+        ctypes.POINTER(ctypes.c_uint64),   # out_id
+    ]
+    lib.applegpu_eager_alloc.restype = ctypes.c_void_p
+
+    lib.applegpu_eager_add.argtypes = [
+        ctypes.c_uint64,                   # a_id
+        ctypes.c_uint64,                   # b_id
+        ctypes.POINTER(ctypes.c_uint64),   # out_id
+    ]
+    lib.applegpu_eager_add.restype = ctypes.c_void_p
+
+    lib.applegpu_eager_flush_and_wait.argtypes = []
+    lib.applegpu_eager_flush_and_wait.restype = None
+
+    lib.applegpu_eager_free.argtypes = [ctypes.c_uint64]
+    lib.applegpu_eager_free.restype = None
+
+    lib.applegpu_eager_last_error.argtypes = []
+    lib.applegpu_eager_last_error.restype = ctypes.c_char_p
+
+    # Init (idempotent — already called by C++ module init)
+    assert lib.applegpu_eager_init(), "eager init failed"
+
+    # Allocate two 4-element Float32 tensors (dtype wire 0 = Float32)
+    dims = (ctypes.c_uint64 * 1)(4)
+    out_id = ctypes.c_uint64(0)
+
+    a_ptr = lib.applegpu_eager_alloc(dims, 1, 0, ctypes.byref(out_id))
+    assert a_ptr, f"alloc a failed: {lib.applegpu_eager_last_error()}"
+    a_id = out_id.value
+
+    b_ptr = lib.applegpu_eager_alloc(dims, 1, 0, ctypes.byref(out_id))
+    assert b_ptr, f"alloc b failed: {lib.applegpu_eager_last_error()}"
+    b_id = out_id.value
+
+    # Write data via shared memory (storageModeShared = CPU-accessible)
+    a_arr = (ctypes.c_float * 4).from_address(a_ptr)
+    b_arr = (ctypes.c_float * 4).from_address(b_ptr)
+    for i in range(4):
+        a_arr[i] = float(i + 1)       # [1, 2, 3, 4]
+        b_arr[i] = float((i + 1) * 10)  # [10, 20, 30, 40]
+
+    # Eager add: encodes into streaming command buffer
+    c_ptr = lib.applegpu_eager_add(a_id, b_id, ctypes.byref(out_id))
+    assert c_ptr, f"eager add failed: {lib.applegpu_eager_last_error()}"
+    c_id = out_id.value
+
+    # Flush GPU work and wait for completion
+    lib.applegpu_eager_flush_and_wait()
+
+    # Read result from shared memory
+    c_arr = (ctypes.c_float * 4).from_address(c_ptr)
+    result = [c_arr[i] for i in range(4)]
+    assert result == [11.0, 22.0, 33.0, 44.0], f"Expected [11,22,33,44], got {result}"
+
+    # Cleanup
+    lib.applegpu_eager_free(a_id)
+    lib.applegpu_eager_free(b_id)
+    lib.applegpu_eager_free(c_id)

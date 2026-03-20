@@ -224,6 +224,11 @@ impl TensorLayout {
         new
     }
 
+    pub fn set_stride(&mut self, dim: usize, stride: usize) {
+        assert!(dim < MAX_DIMS, "dim {} exceeds MAX_DIMS {}", dim, MAX_DIMS);
+        self.strides[dim] = stride;
+    }
+
     pub fn broadcast_strides_for(source: &Shape, target: &Shape) -> [usize; MAX_DIMS] {
         let mut strides = [0usize; MAX_DIMS];
         let src_contiguous = TensorLayout::contiguous(*source);
