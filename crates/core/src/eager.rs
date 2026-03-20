@@ -419,6 +419,130 @@ impl EagerRuntime {
         Ok((out_id, out_ptr))
     }
 
+    // ── make_contiguous ────────────────────────────────────────────────
+
+    /// If the tensor is already contiguous, return its id and pointer unchanged.
+    /// Otherwise, flush the GPU, do a CPU-side strided copy on shared memory,
+    /// and return a new contiguous tensor. (D2 will add a GPU copy kernel.)
+    pub fn make_contiguous(&mut self, device: &Device, id: u64) -> Result<(u64, *mut u8)> {
+        if self.is_contiguous(id)? {
+            let ptr = self.get(id)?.data_ptr();
+            return Ok((id, ptr));
+        }
+
+        // CPU-side strided copy — must flush first so shared memory is up to date
+        self.flush_and_wait();
+
+        let (shape, dtype, strides, src_ptr, offset) = {
+            let src = self.get(id)?;
+            (
+                src.layout.shape,
+                src.dtype,
+                src.layout.strides().to_vec(),
+                src.buffer.contents(),
+                src.offset,
+            )
+        };
+
+        let numel = shape.numel();
+        let ndim = shape.ndim();
+        let elem_size = dtype.size_bytes();
+
+        let (out_id, out_ptr) = self.alloc(device, shape.dims(), dtype)?;
+
+        for linear in 0..numel {
+            let mut remaining = linear;
+            let mut src_byte_offset = offset;
+            for d in (0..ndim).rev() {
+                let idx = remaining % shape.dims()[d];
+                remaining /= shape.dims()[d];
+                src_byte_offset += idx * strides[d] * elem_size;
+            }
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    src_ptr.add(src_byte_offset),
+                    out_ptr.add(linear * elem_size),
+                    elem_size,
+                );
+            }
+        }
+
+        Ok((out_id, out_ptr))
+    }
+
+    // ── In-place binary ops ──────────────────────────────────────────────
+
+    /// Dispatch a binary op where the output buffer IS self's buffer (in-place).
+    /// Self must be contiguous (Safety Invariant #2). Returns error if self is
+    /// non-contiguous — D2 will support automatic make_contiguous + copy-back.
+    pub fn inplace_binary_op(
+        &mut self,
+        device: &Device,
+        base_kernel: &str,
+        self_id: u64,
+        other_id: u64,
+    ) -> Result<()> {
+        // Safety Invariant #2: self must be contiguous for in-place output
+        if !self.is_contiguous(self_id)? {
+            return Err(GpuError::InvalidTensor(
+                "in-place op on non-contiguous tensor not yet supported".into(),
+            ));
+        }
+
+        // Extract data from immutable borrows
+        let (self_shape, self_dtype, self_buf, self_strides, other_buf, other_shape) = {
+            let s = self.get(self_id)?;
+            let o = self.get(other_id)?;
+            if s.dtype != o.dtype {
+                return Err(GpuError::InvalidTensor(format!(
+                    "dtype mismatch: {:?} vs {:?}",
+                    s.dtype, o.dtype
+                )));
+            }
+            (
+                s.layout.shape,
+                s.dtype,
+                Arc::clone(&s.buffer),
+                s.strides_u32(),
+                Arc::clone(&o.buffer),
+                o.layout.shape,
+            )
+        };
+
+        let numel = self_shape.numel();
+        let ndim = self_shape.ndim();
+
+        let mut out_shape_u32 = [0u32; MAX_DIMS];
+        for i in 0..ndim {
+            out_shape_u32[i] = self_shape.dims()[i] as u32;
+        }
+
+        // Broadcast strides for other
+        let other_bcast = TensorLayout::broadcast_strides_for(&other_shape, &self_shape);
+        let mut other_strides = [0u32; MAX_DIMS];
+        for i in 0..ndim {
+            other_strides[i] = other_bcast[i] as u32;
+        }
+
+        // Dispatch: output buffer = self's buffer (in-place)
+        let pipeline = self.get_pipeline(device, base_kernel, self_dtype)?;
+        let queue = compute::get_shared_queue(device);
+        let _cb = pipeline.dispatch_binary_nd_nb(
+            queue,
+            &*self_buf,
+            &self_strides,
+            &*other_buf,
+            &other_strides,
+            &*self_buf, // output IS self
+            &out_shape_u32,
+            ndim as u32,
+            numel as u32,
+        )?;
+        compute::streaming_tick();
+
+        Ok(())
+    }
+
     // ── Kernel pipeline resolution ───────────────────────────────────
 
     /// Resolve a kernel by base name + dtype, compile/cache the pipeline.

@@ -205,6 +205,99 @@ fn test_eager_matmul() {
     rt.end_streaming();
 }
 
+// ── make_contiguous tests ────────────────────────────────────────────
+
+#[test]
+fn test_eager_make_contiguous_noop_for_contiguous() {
+    let device = Device::new().unwrap();
+    let mut rt = EagerRuntime::new();
+    let _lock = STREAMING_LOCK.lock().unwrap();
+    rt.begin_streaming(&device);
+
+    let (id, ptr) = rt.alloc(&device, &[4], DType::Float32).unwrap();
+    let (contig_id, contig_ptr) = rt.make_contiguous(&device, id).unwrap();
+    // Should return same id and pointer for already-contiguous tensor
+    assert_eq!(contig_id, id);
+    assert_eq!(contig_ptr, ptr);
+
+    rt.end_streaming();
+}
+
+#[test]
+fn test_eager_make_contiguous() {
+    let device = Device::new().unwrap();
+    let mut rt = EagerRuntime::new();
+    let _lock = STREAMING_LOCK.lock().unwrap();
+    rt.begin_streaming(&device);
+
+    // Create [2, 3] and transpose to [3, 2] (non-contiguous)
+    let (base_id, base_ptr) = rt.alloc(&device, &[2, 3], DType::Float32).unwrap();
+    unsafe {
+        // Row-major: [[1,2,3],[4,5,6]]
+        std::slice::from_raw_parts_mut(base_ptr as *mut f32, 6)
+            .copy_from_slice(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    }
+
+    // Transposed view: shape [3, 2], strides [1, 3]
+    let view_id = rt.create_view(base_id, &[3, 2], &[1, 3], 0).unwrap();
+    assert!(!rt.is_contiguous(view_id).unwrap());
+
+    let (contig_id, contig_ptr) = rt.make_contiguous(&device, view_id).unwrap();
+    assert!(rt.is_contiguous(contig_id).unwrap());
+    assert_ne!(contig_id, view_id);
+
+    // Transposed [[1,2,3],[4,5,6]] → [[1,4],[2,5],[3,6]] → row-major: [1,4,2,5,3,6]
+    let result = unsafe { std::slice::from_raw_parts(contig_ptr as *const f32, 6) };
+    assert_eq!(result, &[1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
+
+    rt.end_streaming();
+}
+
+// ── In-place binary op tests ────────────────────────────────────────
+
+#[test]
+fn test_eager_inplace_add() {
+    let _lock = STREAMING_LOCK.lock().unwrap();
+    let device = Device::new().unwrap();
+    let mut rt = EagerRuntime::new();
+    rt.begin_streaming(&device);
+
+    let (a_id, a_ptr) = rt.alloc(&device, &[4], DType::Float32).unwrap();
+    let (b_id, _) = rt.alloc(&device, &[4], DType::Float32).unwrap();
+    unsafe {
+        std::slice::from_raw_parts_mut(a_ptr as *mut f32, 4)
+            .copy_from_slice(&[1.0, 2.0, 3.0, 4.0]);
+        std::slice::from_raw_parts_mut(rt.get(b_id).unwrap().data_ptr() as *mut f32, 4)
+            .copy_from_slice(&[10.0, 20.0, 30.0, 40.0]);
+    }
+
+    rt.inplace_binary_op(&device, "elementwise_add", a_id, b_id).unwrap();
+    rt.flush_and_wait();
+
+    let result = unsafe { std::slice::from_raw_parts(a_ptr as *const f32, 4) };
+    assert_eq!(result, &[11.0, 22.0, 33.0, 44.0]);
+    rt.end_streaming();
+}
+
+#[test]
+fn test_eager_inplace_on_non_contiguous_errors() {
+    let device = Device::new().unwrap();
+    let mut rt = EagerRuntime::new();
+    let _lock = STREAMING_LOCK.lock().unwrap();
+    rt.begin_streaming(&device);
+
+    let (base_id, _) = rt.alloc(&device, &[4, 4], DType::Float32).unwrap();
+    let view_id = rt.create_view(base_id, &[4, 4], &[1, 4], 0).unwrap();
+    let (b_id, _) = rt.alloc(&device, &[4, 4], DType::Float32).unwrap();
+
+    let result = rt.inplace_binary_op(&device, "elementwise_add", view_id, b_id);
+    assert!(result.is_err());
+
+    rt.end_streaming();
+}
+
+// ── Matmul error tests ──────────────────────────────────────────────
+
 #[test]
 fn test_eager_matmul_non_contiguous_errors() {
     let device = Device::new().unwrap();
