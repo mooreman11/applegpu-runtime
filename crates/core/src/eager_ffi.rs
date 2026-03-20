@@ -44,8 +44,9 @@ fn get_eager_state() -> &'static EagerFfiState {
 pub extern "C" fn applegpu_eager_init() -> bool {
     EAGER_STATE.get_or_init(|| {
         let device = Device::new().expect("Failed to create Metal device");
-        let mut runtime = EagerRuntime::new();
-        runtime.begin_streaming(&device);
+        let runtime = EagerRuntime::new();
+        // Don't start streaming here — it conflicts with the graph-based path.
+        // Streaming is started lazily on the first eager dispatch call.
         EagerFfiState {
             runtime: Mutex::new(runtime),
             device,
@@ -184,10 +185,20 @@ pub extern "C" fn applegpu_eager_dtype(id: u64) -> i8 {
 
 // ── Binary ops ────────────────────────────────────────────────────
 
+/// Ensure the eager streaming CB is active. Called before any dispatch.
+fn ensure_eager_streaming() {
+    if !crate::compute::streaming_is_active() {
+        let state = get_eager_state();
+        let mut rt = state.runtime.lock().unwrap();
+        rt.begin_streaming(&state.device);
+    }
+}
+
 macro_rules! eager_binary {
     ($fn_name:ident, $kernel:expr) => {
         #[no_mangle]
         pub extern "C" fn $fn_name(a_id: u64, b_id: u64, out_id: *mut u64) -> *mut u8 {
+            ensure_eager_streaming();
             let state = get_eager_state();
             let mut rt = state.runtime.lock().unwrap();
             match rt.binary_op(&state.device, $kernel, a_id, b_id) {
