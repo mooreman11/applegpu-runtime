@@ -48,3 +48,15 @@ fn test_eager_pool_recycles_buffers() {
     assert!(stats_after_reuse.hits > stats_after_free.hits);
     rt.free(id2);
 }
+
+#[test]
+fn test_eager_streaming_lifecycle() {
+    let device = Device::new().unwrap();
+    let mut rt = EagerRuntime::new();
+    rt.begin_streaming(&device);
+    assert!(rt.is_streaming());
+    rt.flush_and_wait();
+    assert!(rt.is_streaming()); // still active after flush
+    rt.end_streaming();
+    assert!(!rt.is_streaming());
+}

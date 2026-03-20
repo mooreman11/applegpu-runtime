@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::buffer::Buffer;
-use crate::compute::KernelRegistry;
+use crate::compute::{self, ComputePipeline, KernelRegistry};
 use crate::device::Device;
 use crate::error::{GpuError, Result};
 use crate::pool::BufferPool;
@@ -177,5 +177,47 @@ impl EagerRuntime {
     /// Pool statistics (hits, misses, pooled bytes, bucket count).
     pub fn pool_stats(&self) -> crate::pool::PoolStats {
         self.pool.stats()
+    }
+
+    // ── Streaming command buffer management ──────────────────────────
+
+    /// Begin a streaming command buffer session. No-op if already active.
+    pub fn begin_streaming(&mut self, device: &Device) {
+        if !compute::streaming_is_active() {
+            let queue = compute::get_shared_queue(device);
+            compute::begin_streaming_batch(queue);
+        }
+    }
+
+    /// Flush the current command buffer (commit + wait), then reopen a new one.
+    pub fn flush_and_wait(&self) {
+        if compute::streaming_is_active() {
+            compute::flush_streaming_batch();
+        }
+    }
+
+    /// End the streaming session (commit final CB + wait + clear state).
+    pub fn end_streaming(&self) {
+        if compute::streaming_is_active() {
+            compute::end_streaming_batch();
+        }
+    }
+
+    /// True if a streaming command buffer session is active.
+    pub fn is_streaming(&self) -> bool {
+        compute::streaming_is_active()
+    }
+
+    // ── Kernel pipeline resolution ───────────────────────────────────
+
+    /// Resolve a kernel by base name + dtype, compile/cache the pipeline.
+    pub(crate) fn get_pipeline(
+        &self,
+        device: &Device,
+        base_name: &str,
+        dtype: DType,
+    ) -> Result<Arc<ComputePipeline>> {
+        let (source, func_name) = compute::KernelRegistry::resolve_kernel(base_name, dtype);
+        self.registry.get_or_create(device, &source, &func_name)
     }
 }

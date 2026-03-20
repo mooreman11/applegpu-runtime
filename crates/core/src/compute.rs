@@ -2556,7 +2556,7 @@ fn streaming_flush_interval() -> u32 {
         std::env::var("APPLEGPU_STREAMING_FLUSH_INTERVAL")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(512)
+            .unwrap_or(65536) // Raised from 512 for eager dispatch
     });
     *INTERVAL
 }
