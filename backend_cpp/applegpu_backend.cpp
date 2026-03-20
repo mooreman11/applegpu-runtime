@@ -523,7 +523,11 @@ void applegpu_cpu_fallback(
     const c10::OperatorHandle& op,
     torch::jit::Stack* stack
 ) {
-    // Flush streaming batch before reading any tensor data
+    // Log fallback ops when APPLEGPU_LOG_FALLBACK=1
+    static bool log_fallback = std::getenv("APPLEGPU_LOG_FALLBACK") != nullptr;
+    if (log_fallback) {
+        std::cerr << "[fallback] " << op.schema().name() << std::endl;
+    }
     applegpu_ffi_synchronize();
     at::native::cpu_fallback(op, stack);
 }
@@ -641,6 +645,23 @@ at::Tensor applegpu_mse_loss_backward(const at::Tensor& grad_output,
     return at::mse_loss_backward(g, s, t, reduction).to(self.device());
 }
 
+// sum.dim_IntList: reduce along specified dimensions.
+// Used by autograd for bias gradient accumulation.
+at::Tensor applegpu_sum_dim(const at::Tensor& self,
+                             at::OptionalIntArrayRef dim,
+                             bool keepdim,
+                             std::optional<at::ScalarType> dtype) {
+    eval_applegpu_tensor_if_needed(self);
+    applegpu_ffi_synchronize();
+    // CPU view of shared memory — no copy needed
+    auto cpu_view = at::from_blob(self.data_ptr(), self.sizes(), self.strides(),
+        at::TensorOptions().dtype(self.dtype()).device(at::kCPU));
+    auto result = dim.has_value()
+        ? cpu_view.sum(dim.value(), keepdim, dtype)
+        : cpu_view.sum(dtype);
+    return result.to(self.device());
+}
+
 // ── Registration ─────────────────────────────────────────────────
 
 TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
@@ -669,6 +690,8 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("as_strided", applegpu_as_strided);
     m.impl("mse_loss", applegpu_mse_loss);
     m.impl("mse_loss_backward", applegpu_mse_loss_backward);
+    // sum.dim_IntList: handled by CPU fallback (eval cost is the same either way;
+    // the fallback batches the copy more efficiently than from_blob + eval).
 }
 
 TORCH_LIBRARY_IMPL(_, PrivateUse1, m) {
