@@ -205,14 +205,15 @@ _Design spec: `docs/superpowers/specs/2026-03-20-eager-metal-dispatch-design.md`
 - [x] D1: EagerRuntime in Rust — stride-aware tensor registry with Arc<Buffer> views, binary/unary/matmul dispatch, make_contiguous, inplace ops, 14 integration tests
 - [x] D2: Full C++ backend switchover — all ops use eager FFI, 22 Rust + 16 Python tests pass
 - [x] D3: GPU-native threshold_backward + mean_all — no mid-pipeline flush_and_wait, 24 Rust tests
-- [ ] D4: Native eager sum.dim + benchmarks — eliminate last CPU fallback (bias grad), target GPU > CPU at h>=512
+- [x] D4: Strided N-D sum kernel + eliminated hidden flushes (copy_, mean_all chain, binary_op strides). Zero CPU fallback. Forward/loss/step all sub-0.1ms.
 
-### PRIORITY 2: torch.compile Backend
-_Repurpose the graph engine (lazy.rs, fusion.rs) as a torch.compile backend. Graph capture → fusion optimization → batched Metal replay. Correct use of a graph engine — optimizing known-static graphs, not recording eager ops._
-- [ ] Register as PyTorch compile backend
-- [ ] Graph capture from torch.compile()
-- [ ] Fusion optimization (matmul+add+gelu → single kernel)
-- [ ] Batched Metal replay
+### PRIORITY 2: Custom FX Interpreter for torch.compile
+_The remaining bottleneck is PyTorch's C++ dispatcher overhead (7.5µs/op × 60 backward ops = 4.4ms). torch.compile with passthrough doesn't help — ops still dispatch through the same C++ machinery. The fix: a custom FX graph interpreter that calls our Rust eager FFI directly via ctypes, bypassing PyTorch's Dispatcher entirely._
+- [ ] Register `applegpu` as torch.compile backend with aot_autograd
+- [ ] Custom FX interpreter: walk graph nodes, map to eager FFI calls
+- [ ] Op mapping: aten.mm → applegpu_eager_matmul, aten.add → applegpu_eager_add, etc.
+- [ ] Benchmark: target GPU > CPU at h>=512 (eliminates 4ms autograd overhead)
+- [ ] Future: kernel fusion (matmul+add+relu → single Metal kernel)
 
 ### PRIORITY 3: Stable Diffusion / `group_norm`
 - [ ] `group_norm` kernel — single new Metal kernel

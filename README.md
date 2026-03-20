@@ -101,7 +101,7 @@ loss.backward()
 optimizer.step()
 ```
 
-17 native GPU ops with CPU fallback for unregistered ops. MLP training end-to-end.
+Eager Metal dispatch — ops encode directly into streaming Metal command buffer. Zero CPU fallback for MLP training. Forward/loss/optimizer all sub-0.1ms.
 
 ## GPT-2 Text Generation
 
@@ -267,7 +267,7 @@ No TCP bridge, no port forwarding, no special networking required.
 
 ### Test Coverage
 
-~760 tests across all layers (392 Rust + 18 Swift + ~340 Python + 15 C++ backend)
+~780 tests across all layers (418 Rust + 18 Swift + ~340 Python + 16 C++ backend)
 
 ## Examples
 
