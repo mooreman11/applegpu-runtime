@@ -239,55 +239,49 @@ _Blocked by apple/containerization framework socket staging bug (errno 20 ENOTDI
 
 ## Further Backlog
 
-### Remaining CPU Fallbacks (former P2)
-_Most will be solved by eager dispatch or are cold-path only. Kept here for tracking._
-- [ ] `fill`/`zeros`/`ones` Metal kernels — eliminates CPU fallback in model init
-- [ ] `empty_like` — tensor creation on GPU
-- [ ] `bernoulli_` / dropout — GPU RNG or bypass
-- [ ] `div_.Scalar` — in-place scalar division
+### Remaining CPU Fallbacks
+_MLP training has zero fallback. These are for broader model support._
+- [ ] `fill`/`zeros`/`ones` GPU kernels — current impl uses CPU via shared memory, GPU kernel would avoid sync
+- [ ] `bernoulli_` / dropout — GPU RNG (Philox counter-based PRNG)
 - [ ] `_safe_softmax` — PyTorch 2.10 variant
-- [ ] Audit: run full model suite, list all remaining CPU fallbacks
+- [ ] `div_.Scalar` — in-place scalar division (easy: scalar_mul with 1/scalar)
+- [ ] Audit: run GPT-2/Whisper on PrivateUse1, list all remaining CPU fallbacks
 
-### GPU Op Gaps (GitHub issues)
-- [x] Forward max_pool2d with GPU-side indices output (#16) — PR #25
-- [x] Conv2d grad_weight on GPU (#17) — PR #26
-- [x] Exact GELU mode — `approximate="none"` for forward + backward (#18) — PR #25
-- [x] Grouped convolution (groups > 1) for conv1d/conv2d (#19) — PR #26
-- [x] GPU→GPU blit copy — eliminate CPU roundtrip in copy_ (#20) — eager blit encoder, not graph op
-- [x] GPU index/gather and index_put/scatter kernels (#21) — PR #26
-- [x] GPU linalg_vector_norm kernel for gradient clipping (#22) — L1/L2/L-inf all on GPU
-- [x] GPU amax reduction kernel for L-inf vector norm (#23)
-- [x] mse_loss + mse_loss_backward — GPU-composed from sub/mul/mean
-- [x] select_backward — GPU scatter via slice/concat
+### GPU Op Gaps
 - [ ] GPU linspace kernel — `start + id * step` per thread (cold path, low priority)
-- [ ] GPU RNG kernel — Philox counter-based PRNG for normal_/bernoulli_ (cold path, low priority)
 - [ ] GPU unique kernel — parallel sort + stream compaction (low priority)
+- [ ] `isinf`/`isnan` — float → Bool predicates for numerical debugging
+- [ ] `where`/`masked_fill` Bool condition enforcement (migration needed)
 
 ### Performance Optimization
-- [ ] Async eval — `gpu.eval_async(tensor)` returns GpuFuture
-- [ ] Fine-grained locking — split `Mutex<LazyRuntime>` per-component
-- [ ] MTLSharedEvent for concurrent queue sync (lazy.rs TODO)
+- [ ] Fine-grained locking — split `Mutex<EagerRuntime>` per-component (tensors vs pool vs registry)
+- [ ] Encoder caching — keep MTLComputeCommandEncoder open across same-pipeline dispatches
+- [ ] Double-buffered command buffers — overlap GPU execution with CPU encoding
+- [ ] MTLSharedEvent for concurrent queue sync — useful for multi-queue eager dispatch
 - [ ] Fused LSTM/GRU kernel — single Metal kernel per timestep for all gates
 
-### Multi-Dtype Remaining
+### Multi-Dtype
 - [ ] Reduction output dtype overrides — sum(Int32)→Int32, mean(Int32)→Float32, sum(Bool)→Int32 count
 - [ ] Quantized matmul — Int8 weights x Float16 activations with scale factors
-- [ ] `isinf`/`isnan` — float → Bool predicates for numerical debugging
-- [ ] Fused comparison chains — `(a > 0) & (a < 10)` as single kernel
-- [ ] `where`/`masked_fill` Bool condition enforcement (migration needed)
-- [ ] `is_elementwise()` expansion — mark additional ops as fusable (e.g. Pow, Clamp)
 - [ ] Backward ops multi-dtype — extend backward kernels to BFloat16
 - [ ] Float64 compute kernels — deferred until Apple hardware adds MSL double support
 
-### Models + Polish
+### Models
+- [ ] GPT-2 inference on PrivateUse1 — requires view fixes for multi-head attention
+- [ ] Whisper on PrivateUse1 — requires conv1d, layer_norm, embedding in eager path
+- [ ] Stable Diffusion — group_norm kernel + model wrapper
 - [ ] Fine-tuned model export — save trained weights
-- [ ] Binary signing/notarization — Apple Developer ID
+
+### Training
+- [ ] Int64 compute kernels — batch_norm's num_batches_tracked falls back to CPU
+- [ ] Gradient accumulation — for large batch training across multiple micro-batches
 
 ### Infrastructure
 - [ ] Unix socket relay / vsock — complete Containerization framework integration (macOS 26 SDK)
 - [ ] AVF VM integration — VZVirtualMachine lifecycle, virtio-vsock transport
 - [ ] Dynamic container lifecycle — work stealing, auto-scaling based on queue pressure
 - [ ] Multi-node / distributed graph — network transport layer, graph partitioning
+- [ ] Binary signing/notarization — Apple Developer ID
 
 ### Concurrency
 - [ ] Read timeout / keepalive — `SO_RCVTIMEO` on GPU service connections
@@ -296,13 +290,10 @@ _Most will be solved by eager dispatch or are cold-path only. Kept here for trac
 - [ ] Metrics/observability — per-container GPU utilization, queue depth, latency histograms
 - [ ] Multi-GPU support _(very low priority)_ — device pool, per-device buffer pools, cross-device transfers
 
-### Training
-- [ ] Int64 compute kernels — batch_norm's num_batches_tracked falls back to CPU
-- [ ] Gradient accumulation — for large batch training across multiple micro-batches
-
-### Memory Pool Improvements
+### Memory Pool
 - [ ] Size-aware watermark eviction — evict largest pooled buffers first
 - [ ] Jemalloc-style size classes — finer-grained bucketing to reduce fragmentation
+- [ ] Per-thread pool shards — reduce Mutex contention
 
 ### Batch Inference
 - [ ] Batch inference pipeline — process multiple sequences simultaneously
