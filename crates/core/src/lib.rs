@@ -1,5 +1,6 @@
 pub mod backend;
 pub mod backend_ffi;
+pub mod compiled_graph;
 pub mod buffer;
 pub mod compute;
 pub mod device;

@@ -55,6 +55,7 @@ def load_cpp_backend():
     mod._exchange_device = lambda d: 0
     mod._maybe_exchange_device = lambda d: 0
     sys.modules['torch.applegpu'] = mod
+    torch.applegpu = mod
 
     dylib_path = _find_backend_dylib()
     torch.ops.load_library(dylib_path)

@@ -16,9 +16,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - C++ shim (`backend_cpp/applegpu_backend.cpp`) registers ops at PrivateUse1 dispatch key
 - **Eager Metal Dispatch**: ops encode directly into streaming Metal command buffer via `EagerRuntime` (Rust). No graph engine in hot path.
 - MLP training end-to-end, **zero CPU fallback**. Forward/loss/step all sub-0.1ms.
-- `torch.compile` supported via aot_autograd backend (`python/applegpu_runtime/compile_backend.py`)
-- 16 Python + 26 Rust eager integration tests passing
-- **Bottleneck**: PyTorch C++ Dispatcher overhead (7.5µs/op) dominates backward pass. Next: custom FX interpreter to bypass dispatcher.
+- `torch.compile` supported via custom FX interpreter (`python/applegpu_runtime/compile_backend.py`) — walks FX graph nodes, calls Rust eager FFI directly via ctypes, bypasses PyTorch's C++ Dispatcher
+- 26 Python + 340 Rust tests passing
+- **Bottleneck**: PyTorch C++ Dispatcher overhead (7.5µs/op) dominates backward pass. Custom FX interpreter bypasses dispatcher for forward + backward (P3 in progress).
 
 ### 2. PyO3 Path (original, `__torch_dispatch__`)
 - Entry: `import applegpu_runtime as gpu` → `gpu.init_backend()` → `torch_backend.py`
@@ -28,13 +28,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Architecture
 
-Two execution paths share the same Swift/Metal bridge:
+Three execution paths share the same Swift/Metal bridge:
 
 ```
-PrivateUse1 C++ Path (eager):
+PrivateUse1 C++ Path (eager, per-op dispatch):
   C++ op → Rust FFI → Metal encode (streaming CB) → GPU
 
-PyO3 Path (lazy, for torch.compile):
+FX Interpreter Path (torch.compile, bypasses C++ Dispatcher):
+  Python FX walk → ctypes → Rust eager FFI → Metal encode (streaming CB) → GPU
+
+PyO3 Path (lazy, future torch.compile graph optimization):
   Python → PyO3 → Rust graph → eval → Metal → GPU
 ```
 
@@ -61,11 +64,42 @@ Eager Metal Dispatch (D1-D4) complete. Ops encode directly into a streaming Meta
 ### P2: View Tensor Identity — RESOLVED
 The eager runtime (`crates/core/src/eager.rs`) uses stride-aware `EagerTensor` with `Arc<Buffer>` sharing. Views carry their own shape/strides/offset referencing a shared Metal buffer. `ensure_op_ready()` eliminated. `binary_op` dispatches with actual tensor strides for correct view handling.
 
-### P3: PyTorch C++ Dispatcher Overhead
-The remaining bottleneck. PyTorch's `Dispatcher::call()` adds ~7.5µs per op for PrivateUse1 (vs 0.6µs for CPU). With ~60 ops in backward, this is ~4.4ms of overhead that dominates training at all tensor sizes. GPU compute itself is fast (2.3ms at h=1024 measured via sync delta). **torch.compile passthrough gives 8% speedup** — the real fix needs a custom FX interpreter that calls Rust eager FFI directly, bypassing the dispatcher. Scaffold at `python/applegpu_runtime/compile_backend.py`.
+### P3: Per-Op Dispatch Overhead — APPROACH PIVOT NEEDED
+**Original problem**: PyTorch C++ Dispatcher adds ~7.5µs per op for PrivateUse1.
 
-### P4: Kernel Fusion (Future)
-The graph engine (`lazy.rs`, `fusion.rs`) can be repurposed to fuse elementwise chains (matmul+add+relu → single Metal kernel) for the torch.compile backend. This is the correct use of a graph engine — optimizing known-static computation graphs.
+**Python FX interpreter** (`compile_backend.py`) — functional but slower than C++ path:
+- Bypasses C++ Dispatcher via ctypes, but Python overhead (~50µs/op) exceeds the dispatcher overhead it replaces
+- Benchmark: 2-3x slower than C++ dispatcher path (h=256: 2.16ms vs 0.50ms)
+- Root cause: Python per-node overhead (ctypes marshaling, dict lookups, isinstance, _query_shape FFI per op)
+- Forward + backward + optimizer all working (26 tests, 0 skips)
+
+**Implemented**: Two execution modes for torch.compile:
+1. Python FX interpreter (ctypes per-op): functional, 3-5x slower than C++ dispatcher
+2. Rust compiled graph executor (single FFI call): functional, 2-4x slower than C++ dispatcher
+Both bottlenecked by output wrapping (torch.empty + memcpy) and flush_and_wait overhead, NOT by per-op dispatch.
+
+**The real bottleneck is NOT the C++ Dispatcher** — at 7.5µs/op × 30 ops = 225µs, it's only ~10% of training time. The earlier 4.4ms backward was measured with Python `__torch_dispatch__`, not C++ PrivateUse1. The C++ path is already fast.
+
+**For further speedup**: need kernel fusion (fuse elementwise chains via `lazy.rs` + `fusion.rs`) which reduces op COUNT, not per-op overhead. This is P4 work.
+
+### P4: Competitive Performance with MPS — RESEARCH NEEDED
+MPS is 2.4-3.1x faster than CPU at h≥1024 via MPSGraph op fusion. Our per-op Metal dispatch is slower than CPU at all sizes.
+
+**What we tried:**
+- Python FX interpreter (ctypes per-op): 3-5x slower than C++ path (Python overhead)
+- Rust compiled graph executor (single FFI): 2-4x slower (output wrapping overhead)
+- Fusion integration: no fusible chains in MLP graphs (addmm is not elementwise)
+
+**Why fusion doesn't help for MLP:**
+- Forward: `t → addmm → relu → t → addmm` — only `add+relu` is fusible (saves 1 kernel, ~2% improvement)
+- The existing fusion engine (`fusion.rs`) only fuses consecutive elementwise ops with ref_count=1
+- MPS advantage comes from MPSGraph which fuses ENTIRE subgraphs including matmul, not just elementwise chains
+
+**What would actually help:**
+1. **Reduce output wrapping cost**: zero-copy tensor handoff (avoid torch.empty + memcpy per output)
+2. **Reduce flush count**: the C++ ops between compiled graphs (mse_loss, optimizer) force flushes
+3. **Full-graph compilation at C++ level**: integrate graph capture into the C++ backend itself (no Python boundary)
+4. **Use Metal Performance Shaders**: leverage MPSMatrixMultiplication instead of custom matmul kernels
 
 ## Build & Test Commands
 
@@ -98,7 +132,7 @@ uv run pytest python/tests/test_file.py::test_name -v
 make check
 ```
 
-**C++ backend build note**: Requires `ARCHFLAGS="-arch arm64"` on Apple Silicon (universal builds break DeviceGuard registration). The `backend_cpp/setup.py` sets this automatically.
+**C++ backend build note**: Requires `ARCHFLAGS="-arch arm64"` on Apple Silicon (universal builds break DeviceGuard registration). The `backend_cpp/setup.py` sets this automatically. Uses `-Wl,-force_load` to export all Rust FFI symbols (needed for ctypes access from `compile_backend.py`).
 
 ## Key Files
 
@@ -109,6 +143,7 @@ make check
 - `crates/core/src/tensor.rs` — DType, Shape, TensorMeta, Tensor (buffer-backed)
 - `crates/core/src/ffi.rs` — Rust-Swift FFI boundary (extern "C" declarations + safe wrappers)
 - `crates/core/src/backend_ffi.rs` — Rust-C++ FFI bridge (17 extern "C" functions for PrivateUse1)
+- `crates/core/src/eager_ffi.rs` — Eager dispatch FFI bridge (alloc, free, binary/unary/matmul ops, views, find_by_data_ptr reverse lookup)
 - `crates/core/src/lazy.rs` — LazyRuntime: graph recording, eval, pre-allocated buffers, deferred-free (future: torch.compile backend)
 - `crates/core/src/fusion.rs` — Kernel fusion (matmul+add+gelu → single Metal kernel) (future: torch.compile backend)
 - `crates/core/src/device.rs` — RAII Device wrapper with Drop-based cleanup
@@ -132,7 +167,9 @@ make check
 ### Python
 - `crates/python/src/lib.rs` — PyO3 module definition (Python-facing API surface)
 - `python/applegpu_runtime/__init__.py` — Python package entry point (loads PyO3 native extension)
-- `python/tests/test_cpp_backend.py` — PrivateUse1 integration tests (15 tests)
+- `python/applegpu_runtime/compile_backend.py` — Custom FX interpreter for torch.compile (bypasses C++ Dispatcher via ctypes)
+- `python/tests/test_cpp_backend.py` — PrivateUse1 integration tests (16 tests)
+- `python/tests/test_compile_backend.py` — torch.compile FX interpreter tests (10 tests, backward/training run in subprocesses)
 
 ### Design Specs
 - `docs/superpowers/specs/2026-03-20-eager-metal-dispatch-design.md` — Eager Metal Dispatch architecture spec
@@ -149,13 +186,23 @@ This library must be **hyperoptimized**. Every layer is chosen for maximum perfo
 
 Always prefer the fastest path. Profile before and after changes to performance-critical code.
 
-**Current reality** (after Eager Metal Dispatch D1-D4):
-- Forward: 0.037ms, Loss: 0.026ms, Optimizer step: 0.052ms — all sub-0.1ms
-- Zero CPU fallback for MLP training
-- Backward: 4.4ms (97% of training time) — dominated by PyTorch C++ Dispatcher overhead (7.5µs/op × 60 ops)
-- GPU compute is only 2.3ms (at h=1024) — the Metal kernels ARE fast
-- **Bottleneck is NOT our code** — it's PyTorch's `Dispatcher::call()` for PrivateUse1 devices
-- **Next step**: Custom FX interpreter for torch.compile that bypasses the dispatcher entirely
+**Current reality** (MLP training benchmark, `python/tests/bench_comparison.py`):
+```
+TRAINING (ms/step)       h=64      h=256     h=1024     h=4096
+----------------------------------------------------------------------
+                 CPU     0.078     0.113     1.496    28.353
+                 MPS     0.243     0.242     0.615     9.092
+            applegpu     0.478     0.707     3.244    36.139
+
+SPEEDUP vs CPU           h=64      h=256     h=1024     h=4096
+----------------------------------------------------------------------
+                 MPS      0.32x     0.47x     2.43x     3.12x
+            applegpu     0.16x     0.16x     0.46x     0.78x
+```
+- **MPS wins at h≥1024** (2.4-3.1x vs CPU) — Apple's optimized Metal kernels + MPSGraph fusion
+- **applegpu is slower than CPU for all sizes** — per-op GPU launch overhead + flush_and_wait dominates
+- **Key gap vs MPS**: MPS uses MPSGraph which fuses ops and batches GPU work; we dispatch individual Metal kernels per op
+- **Next step**: Kernel fusion (P4) — fuse elementwise chains into single Metal kernels to reduce op count and GPU launch overhead. This is the only path to competitive performance with MPS.
 
 ## Development Workflow
 

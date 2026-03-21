@@ -125,7 +125,7 @@ std::vector<int64_t> query_output_shape(uint64_t tid) {
     uint64_t dims[8];
     uint32_t ndim = 0;
     int32_t rc = applegpu_eager_shape(tid, dims, &ndim);
-    TORCH_CHECK(rc == 0, "applegpu: failed to query output shape");
+    TORCH_CHECK(rc == 0, "applegpu: failed to query output shape for tid=", tid);
     std::vector<int64_t> sizes(ndim);
     for (uint32_t i = 0; i < ndim; i++) sizes[i] = static_cast<int64_t>(dims[i]);
     return sizes;
@@ -187,8 +187,8 @@ at::Tensor applegpu_empty_strided(
     uint64_t tensor_id = 0;
     void* ptr = nullptr;
 
-    if (size.empty() || std::any_of(size.begin(), size.end(), [](int64_t s) { return s == 0; })) {
-        // Zero-element tensor: use raw allocator path
+    if (std::any_of(size.begin(), size.end(), [](int64_t s) { return s == 0; })) {
+        // Truly zero-element tensor (has a 0-dim): use raw allocator path
         int64_t nbytes = at::detail::computeStorageNbytes(size, stride, at::elementSize(dtype));
         auto storage = c10::Storage(
             c10::Storage::use_byte_size_t(),
@@ -203,6 +203,12 @@ at::Tensor applegpu_empty_strided(
         );
         tensor.unsafeGetTensorImpl()->set_sizes_and_strides(size, stride);
         return tensor;
+    }
+
+    // Scalar tensors (size.empty(), numel=1): allocate as [1] with correct dtype
+    if (size.empty()) {
+        uint64_t dim0 = 1;
+        dims = std::vector<uint64_t>{1};
     }
 
     ptr = applegpu_eager_alloc(dims.data(), dims.size(), dtype_wire, &tensor_id);
@@ -359,9 +365,24 @@ const at::Tensor& applegpu_resize_(const at::Tensor& self, c10::IntArrayRef size
     auto strides = c10::contiguous_strides(size);
     auto nbytes = at::detail::computeStorageNbytes(size, strides, self.dtype().itemsize());
     if (nbytes > (int64_t)self.storage().nbytes()) {
+        // Allocate via eager runtime with correct dims and dtype (not raw byte allocator).
+        // This ensures the eager tensor has the right dtype for subsequent ops.
+        std::vector<uint64_t> dims(size.begin(), size.end());
+        int8_t dtype_wire = scalar_type_to_wire(self.scalar_type());
+        uint64_t tensor_id = 0;
+        void* ptr = applegpu_eager_alloc(dims.data(), dims.size(), dtype_wire, &tensor_id);
+        TORCH_CHECK(ptr != nullptr, "applegpu resize_: alloc failed: ",
+                    applegpu_eager_last_error() ? applegpu_eager_last_error() : "unknown");
+        auto* ctx = new TensorContext{tensor_id};
+        auto deleter = [](void* ctx_ptr) {
+            auto* tc = static_cast<TensorContext*>(ctx_ptr);
+            applegpu_eager_free(tc->tensor_id);
+            delete tc;
+        };
+        c10::DataPtr dptr{ptr, ctx, deleter, c10::Device(c10::DeviceType::PrivateUse1, 0)};
         auto new_storage = c10::Storage(
             c10::Storage::use_byte_size_t(), nbytes,
-            global_allocator.allocate(nbytes), &global_allocator);
+            std::move(dptr), &global_allocator);
         impl->set_storage_and_dtype(std::move(new_storage), self.dtype());
     }
     impl->set_sizes_and_strides(size, strides);
@@ -442,9 +463,15 @@ at::Tensor applegpu_mm(const at::Tensor& self, const at::Tensor& mat2) {
     auto self_c = self.is_contiguous() ? self : self.contiguous();
     auto mat2_c = mat2.is_contiguous() ? mat2 : mat2.contiguous();
     EphemeralViewGuard evg;
+    uint64_t a_id = resolve_tensor_id(self_c);
+    uint64_t b_id = resolve_tensor_id(mat2_c);
     uint64_t out_id = 0;
-    void* ptr = applegpu_eager_matmul(
-        resolve_tensor_id(self_c), resolve_tensor_id(mat2_c), &out_id);
+    void* ptr = applegpu_eager_matmul(a_id, b_id, &out_id);
+    if (ptr == nullptr) {
+        const char* err = applegpu_eager_last_error();
+        TORCH_CHECK(false, "applegpu mm: matmul failed for a_id=", a_id,
+                     " b_id=", b_id, " err=", err ? err : "none");
+    }
     return wrap_eager_output(ptr, out_id, query_output_shape(out_id), self.scalar_type());
 }
 

@@ -49,8 +49,9 @@ setup(
             name="applegpu_backend",
             sources=["applegpu_backend.cpp"],
             include_dirs=["."],
-            extra_objects=[rust_lib],
+            extra_objects=[],
             extra_link_args=[
+                f"-Wl,-force_load,{rust_lib}",
                 f"-L{swift_lib_path}",
                 f"-L{sdk_path}/usr/lib/swift",
                 "-lswiftCore",

@@ -81,6 +81,9 @@ int32_t applegpu_eager_add_scaled_inplace(uint64_t self_id, uint64_t other_id, f
 void applegpu_eager_flush_and_wait(void);
 void applegpu_eager_synchronize(void);
 
+/* Reverse lookup: find tensor_id by buffer data pointer. Returns 0 if not found. */
+uint64_t applegpu_eager_find_by_data_ptr(const uint8_t* ptr);
+
 #ifdef __cplusplus
 }
 #endif

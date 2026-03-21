@@ -226,6 +226,7 @@ macro_rules! eager_unary {
     ($fn_name:ident, $kernel:expr) => {
         #[no_mangle]
         pub extern "C" fn $fn_name(input_id: u64, out_id: *mut u64) -> *mut u8 {
+            ensure_eager_streaming();
             let state = get_eager_state();
             let mut rt = state.runtime.lock().unwrap();
             match rt.unary_op(&state.device, $kernel, input_id) {
@@ -255,6 +256,7 @@ pub extern "C" fn applegpu_eager_matmul(
     b_id: u64,
     out_id: *mut u64,
 ) -> *mut u8 {
+    ensure_eager_streaming();
     let state = get_eager_state();
     let mut rt = state.runtime.lock().unwrap();
     match rt.matmul(&state.device, a_id, b_id) {
@@ -434,6 +436,31 @@ pub extern "C" fn applegpu_eager_add_scaled_inplace(
     }
 }
 
+// ── Lookup ────────────────────────────────────────────────────────
+
+/// Find a tensor_id by its buffer's raw data pointer.
+/// Used by the Python FX interpreter to resolve PyTorch tensor → eager tensor_id.
+/// Returns the tensor_id, or 0 if not found.
+/// Prefers base tensors (offset=0) over views for the same buffer.
+#[no_mangle]
+pub extern "C" fn applegpu_eager_find_by_data_ptr(ptr: *const u8) -> u64 {
+    let state = get_eager_state();
+    let rt = state.runtime.lock().unwrap();
+    // First pass: exact match on buffer.contents() with offset=0 (base tensors)
+    for (&id, tensor) in rt.tensors_iter() {
+        if tensor.offset == 0 && tensor.buffer.contents() as *const u8 == ptr {
+            return id;
+        }
+    }
+    // Second pass: any tensor whose buffer.contents() matches (views)
+    for (&id, tensor) in rt.tensors_iter() {
+        if tensor.buffer.contents() as *const u8 == ptr {
+            return id;
+        }
+    }
+    0
+}
+
 // ── Sync ──────────────────────────────────────────────────────────
 
 /// Flush the streaming command buffer (commit + wait for GPU completion),
@@ -450,4 +477,54 @@ pub extern "C" fn applegpu_eager_flush_and_wait() {
 #[no_mangle]
 pub extern "C" fn applegpu_eager_synchronize() {
     applegpu_eager_flush_and_wait();
+}
+
+// ── Compiled graph execution ─────────────────────────────────────
+
+/// Execute a compiled FX graph in a single FFI call.
+/// All ops are dispatched on the EagerRuntime's streaming Metal CB.
+///
+/// Arguments:
+///   ops_data/ops_len: serialized op bytecode (wire format)
+///   input_tids/n_inputs: tensor IDs for graph placeholder inputs
+///   output_indices/n_outputs: indices into node array for outputs
+///   out_tids: output array for result tensor IDs (must have n_outputs capacity)
+///   out_ptrs: output array for result data pointers (must have n_outputs capacity)
+///
+/// Returns number of outputs written, or -1 on error.
+#[no_mangle]
+pub extern "C" fn applegpu_eager_execute_graph(
+    ops_data: *const u8,
+    ops_len: u32,
+    input_tids: *const u64,
+    n_inputs: u32,
+    output_indices: *const u16,
+    n_outputs: u32,
+    out_tids: *mut u64,
+    out_ptrs: *mut *mut u8,
+) -> i32 {
+    let state = get_eager_state();
+
+    // Flush any pending C++ dispatcher work before our graph
+    {
+        let rt = state.runtime.lock().unwrap();
+        rt.flush_and_wait();
+    }
+
+    let ops = unsafe { std::slice::from_raw_parts(ops_data, ops_len as usize) };
+    let inputs = unsafe { std::slice::from_raw_parts(input_tids, n_inputs as usize) };
+    let outputs = unsafe { std::slice::from_raw_parts(output_indices, n_outputs as usize) };
+    let tids_out = unsafe { std::slice::from_raw_parts_mut(out_tids, n_outputs as usize) };
+    let ptrs_out = unsafe { std::slice::from_raw_parts_mut(out_ptrs, n_outputs as usize) };
+
+    let mut rt = state.runtime.lock().unwrap();
+    match crate::compiled_graph::execute(
+        &mut rt, &state.device, ops, inputs, outputs, tids_out, ptrs_out,
+    ) {
+        Ok(n) => n as i32,
+        Err(e) => {
+            set_error(format!("compiled graph failed: {}", e));
+            -1
+        }
+    }
 }
