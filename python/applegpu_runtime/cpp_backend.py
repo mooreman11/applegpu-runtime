@@ -30,6 +30,24 @@ def _find_backend_dylib():
 
 
 _loaded = False
+_sync_fn = None
+
+
+def _do_synchronize():
+    """Actually flush and wait for GPU completion."""
+    global _sync_fn
+    if _sync_fn is None:
+        import ctypes, glob, os
+        backend_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'backend_cpp')
+        so_files = glob.glob(os.path.join(backend_dir, 'applegpu_backend*.so'))
+        if so_files:
+            lib = ctypes.CDLL(so_files[0])
+            lib.applegpu_eager_flush_and_wait.argtypes = []
+            lib.applegpu_eager_flush_and_wait.restype = None
+            _sync_fn = lib.applegpu_eager_flush_and_wait
+        else:
+            _sync_fn = lambda: None
+    _sync_fn()
 
 
 def load_cpp_backend():
@@ -51,7 +69,7 @@ def load_cpp_backend():
     mod.is_available = lambda: True
     mod.current_device = lambda: 0
     mod.set_device = lambda d: None
-    mod.synchronize = lambda d=None: None
+    mod.synchronize = lambda d=None: _do_synchronize()
     mod._exchange_device = lambda d: 0
     mod._maybe_exchange_device = lambda d: 0
     sys.modules['torch.applegpu'] = mod

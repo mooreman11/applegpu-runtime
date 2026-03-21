@@ -31,7 +31,7 @@ def _setup_accelerator():
     mod.is_available = lambda: True
     mod.current_device = lambda: 0
     mod.device_count = lambda: 1
-    mod.synchronize = lambda: None
+    mod.synchronize = lambda: _get_lib().applegpu_eager_flush_and_wait()
     mod.Stream = type('Stream', (), {'__init__': lambda self, *a, **kw: None})
     sys.modules['torch.applegpu'] = mod
     torch.applegpu = mod
@@ -922,6 +922,7 @@ class CompiledGraphRunner:
     def __init__(self, gm, lib):
         self.gm = gm
         self.lib = lib
+        self._deferred_free = []  # tensor IDs to free from previous run
         result = _serialize_graph(gm)
         if result is None:
             # Can't serialize — fall back to Python FX interpreter
@@ -950,6 +951,12 @@ class CompiledGraphRunner:
 
     def _run_compiled(self, *args):
         lib = self.lib
+
+        # Free tensor IDs deferred from the previous run
+        if self._deferred_free:
+            for tid in self._deferred_free:
+                lib.applegpu_eager_free(tid)
+            self._deferred_free = []
 
         # Separate real outputs from None sentinels (0xFFFF)
         real_indices = [i for i in self._output_indices if i != 0xFFFF]
@@ -995,6 +1002,9 @@ class CompiledGraphRunner:
             dtype = torch.float32
             ref = TensorRef(tid, shape, dtype, ptr)
             real_results.append(_wrap_output(lib, ref))
+            # Defer-free the intermediate eager tensor (the wrapped PyTorch
+            # tensor has its own buffer from torch.empty + memcpy)
+            self._deferred_free.append(tid)
 
         # Reconstruct full output tuple with None at sentinel positions
         n_total = len(self._output_indices)

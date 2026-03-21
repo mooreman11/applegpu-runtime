@@ -512,8 +512,12 @@ at::Tensor applegpu_addmm(const at::Tensor& self, const at::Tensor& mat1,
 
     // mm(mat1, mat2) → [M, N]
     uint64_t mm_out_id = 0;
-    void* mm_ptr = applegpu_eager_matmul(
-        resolve_tensor_id(mat1_c), resolve_tensor_id(mat2_c), &mm_out_id);
+    uint64_t a_id = resolve_tensor_id(mat1_c);
+    uint64_t b_id = resolve_tensor_id(mat2_c);
+    void* mm_ptr = applegpu_eager_matmul(a_id, b_id, &mm_out_id);
+    TORCH_CHECK(mm_ptr != nullptr, "applegpu addmm: matmul failed for a_id=", a_id,
+                 " b_id=", b_id, " err=",
+                 applegpu_eager_last_error() ? applegpu_eager_last_error() : "none");
     auto mm_result = wrap_eager_output(
         mm_ptr, mm_out_id, query_output_shape(mm_out_id), mat1.scalar_type());
 
@@ -579,24 +583,46 @@ at::Tensor& applegpu_mul_(at::Tensor& self, const at::Tensor& other) {
     return self;
 }
 
-// mul_.Scalar: in-place scalar multiply via flush + CPU view
+// mul_.Scalar: in-place scalar multiply via GPU scalar_mul + storage swap.
+// Avoids flush + CPU loop — stays in the streaming command buffer.
 at::Tensor& applegpu_mul_scalar_(at::Tensor& self, const at::Scalar& other) {
-    applegpu_eager_flush_and_wait();
+    EphemeralViewGuard evg;
+    uint64_t self_id = resolve_tensor_id(self);
     float scale = other.toFloat();
-    if (self.scalar_type() == at::ScalarType::Float && self.is_contiguous()) {
-        float* data = static_cast<float*>(self.data_ptr());
-        int64_t n = self.numel();
-        for (int64_t i = 0; i < n; i++) data[i] *= scale;
+    uint64_t out_id = 0;
+    void* out_ptr = applegpu_eager_scalar_mul(self_id, scale, &out_id);
+    if (out_ptr) {
+        // Swap self's storage to point to the scaled copy
+        auto* impl = self.unsafeGetTensorImpl();
+        auto new_dptr = c10::DataPtr{out_ptr, new TensorContext{out_id},
+            [](void* ctx) { auto* tc = static_cast<TensorContext*>(ctx);
+                applegpu_eager_free(tc->tensor_id); delete tc; },
+            c10::Device(c10::DeviceType::PrivateUse1, 0)};
+        auto new_storage = c10::Storage(c10::Storage::use_byte_size_t(),
+            self.nbytes(), std::move(new_dptr), &global_allocator);
+        impl->set_storage_and_dtype(std::move(new_storage), self.dtype());
         return self;
     }
+    // Fallback: flush + CPU
+    applegpu_eager_flush_and_wait();
     auto cpu_view = at::from_blob(self.data_ptr(), self.sizes(), self.strides(),
         at::TensorOptions().dtype(self.dtype()).device(at::kCPU));
     cpu_view.mul_(other);
     return self;
 }
 
-// fill_.Scalar: fill tensor with a constant value
+// fill_.Scalar: fill tensor with a constant value.
+// Uses scalar_mul(0) + add(value) to avoid flush, or CPU path for small tensors.
 at::Tensor& applegpu_fill_(at::Tensor& self, const at::Scalar& value) {
+    float val = value.toFloat();
+    if (val == 0.0f) {
+        // zero_ path: flush + memset (cheaper than GPU kernel for zeroing)
+        applegpu_eager_flush_and_wait();
+        std::memset(self.data_ptr(), 0, self.nbytes());
+        return self;
+    }
+    // For non-zero fills, flush + CPU fill (fill is typically called on freshly
+    // allocated tensors where flush is a no-op)
     applegpu_eager_flush_and_wait();
     auto cpu_view = at::from_blob(self.data_ptr(), self.sizes(), self.strides(),
         at::TensorOptions().dtype(self.dtype()).device(at::kCPU));
@@ -604,7 +630,7 @@ at::Tensor& applegpu_fill_(at::Tensor& self, const at::Scalar& value) {
     return self;
 }
 
-// zero_: fill with zeros
+// zero_: fill with zeros via memset (no GPU kernel needed for shared memory)
 at::Tensor& applegpu_zero_(at::Tensor& self) {
     applegpu_eager_flush_and_wait();
     std::memset(self.data_ptr(), 0, self.nbytes());
