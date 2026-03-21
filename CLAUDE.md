@@ -190,19 +190,20 @@ Always prefer the fastest path. Profile before and after changes to performance-
 ```
 TRAINING (ms/step)       h=64      h=256     h=1024     h=4096
 ----------------------------------------------------------------------
-                 CPU     0.078     0.113     1.496    28.353
-                 MPS     0.243     0.242     0.615     9.092
-            applegpu     0.478     0.707     3.244    36.139
+                 CPU     0.075     0.149     1.285    25.888
+                 MPS     0.242     0.255     0.765     8.218
+            applegpu     0.646     0.651     1.693    16.328
 
 SPEEDUP vs CPU           h=64      h=256     h=1024     h=4096
 ----------------------------------------------------------------------
-                 MPS      0.32x     0.47x     2.43x     3.12x
-            applegpu     0.16x     0.16x     0.46x     0.78x
+                 MPS      0.31x     0.59x     1.68x     3.15x
+            applegpu     0.12x     0.23x     0.76x     1.59x
 ```
-- **MPS wins at h≥1024** (2.4-3.1x vs CPU) — Apple's optimized Metal kernels + MPSGraph fusion
-- **applegpu is slower than CPU for all sizes** — per-op GPU launch overhead + flush_and_wait dominates
-- **Key gap vs MPS**: MPS uses MPSGraph which fuses ops and batches GPU work; we dispatch individual Metal kernels per op
-- **Next step**: Kernel fusion (P4) — fuse elementwise chains into single Metal kernels to reduce op count and GPU launch overhead. This is the only path to competitive performance with MPS.
+- **applegpu beats CPU at h=4096** (1.59x) — MPSMatrixMultiplication for matmul + per-op Metal for elementwise
+- **MPS still 2x faster** at h=4096 (3.15x vs 1.59x) — MPSGraph fuses ENTIRE subgraphs; we dispatch ~20 individual Metal kernels per step
+- **Small sizes (h≤256)**: GPU launch overhead dominates — both MPS and applegpu are slower than CPU
+- **Key gap vs MPS**: MPS uses MPSGraph whole-graph fusion (3-5 dispatches); we encode ~20 compute encoders per step
+- **Next step**: Reduce kernel launch count — MPS transposed matmul (skip contiguity copies), fuse add+relu chains
 
 ## Development Workflow
 
