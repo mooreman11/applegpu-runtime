@@ -17,7 +17,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Eager Metal Dispatch**: ops encode directly into streaming Metal command buffer via `EagerRuntime` (Rust). No graph engine in hot path.
 - MLP training end-to-end, **zero CPU fallback**. Forward/loss/step all sub-0.1ms.
 - `torch.compile` supported via custom FX interpreter (`python/applegpu_runtime/compile_backend.py`) — walks FX graph nodes, calls Rust eager FFI directly via ctypes, bypasses PyTorch's C++ Dispatcher
-- 26 Python + 340 Rust tests passing
+- 26 Python + 418 Rust tests passing
 - **Bottleneck**: PyTorch C++ Dispatcher overhead (7.5µs/op) dominates backward pass. Custom FX interpreter bypasses dispatcher for forward + backward (P3 in progress).
 
 ### 2. PyO3 Path (original, `__torch_dispatch__`)
@@ -96,10 +96,10 @@ MPS is 2.4-3.1x faster than CPU at h≥1024 via MPSGraph op fusion. Our per-op M
 - MPS advantage comes from MPSGraph which fuses ENTIRE subgraphs including matmul, not just elementwise chains
 
 **What would actually help:**
-1. **Reduce output wrapping cost**: zero-copy tensor handoff (avoid torch.empty + memcpy per output)
-2. **Reduce flush count**: the C++ ops between compiled graphs (mse_loss, optimizer) force flushes
-3. **Full-graph compilation at C++ level**: integrate graph capture into the C++ backend itself (no Python boundary)
-4. **Use Metal Performance Shaders**: leverage MPSMatrixMultiplication instead of custom matmul kernels
+1. ~~**Use Metal Performance Shaders**~~ — DONE: MPSMatrixMultiplication integrated, 2.2x speedup at h=4096
+2. **MPS transposed matmul**: pass transpose flags to MPS instead of `scalar_mul(1.0)` contiguity copies (saves ~4 kernel launches per backward)
+3. **Reduce per-op launch overhead**: ~20 Metal compute encoder creations per step; MPS batches into ~5 via MPSGraph
+4. **Full-graph compilation at C++ level**: integrate graph capture into the C++ backend itself (no Python boundary)
 
 ## Build & Test Commands
 
