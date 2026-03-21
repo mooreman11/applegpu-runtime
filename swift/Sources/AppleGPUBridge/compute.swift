@@ -1,5 +1,6 @@
 import Foundation
 import Metal
+import MetalPerformanceShaders
 
 /// Device-level shared command queue for batched (non-blocking) dispatch.
 /// Metal guarantees in-order execution on the same queue.
@@ -127,33 +128,74 @@ final class GPUCompute {
     func dispatchMatmulBatched(bufA: MTLBuffer, bufB: MTLBuffer, bufC: MTLBuffer, M: Int, N: Int, K: Int, batchSize: Int, aBatchStride: Int, bBatchStride: Int) -> Bool {
         if M == 0 || N == 0 || K == 0 || batchSize == 0 { return true }
 
-        guard let commandBuffer = commandQueue.makeCommandBuffer(),
-              let encoder = commandBuffer.makeComputeCommandEncoder() else {
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
             return false
         }
 
-        encoder.setComputePipelineState(pipelineState)
-        encoder.setBuffer(bufA, offset: 0, index: 0)
-        encoder.setBuffer(bufB, offset: 0, index: 1)
-        encoder.setBuffer(bufC, offset: 0, index: 2)
+        let elementSize = MemoryLayout<Float>.size
+        let aBytes = M * K * elementSize
+        let bBytes = K * N * elementSize
+        let cBytes = M * N * elementSize
+        let useMPS = bufA.length >= aBytes && bufB.length >= bBytes && bufC.length >= cBytes
+            && aBytes >= 16 && bBytes >= 16 && cBytes >= 16
 
-        var m = UInt32(M), n = UInt32(N), k = UInt32(K)
-        var bs = UInt32(batchSize), abs_val = UInt32(aBatchStride), bbs = UInt32(bBatchStride)
-        encoder.setBytes(&m, length: MemoryLayout<UInt32>.size, index: 3)
-        encoder.setBytes(&n, length: MemoryLayout<UInt32>.size, index: 4)
-        encoder.setBytes(&k, length: MemoryLayout<UInt32>.size, index: 5)
-        encoder.setBytes(&bs, length: MemoryLayout<UInt32>.size, index: 6)
-        encoder.setBytes(&abs_val, length: MemoryLayout<UInt32>.size, index: 7)
-        encoder.setBytes(&bbs, length: MemoryLayout<UInt32>.size, index: 8)
+        if !useMPS {
+            // Tiny matrix — use custom MSL kernel
+            guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return false }
+            encoder.setComputePipelineState(pipelineState)
+            encoder.setBuffer(bufA, offset: 0, index: 0)
+            encoder.setBuffer(bufB, offset: 0, index: 1)
+            encoder.setBuffer(bufC, offset: 0, index: 2)
+            var m = UInt32(M), n = UInt32(N), k = UInt32(K)
+            var bs = UInt32(batchSize), abs_val = UInt32(aBatchStride), bbs = UInt32(bBatchStride)
+            encoder.setBytes(&m, length: MemoryLayout<UInt32>.size, index: 3)
+            encoder.setBytes(&n, length: MemoryLayout<UInt32>.size, index: 4)
+            encoder.setBytes(&k, length: MemoryLayout<UInt32>.size, index: 5)
+            encoder.setBytes(&bs, length: MemoryLayout<UInt32>.size, index: 6)
+            encoder.setBytes(&abs_val, length: MemoryLayout<UInt32>.size, index: 7)
+            encoder.setBytes(&bbs, length: MemoryLayout<UInt32>.size, index: 8)
+            let w = pipelineState.threadExecutionWidth
+            let h = max(pipelineState.maxTotalThreadsPerThreadgroup / w, 1)
+            encoder.dispatchThreads(
+                MTLSize(width: N, height: M, depth: batchSize),
+                threadsPerThreadgroup: MTLSize(width: w, height: h, depth: 1))
+            encoder.endEncoding()
+        } else if batchSize == 1 {
+            let matA = MPSMatrix(buffer: bufA, descriptor: MPSMatrixDescriptor(
+                rows: M, columns: K, rowBytes: K * elementSize, dataType: .float32))
+            let matB = MPSMatrix(buffer: bufB, descriptor: MPSMatrixDescriptor(
+                rows: K, columns: N, rowBytes: N * elementSize, dataType: .float32))
+            let matC = MPSMatrix(buffer: bufC, descriptor: MPSMatrixDescriptor(
+                rows: M, columns: N, rowBytes: N * elementSize, dataType: .float32))
 
-        // 3D dispatch: (col, row, batch)
-        let w = pipelineState.threadExecutionWidth
-        let h = max(pipelineState.maxTotalThreadsPerThreadgroup / w, 1)
-        let threadsPerGroup = MTLSize(width: w, height: h, depth: 1)
-        let gridSize = MTLSize(width: N, height: M, depth: batchSize)
+            let mm = MPSMatrixMultiplication(
+                device: pipelineState.device,
+                transposeLeft: false, transposeRight: false,
+                resultRows: M, resultColumns: N, interiorColumns: K,
+                alpha: 1.0, beta: 0.0)
+            mm.encode(commandBuffer: commandBuffer, leftMatrix: matA, rightMatrix: matB, resultMatrix: matC)
+        } else {
+            let aStride = aBatchStride * elementSize
+            let bStride = bBatchStride * elementSize
+            let cStride = M * N * elementSize
 
-        encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadsPerGroup)
-        encoder.endEncoding()
+            let mm = MPSMatrixMultiplication(
+                device: pipelineState.device,
+                transposeLeft: false, transposeRight: false,
+                resultRows: M, resultColumns: N, interiorColumns: K,
+                alpha: 1.0, beta: 0.0)
+
+            for batch in 0..<batchSize {
+                let matA = MPSMatrix(buffer: bufA, offset: batch * aStride, descriptor: MPSMatrixDescriptor(
+                    rows: M, columns: K, rowBytes: K * elementSize, dataType: .float32))
+                let matB = MPSMatrix(buffer: bufB, offset: batch * bStride, descriptor: MPSMatrixDescriptor(
+                    rows: K, columns: N, rowBytes: N * elementSize, dataType: .float32))
+                let matC = MPSMatrix(buffer: bufC, offset: batch * cStride, descriptor: MPSMatrixDescriptor(
+                    rows: M, columns: N, rowBytes: N * elementSize, dataType: .float32))
+                mm.encode(commandBuffer: commandBuffer, leftMatrix: matA, rightMatrix: matB, resultMatrix: matC)
+            }
+        }
+
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
 
@@ -1499,28 +1541,83 @@ public func gpuBridgeComputeMatmulBatchedNB(
         }
     }
 
-    guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
+    // Use MPSMatrixMultiplication for optimized matmul (Apple's hand-tuned BLAS).
+    // C = alpha * A × B + beta * C, with alpha=1, beta=0.
+    // Fallback to custom MSL kernel when:
+    //   - Buffer < 16 bytes (MPS requirement)
+    //   - Non-Float32 dtype (MPS only supports float32 in this path)
+    let m = Int(M), n = Int(N), k = Int(K)
+    let elementSize = MemoryLayout<Float>.size
+    let bs = Int(batchSize)
+    // MPS requires buffer.length ≥ max(rowBytes*rows, 16).
+    // Also: MPS MPSMatrixMultiplication only supports .float32 and .float16.
+    // We detect float32 by checking if the required bytes match float32 layout.
+    // If the pipeline was compiled for a different dtype, the buffer sizes won't match.
+    let aNeeded = m * k * elementSize  // elementSize = 4 (Float32)
+    let bNeeded = k * n * elementSize
+    let cNeeded = m * n * elementSize
+    let useMPS = bufA.buffer.length >= aNeeded
+        && bufB.buffer.length >= bNeeded
+        && bufC.buffer.length >= cNeeded
+        && aNeeded >= 16 && bNeeded >= 16 && cNeeded >= 16
 
-    encoder.setComputePipelineState(compute.pipelineState)
-    encoder.setBuffer(bufA.buffer, offset: 0, index: 0)
-    encoder.setBuffer(bufB.buffer, offset: 0, index: 1)
-    encoder.setBuffer(bufC.buffer, offset: 0, index: 2)
+    if !useMPS {
+        // Tiny matrix — use custom MSL kernel (MPS requires ≥ 16 byte buffers)
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
+        encoder.setComputePipelineState(compute.pipelineState)
+        encoder.setBuffer(bufA.buffer, offset: 0, index: 0)
+        encoder.setBuffer(bufB.buffer, offset: 0, index: 1)
+        encoder.setBuffer(bufC.buffer, offset: 0, index: 2)
+        var mV = M, nV = N, kV = K, bsV = batchSize, absV = aBatchStride, bbsV = bBatchStride
+        encoder.setBytes(&mV, length: MemoryLayout<UInt32>.size, index: 3)
+        encoder.setBytes(&nV, length: MemoryLayout<UInt32>.size, index: 4)
+        encoder.setBytes(&kV, length: MemoryLayout<UInt32>.size, index: 5)
+        encoder.setBytes(&bsV, length: MemoryLayout<UInt32>.size, index: 6)
+        encoder.setBytes(&absV, length: MemoryLayout<UInt32>.size, index: 7)
+        encoder.setBytes(&bbsV, length: MemoryLayout<UInt32>.size, index: 8)
+        let w = compute.pipelineState.threadExecutionWidth
+        let h = max(compute.pipelineState.maxTotalThreadsPerThreadgroup / w, 1)
+        encoder.dispatchThreads(
+            MTLSize(width: n, height: m, depth: bs),
+            threadsPerThreadgroup: MTLSize(width: w, height: h, depth: 1))
+        encoder.endEncoding()
+    } else if bs == 1 {
+        // Single matrix multiply via MPS
+        let matA = MPSMatrix(buffer: bufA.buffer, descriptor: MPSMatrixDescriptor(
+            rows: m, columns: k, rowBytes: k * elementSize, dataType: .float32))
+        let matB = MPSMatrix(buffer: bufB.buffer, descriptor: MPSMatrixDescriptor(
+            rows: k, columns: n, rowBytes: n * elementSize, dataType: .float32))
+        let matC = MPSMatrix(buffer: bufC.buffer, descriptor: MPSMatrixDescriptor(
+            rows: m, columns: n, rowBytes: n * elementSize, dataType: .float32))
 
-    var m = M, n = N, k = K, bs = batchSize, abs_val = aBatchStride, bbs = bBatchStride
-    encoder.setBytes(&m, length: MemoryLayout<UInt32>.size, index: 3)
-    encoder.setBytes(&n, length: MemoryLayout<UInt32>.size, index: 4)
-    encoder.setBytes(&k, length: MemoryLayout<UInt32>.size, index: 5)
-    encoder.setBytes(&bs, length: MemoryLayout<UInt32>.size, index: 6)
-    encoder.setBytes(&abs_val, length: MemoryLayout<UInt32>.size, index: 7)
-    encoder.setBytes(&bbs, length: MemoryLayout<UInt32>.size, index: 8)
+        let mm = MPSMatrixMultiplication(
+            device: compute.pipelineState.device,
+            transposeLeft: false, transposeRight: false,
+            resultRows: m, resultColumns: n, interiorColumns: k,
+            alpha: 1.0, beta: 0.0)
+        mm.encode(commandBuffer: commandBuffer, leftMatrix: matA, rightMatrix: matB, resultMatrix: matC)
+    } else {
+        // Batched matmul — encode each batch as separate MPS operation
+        let aStride = Int(aBatchStride) * elementSize
+        let bStride = Int(bBatchStride) * elementSize
+        let cStride = m * n * elementSize
 
-    let w = compute.pipelineState.threadExecutionWidth
-    let h = max(compute.pipelineState.maxTotalThreadsPerThreadgroup / w, 1)
-    let threadsPerGroup = MTLSize(width: w, height: h, depth: 1)
-    let gridSize = MTLSize(width: Int(N), height: Int(M), depth: Int(batchSize))
+        let mm = MPSMatrixMultiplication(
+            device: compute.pipelineState.device,
+            transposeLeft: false, transposeRight: false,
+            resultRows: m, resultColumns: n, interiorColumns: k,
+            alpha: 1.0, beta: 0.0)
 
-    encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadsPerGroup)
-    encoder.endEncoding()
+        for batch in 0..<bs {
+            let matA = MPSMatrix(buffer: bufA.buffer, offset: batch * aStride, descriptor: MPSMatrixDescriptor(
+                rows: m, columns: k, rowBytes: k * elementSize, dataType: .float32))
+            let matB = MPSMatrix(buffer: bufB.buffer, offset: batch * bStride, descriptor: MPSMatrixDescriptor(
+                rows: k, columns: n, rowBytes: n * elementSize, dataType: .float32))
+            let matC = MPSMatrix(buffer: bufC.buffer, offset: batch * cStride, descriptor: MPSMatrixDescriptor(
+                rows: m, columns: n, rowBytes: n * elementSize, dataType: .float32))
+            mm.encode(commandBuffer: commandBuffer, leftMatrix: matA, rightMatrix: matB, resultMatrix: matC)
+        }
+    }
 
     if isBatch {
         return Unmanaged.passUnretained(commandBuffer as AnyObject).toOpaque()

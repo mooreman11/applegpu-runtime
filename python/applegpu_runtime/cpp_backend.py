@@ -72,6 +72,9 @@ def load_cpp_backend():
     mod.synchronize = lambda d=None: _do_synchronize()
     mod._exchange_device = lambda d: 0
     mod._maybe_exchange_device = lambda d: 0
+    mod._is_in_bad_fork = lambda: False
+    mod.manual_seed_all = lambda seed: None
+    mod.manual_seed = lambda seed: None
     sys.modules['torch.applegpu'] = mod
     torch.applegpu = mod
 
