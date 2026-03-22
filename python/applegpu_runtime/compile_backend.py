@@ -994,6 +994,9 @@ class CompiledGraphRunner:
 
         # Flush and wrap outputs as PyTorch tensors
         lib.applegpu_eager_flush_and_wait()
+        # Collect input tensor IDs to avoid freeing pass-throughs
+        input_tid_set = set(input_tids[i] for i in range(self._n_placeholders))
+
         real_results = []
         for i in range(n_real):
             tid = out_tids[i]
@@ -1002,9 +1005,10 @@ class CompiledGraphRunner:
             dtype = torch.float32
             ref = TensorRef(tid, shape, dtype, ptr)
             real_results.append(_wrap_output(lib, ref))
-            # Defer-free the intermediate eager tensor (the wrapped PyTorch
-            # tensor has its own buffer from torch.empty + memcpy)
-            self._deferred_free.append(tid)
+            # Only defer-free tensor IDs CREATED by graph execution,
+            # not input pass-throughs (which are still in use by the model)
+            if tid not in input_tid_set:
+                self._deferred_free.append(tid)
 
         # Reconstruct full output tuple with None at sentinel positions
         n_total = len(self._output_indices)
