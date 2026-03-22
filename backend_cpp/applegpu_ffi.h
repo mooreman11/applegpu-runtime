@@ -66,6 +66,7 @@ uint8_t* applegpu_eager_div(uint64_t a_id, uint64_t b_id, uint64_t* out_id);
 uint8_t* applegpu_eager_relu(uint64_t input_id, uint64_t* out_id);
 uint8_t* applegpu_eager_neg(uint64_t input_id, uint64_t* out_id);
 uint8_t* applegpu_eager_matmul(uint64_t a_id, uint64_t b_id, uint64_t* out_id);
+uint8_t* applegpu_eager_matmul_ex(uint64_t a_id, uint64_t b_id, bool transpose_a, bool transpose_b, uint64_t* out_id);
 
 uint8_t* applegpu_eager_threshold_backward(uint64_t grad_id, uint64_t input_id, float threshold, uint64_t* out_id);
 uint8_t* applegpu_eager_scalar_mul(uint64_t input_id, float scale, uint64_t* out_id);

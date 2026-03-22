@@ -716,6 +716,43 @@ impl ComputePipeline {
         if cb.is_null() { Err(GpuError::ComputeFailed("Non-blocking batched matmul dispatch failed".to_string())) } else { Ok(cb) }
     }
 
+    /// Non-blocking matmul with transpose flags.
+    /// When transpose_a/b is true, MPS reads the buffer as transposed.
+    pub fn dispatch_matmul_ex_nb(
+        &self,
+        queue: *mut std::ffi::c_void,
+        buf_a: &Buffer,
+        buf_b: &Buffer,
+        buf_c: &Buffer,
+        m: usize,
+        n: usize,
+        k: usize,
+        batch_size: usize,
+        a_batch_stride: usize,
+        b_batch_stride: usize,
+        transpose_a: bool,
+        transpose_b: bool,
+    ) -> Result<*mut std::ffi::c_void> {
+        let cb = unsafe {
+            ffi::gpu_bridge_compute_matmul_ex_nb(
+                self.handle,
+                queue,
+                buf_a.raw_handle() as *const _,
+                buf_b.raw_handle() as *const _,
+                buf_c.raw_handle(),
+                m as u32,
+                n as u32,
+                k as u32,
+                batch_size as u32,
+                a_batch_stride as u32,
+                b_batch_stride as u32,
+                transpose_a,
+                transpose_b,
+            )
+        };
+        if cb.is_null() { Err(GpuError::ComputeFailed("Transposed matmul dispatch failed".to_string())) } else { Ok(cb) }
+    }
+
     /// Non-blocking softmax. Returns command buffer handle.
     pub fn dispatch_softmax_nb(
         &self,

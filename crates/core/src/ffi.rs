@@ -235,6 +235,22 @@ extern "C" {
         b_batch_stride: u32,
     ) -> *mut std::ffi::c_void;
 
+    pub fn gpu_bridge_compute_matmul_ex_nb(
+        compute: *mut GPUComputeHandle,
+        queue: *mut std::ffi::c_void,
+        buf_a: *const GPUBufferHandle,
+        buf_b: *const GPUBufferHandle,
+        buf_c: *mut GPUBufferHandle,
+        m: u32,
+        n: u32,
+        k: u32,
+        batch_size: u32,
+        a_batch_stride: u32,
+        b_batch_stride: u32,
+        transpose_a: bool,
+        transpose_b: bool,
+    ) -> *mut std::ffi::c_void;
+
     pub fn gpu_bridge_compute_softmax_causal_nb(
         compute: *mut GPUComputeHandle,
         queue: *mut std::ffi::c_void,

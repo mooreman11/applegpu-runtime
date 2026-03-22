@@ -450,6 +450,87 @@ impl EagerRuntime {
         Ok((out_id, out_ptr))
     }
 
+    /// Matmul with transpose flags: A_logical = transpose_a ? A.T : A, etc.
+    /// When transpose is true, the input buffer is read in transposed layout
+    /// by passing transpose flags to MPSMatrixMultiplication (no contiguity copy needed).
+    /// The input tensors should reference the BASE (contiguous) buffer, not a view.
+    pub fn matmul_ex(
+        &mut self,
+        device: &Device,
+        a_id: u64,
+        b_id: u64,
+        transpose_a: bool,
+        transpose_b: bool,
+    ) -> Result<(u64, *mut u8)> {
+        let (a_shape, a_dtype, a_buf, b_shape, b_buf) = {
+            let a = self.get(a_id)?;
+            let b = self.get(b_id)?;
+            if a.dtype != b.dtype {
+                return Err(GpuError::InvalidTensor(format!(
+                    "dtype mismatch: {:?} vs {:?}", a.dtype, b.dtype
+                )));
+            }
+            (a.layout.shape, a.dtype, Arc::clone(&a.buffer),
+             b.layout.shape, Arc::clone(&b.buffer))
+        };
+
+        let a_dims = a_shape.dims();
+        let b_dims = b_shape.dims();
+        if a_dims.len() < 2 || b_dims.len() < 2 {
+            return Err(GpuError::InvalidTensor("matmul requires 2D+ tensors".into()));
+        }
+
+        // Physical dims: what's in the buffer (row-major)
+        let a_rows = a_dims[a_dims.len() - 2];
+        let a_cols = a_dims[a_dims.len() - 1];
+        let b_rows = b_dims[b_dims.len() - 2];
+        let b_cols = b_dims[b_dims.len() - 1];
+
+        // Logical dims after transpose
+        let (m, k_a) = if transpose_a { (a_cols, a_rows) } else { (a_rows, a_cols) };
+        let (k_b, n) = if transpose_b { (b_cols, b_rows) } else { (b_rows, b_cols) };
+
+        if k_a != k_b {
+            return Err(GpuError::InvalidTensor(format!(
+                "matmul inner dim mismatch: {} vs {}", k_a, k_b
+            )));
+        }
+        let k = k_a;
+        let batch_size: usize = a_dims[..a_dims.len() - 2].iter().product::<usize>().max(1);
+
+        let mut out_dims: Vec<usize> = a_dims[..a_dims.len() - 2].to_vec();
+        out_dims.push(m);
+        out_dims.push(n);
+        let out_shape = Shape::new(out_dims)?;
+        let out_layout = TensorLayout::contiguous(out_shape);
+
+        let nbytes = out_shape.numel() * a_dtype.size_bytes();
+        let alloc_bytes = if nbytes == 0 { 4 } else { nbytes };
+        let out_buffer = Arc::new(self.pool.acquire(device, alloc_bytes)?);
+        let out_ptr = out_buffer.contents();
+
+        let pipeline = self.get_pipeline(device, "matmul", a_dtype)?;
+        let queue = compute::get_shared_queue(device);
+        let _cb = pipeline.dispatch_matmul_ex_nb(
+            queue,
+            &*a_buf, &*b_buf, &*out_buffer,
+            m, n, k,
+            batch_size, a_rows * a_cols, b_rows * b_cols,
+            transpose_a, transpose_b,
+        )?;
+        compute::streaming_tick();
+
+        let out_id = next_tensor_id();
+        self.tensors.insert(out_id, EagerTensor {
+            buffer: out_buffer,
+            layout: out_layout,
+            dtype: a_dtype,
+            offset: 0,
+        });
+
+        Ok((out_id, out_ptr))
+    }
+
     // ── make_contiguous ────────────────────────────────────────────────
 
     /// If the tensor is already contiguous, return its id and pointer unchanged.

@@ -457,21 +457,46 @@ at::Tensor applegpu_sub(const at::Tensor& self, const at::Tensor& other, const a
     return wrap_eager_output(ptr, out_id, query_output_shape(out_id), self.scalar_type());
 }
 
+// Detect if a 2D tensor is a simple transpose (swapped strides of a contiguous base).
+// Returns true if the tensor is [M,N] with strides [1,M] (transposed from [N,M] contiguous).
+bool is_simple_transpose(const at::Tensor& t) {
+    if (t.dim() != 2 || t.is_contiguous()) return false;
+    // A transposed [M,N] has strides [1, M] (from base [N,M] with strides [M, 1])
+    return t.stride(0) == 1 && t.stride(1) == (int64_t)t.size(0);
+}
+
 at::Tensor applegpu_mm(const at::Tensor& self, const at::Tensor& mat2) {
-    // Eager matmul requires contiguous inputs. Use PyTorch's .contiguous()
-    // which goes through our allocator + copy_ to create a fresh contiguous tensor.
+    EphemeralViewGuard evg;
+
+    // Try MPS transposed matmul to avoid contiguity copies.
+    // If either input is a simple 2D transpose, pass the BASE tensor + transpose flag
+    // to MPSMatrixMultiplication which handles transposed reads natively.
+    bool trans_a = is_simple_transpose(self);
+    bool trans_b = is_simple_transpose(mat2);
+
+    if (trans_a || trans_b) {
+        // For transposed inputs, resolve the BASE tensor (contiguous storage)
+        // not the view (which would trigger create_view + make_contiguous).
+        uint64_t a_id = get_tensor_id(self);   // base storage tensor_id
+        uint64_t b_id = get_tensor_id(mat2);
+        uint64_t out_id = 0;
+        void* ptr = applegpu_eager_matmul_ex(a_id, b_id, trans_a, trans_b, &out_id);
+        if (ptr != nullptr) {
+            return wrap_eager_output(ptr, out_id, query_output_shape(out_id), self.scalar_type());
+        }
+        // Fall through to contiguous path on error
+    }
+
+    // Standard path: make contiguous + regular matmul
     auto self_c = self.is_contiguous() ? self : self.contiguous();
     auto mat2_c = mat2.is_contiguous() ? mat2 : mat2.contiguous();
-    EphemeralViewGuard evg;
     uint64_t a_id = resolve_tensor_id(self_c);
     uint64_t b_id = resolve_tensor_id(mat2_c);
     uint64_t out_id = 0;
     void* ptr = applegpu_eager_matmul(a_id, b_id, &out_id);
-    if (ptr == nullptr) {
-        const char* err = applegpu_eager_last_error();
-        TORCH_CHECK(false, "applegpu mm: matmul failed for a_id=", a_id,
-                     " b_id=", b_id, " err=", err ? err : "none");
-    }
+    TORCH_CHECK(ptr != nullptr, "applegpu mm: matmul failed for a_id=", a_id,
+                 " b_id=", b_id, " err=",
+                 applegpu_eager_last_error() ? applegpu_eager_last_error() : "none");
     return wrap_eager_output(ptr, out_id, query_output_shape(out_id), self.scalar_type());
 }
 

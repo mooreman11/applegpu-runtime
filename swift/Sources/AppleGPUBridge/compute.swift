@@ -1627,6 +1627,126 @@ public func gpuBridgeComputeMatmulBatchedNB(
     }
 }
 
+@_cdecl("gpu_bridge_compute_matmul_ex_nb")
+public func gpuBridgeComputeMatmulExNB(
+    _ computePtr: UnsafeMutableRawPointer?,
+    _ queuePtr: UnsafeMutableRawPointer?,
+    _ bufAPtr: UnsafeRawPointer?,
+    _ bufBPtr: UnsafeRawPointer?,
+    _ bufCPtr: UnsafeMutableRawPointer?,
+    _ M: UInt32,
+    _ N: UInt32,
+    _ K: UInt32,
+    _ batchSize: UInt32,
+    _ aBatchStride: UInt32,
+    _ bBatchStride: UInt32,
+    _ transposeA: Bool,
+    _ transposeB: Bool
+) -> UnsafeMutableRawPointer? {
+    guard let computePtr = computePtr,
+          let queuePtr = queuePtr,
+          let bufAPtr = bufAPtr,
+          let bufBPtr = bufBPtr,
+          let bufCPtr = bufCPtr else { return nil }
+
+    let compute = Unmanaged<GPUCompute>.fromOpaque(computePtr).takeUnretainedValue()
+    let queue = Unmanaged<MTLCommandQueue>.fromOpaque(queuePtr).takeUnretainedValue()
+    let bufA = Unmanaged<GPUBuffer>.fromOpaque(bufAPtr).takeUnretainedValue()
+    let bufB = Unmanaged<GPUBuffer>.fromOpaque(bufBPtr).takeUnretainedValue()
+    let bufC = Unmanaged<GPUBuffer>.fromOpaque(bufCPtr).takeUnretainedValue()
+
+    let m = Int(M), n = Int(N), k = Int(K), bs = Int(batchSize)
+    if m == 0 || n == 0 || k == 0 || bs == 0 {
+        batchLock.lock()
+        let ptr = activeBatchCommandBuffer.map { Unmanaged.passUnretained($0 as AnyObject).toOpaque() }
+        batchLock.unlock()
+        return ptr
+    }
+
+    let commandBuffer: MTLCommandBuffer
+    let isBatch: Bool
+    let ctxId = currentContextId
+    contextLock.lock()
+    if ctxId > 0, let batchCB = batchContexts[ctxId] {
+        commandBuffer = batchCB
+        isBatch = true
+        contextLock.unlock()
+    } else {
+        contextLock.unlock()
+        batchLock.lock()
+        if let batchCB = activeBatchCommandBuffer {
+            commandBuffer = batchCB
+            isBatch = true
+            batchLock.unlock()
+        } else {
+            batchLock.unlock()
+            guard let cb = queue.makeCommandBuffer() else { return nil }
+            commandBuffer = cb
+            isBatch = false
+        }
+    }
+
+    let elementSize = MemoryLayout<Float>.size
+
+    // For transposed matmul, the physical buffer has the original (pre-transpose) layout.
+    // MPS reads with the transpose flag — no contiguity copy needed.
+    // Physical A dims: if transposeA, buffer is [K,M] row-major; MPS reads as [M,K] transposed.
+    let aRows = transposeA ? k : m
+    let aCols = transposeA ? m : k
+    let bRows = transposeB ? n : k
+    let bCols = transposeB ? k : n
+    let aNeeded = aRows * aCols * elementSize
+    let bNeeded = bRows * bCols * elementSize
+    let cNeeded = m * n * elementSize
+    let useMPS = bufA.buffer.length >= aNeeded && bufB.buffer.length >= bNeeded
+        && bufC.buffer.length >= cNeeded
+        && aNeeded >= 16 && bNeeded >= 16 && cNeeded >= 16
+
+    if useMPS && bs == 1 {
+        let matA = MPSMatrix(buffer: bufA.buffer, descriptor: MPSMatrixDescriptor(
+            rows: aRows, columns: aCols, rowBytes: aCols * elementSize, dataType: .float32))
+        let matB = MPSMatrix(buffer: bufB.buffer, descriptor: MPSMatrixDescriptor(
+            rows: bRows, columns: bCols, rowBytes: bCols * elementSize, dataType: .float32))
+        let matC = MPSMatrix(buffer: bufC.buffer, descriptor: MPSMatrixDescriptor(
+            rows: m, columns: n, rowBytes: n * elementSize, dataType: .float32))
+
+        let mm = MPSMatrixMultiplication(
+            device: compute.pipelineState.device,
+            transposeLeft: transposeA, transposeRight: transposeB,
+            resultRows: m, resultColumns: n, interiorColumns: k,
+            alpha: 1.0, beta: 0.0)
+        mm.encode(commandBuffer: commandBuffer, leftMatrix: matA, rightMatrix: matB, resultMatrix: matC)
+    } else {
+        // Fallback: custom MSL kernel (no transpose support in custom kernel,
+        // caller must ensure contiguous inputs for this path)
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
+        encoder.setComputePipelineState(compute.pipelineState)
+        encoder.setBuffer(bufA.buffer, offset: 0, index: 0)
+        encoder.setBuffer(bufB.buffer, offset: 0, index: 1)
+        encoder.setBuffer(bufC.buffer, offset: 0, index: 2)
+        var mV = M, nV = N, kV = K, bsV = batchSize, absV = aBatchStride, bbsV = bBatchStride
+        encoder.setBytes(&mV, length: MemoryLayout<UInt32>.size, index: 3)
+        encoder.setBytes(&nV, length: MemoryLayout<UInt32>.size, index: 4)
+        encoder.setBytes(&kV, length: MemoryLayout<UInt32>.size, index: 5)
+        encoder.setBytes(&bsV, length: MemoryLayout<UInt32>.size, index: 6)
+        encoder.setBytes(&absV, length: MemoryLayout<UInt32>.size, index: 7)
+        encoder.setBytes(&bbsV, length: MemoryLayout<UInt32>.size, index: 8)
+        let w = compute.pipelineState.threadExecutionWidth
+        let h = max(compute.pipelineState.maxTotalThreadsPerThreadgroup / w, 1)
+        encoder.dispatchThreads(
+            MTLSize(width: n, height: m, depth: bs),
+            threadsPerThreadgroup: MTLSize(width: w, height: h, depth: 1))
+        encoder.endEncoding()
+    }
+
+    if isBatch {
+        return Unmanaged.passUnretained(commandBuffer as AnyObject).toOpaque()
+    } else {
+        commandBuffer.commit()
+        return Unmanaged.passRetained(commandBuffer as AnyObject).toOpaque()
+    }
+}
+
 @_cdecl("gpu_bridge_compute_softmax_causal_nb")
 public func gpuBridgeComputeSoftmaxCausalNB(
     _ computePtr: UnsafeMutableRawPointer?,

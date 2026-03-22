@@ -271,6 +271,30 @@ pub extern "C" fn applegpu_eager_matmul(
     }
 }
 
+/// Matmul with transpose flags. Avoids contiguity copies for transposed views.
+#[no_mangle]
+pub extern "C" fn applegpu_eager_matmul_ex(
+    a_id: u64,
+    b_id: u64,
+    transpose_a: bool,
+    transpose_b: bool,
+    out_id: *mut u64,
+) -> *mut u8 {
+    ensure_eager_streaming();
+    let state = get_eager_state();
+    let mut rt = state.runtime.lock().unwrap();
+    match rt.matmul_ex(&state.device, a_id, b_id, transpose_a, transpose_b) {
+        Ok((id, ptr)) => {
+            unsafe { *out_id = id; }
+            ptr
+        }
+        Err(e) => {
+            set_error(format!("{}", e));
+            std::ptr::null_mut()
+        }
+    }
+}
+
 // ── Compound ops (stubs — will use graph-based fallback initially) ──
 
 /// threshold_backward: grad * (input > threshold). ReLU backward.
