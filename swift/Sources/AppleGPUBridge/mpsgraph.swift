@@ -432,21 +432,19 @@ public func gpuBridgeMPSGraphRun(
         }
     }
 
-    // Execute graph using the command queue (synchronous — waits for completion)
+    // Execute graph synchronously (MPSGraph handles command buffer internally)
     let results = cached.graph.run(
         with: queue,
         feeds: feeds,
         targetTensors: cached.outputs,
         targetOperations: nil)
 
-    // Copy results to pre-allocated output buffers via CPU memcpy.
-    // MPSGraph.run() is synchronous — results are ready when it returns.
+    // Copy results to pre-allocated output buffers
     for i in 0..<Int(nOutputs) {
         guard let outBufPtr = outputBuffers[i] else { return -4 }
         let outGpuBuf = Unmanaged<GPUBufferBase>.fromOpaque(outBufPtr).takeUnretainedValue()
         guard let resultData = results[cached.outputs[i]] else { return -5 }
 
-        // Read bytes from the MPSNDArray result into our shared-memory buffer
         resultData.mpsndarray().readBytes(
             outGpuBuf.buffer.contents(),
             strideBytes: nil as UnsafeMutablePointer<Int>?)

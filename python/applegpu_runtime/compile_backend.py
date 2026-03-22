@@ -933,6 +933,23 @@ class CompiledGraphRunner:
         else:
             self._serialized, self._n_placeholders, self._output_indices = result
             self._interp = None
+            # Pre-compute output shapes from FX metadata (avoids per-call _query_shape FFI)
+            self._output_shapes = self._compute_output_shapes(gm)
+            # Pre-compute real output indices and position mapping
+            self._real_indices = [i for i in self._output_indices if i != 0xFFFF]
+            self._n_real = len(self._real_indices)
+            # Map real output index → position in full output tuple
+            self._real_to_output_pos = []
+            real_idx = 0
+            for pos, oi in enumerate(self._output_indices):
+                if oi != 0xFFFF:
+                    self._real_to_output_pos.append(pos)
+            # Pre-allocate reusable ctypes arrays
+            self._out_tids_arr = (ctypes.c_uint64 * self._n_real)()
+            self._out_ptrs_arr = (ctypes.c_void_p * self._n_real)()
+            self._out_indices_arr = (ctypes.c_uint16 * self._n_real)(*self._real_indices)
+            self._ops_buf = ctypes.create_string_buffer(self._serialized)
+            self._input_tids_arr = (ctypes.c_uint64 * self._n_placeholders)()
 
         # Setup FFI signatures
         if not hasattr(lib, '_graph_ffi_setup'):
@@ -946,6 +963,20 @@ class CompiledGraphRunner:
             lib.applegpu_eager_execute_graph.restype = ctypes.c_int32
 
             lib._graph_ffi_setup = True
+
+    def _compute_output_shapes(self, gm):
+        """Extract output shapes from FX graph metadata at compile time."""
+        shapes = {}
+        for node in gm.graph.nodes:
+            if node.op == 'output':
+                out_args = node.args[0]
+                if isinstance(out_args, (tuple, list)):
+                    for i, a in enumerate(out_args):
+                        if isinstance(a, torch.fx.Node) and 'val' in a.meta:
+                            shapes[i] = tuple(a.meta['val'].shape)
+                elif isinstance(out_args, torch.fx.Node) and 'val' in out_args.meta:
+                    shapes[0] = tuple(out_args.meta['val'].shape)
+        return shapes
 
     def run(self, *args):
         if self._interp is not None:
@@ -961,31 +992,26 @@ class CompiledGraphRunner:
                 lib.applegpu_eager_free(tid)
             self._deferred_free = []
 
-        # Separate real outputs from None sentinels (0xFFFF)
-        real_indices = [i for i in self._output_indices if i != 0xFFFF]
-        n_real = len(real_indices)
+        n_real = self._n_real
 
-        # Resolve input tensor IDs
-        input_tids = (ctypes.c_uint64 * self._n_placeholders)()
+        # Resolve input tensor IDs (reuse pre-allocated array)
+        input_tids = self._input_tids_arr
         for i, arg in enumerate(args[:self._n_placeholders]):
             if isinstance(arg, torch.Tensor) and arg.device.type in ('privateuseone', 'applegpu'):
-                tid = _resolve_tensor_id(lib, arg)
-                input_tids[i] = tid
+                input_tids[i] = _resolve_tensor_id(lib, arg)
             else:
                 input_tids[i] = 0
 
-        # Prepare output arrays (only for real outputs, not None sentinels)
-        out_tids = (ctypes.c_uint64 * n_real)()
-        out_ptrs = (ctypes.c_void_p * n_real)()
-        out_indices_arr = (ctypes.c_uint16 * n_real)(*real_indices)
+        # Reuse pre-allocated output arrays
+        out_tids = self._out_tids_arr
+        out_ptrs = self._out_ptrs_arr
 
         # Single FFI call — all ops execute in Rust
-        ops_buf = ctypes.create_string_buffer(self._serialized)
         rc = lib.applegpu_eager_execute_graph(
-            ctypes.cast(ops_buf, ctypes.c_void_p),
+            ctypes.cast(self._ops_buf, ctypes.c_void_p),
             ctypes.c_uint32(len(self._serialized)),
             input_tids, ctypes.c_uint32(self._n_placeholders),
-            out_indices_arr, ctypes.c_uint32(n_real),
+            self._out_indices_arr, ctypes.c_uint32(n_real),
             out_tids, out_ptrs,
         )
 
@@ -1001,10 +1027,15 @@ class CompiledGraphRunner:
         input_tid_set = set(input_tids[i] for i in range(self._n_placeholders))
 
         real_results = []
+        real_out_idx = 0
         for i in range(n_real):
             tid = out_tids[i]
             ptr = out_ptrs[i]
-            shape = _query_shape(lib, tid)
+            # Use pre-computed shape if available, fall back to FFI query
+            out_pos = self._real_to_output_pos[i] if hasattr(self, '_real_to_output_pos') else i
+            shape = self._output_shapes.get(out_pos) if self._output_shapes else None
+            if shape is None:
+                shape = _query_shape(lib, tid)
             dtype = torch.float32
             ref = TensorRef(tid, shape, dtype, ptr)
             real_results.append(_wrap_output(lib, ref))
