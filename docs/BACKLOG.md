@@ -259,6 +259,19 @@ _Blocked by apple/containerization framework socket staging bug (errno 20 ENOTDI
 - [x] Automatic fallback to custom kernel for tiny buffers (<16 bytes) and non-Float32
 - [x] Result: h=4096 training 0.78x → 1.59x CPU (2.2x improvement)
 
+### MPSGraph Integration — SCAFFOLD DONE (correctness WIP)
+_Design spec: `docs/superpowers/specs/2026-03-22-mpsgraph-integration-design.md`_
+- [x] Swift MPSGraph builder (`mpsgraph.swift`): deserializes bytecode → MPSGraph ops
+- [x] Op support: add, sub, mul, div, matmul, relu, neg, threshold_backward, scalar_mul, mean, sum_dim, transpose, view, addmm
+- [x] C ABI: `gpu_bridge_mpsgraph_build/run/destroy`
+- [x] Graph caching: build once per model shape, execute many
+- [x] Placeholder pass-through: saved tensors from forward graph handled correctly
+- [x] MetalPerformanceShadersGraph linked in all three layers (Swift, Rust, C++)
+- [x] Transparent fallback: if MPSGraph build fails, per-op execution continues
+- [ ] Fix output copy: `MPSNDArray.exportData` to pre-allocated MTLBuffer produces wrong values
+- [ ] Enable by default (currently opt-in via `APPLEGPU_MPSGRAPH=1`)
+- [ ] Benchmark: target MPS parity at h≥1024
+
 ### Bug Fixes
 - [x] Scalar tensor dtype bug — `empty_strided` allocated 0-dim scalars as UInt8
 - [x] `resize_` dtype — use `applegpu_eager_alloc` with correct dtype

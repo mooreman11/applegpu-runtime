@@ -101,7 +101,19 @@ loss.backward()
 optimizer.step()
 ```
 
-Eager Metal dispatch — ops encode directly into streaming Metal command buffer. Zero CPU fallback for MLP training. Forward/loss/optimizer all sub-0.1ms. Supports `torch.compile` via aot_autograd backend.
+Eager Metal dispatch — ops encode directly into streaming Metal command buffer. Zero CPU fallback for MLP training. Uses Apple's MPSMatrixMultiplication for optimized matmul with automatic transpose support. Supports `torch.compile` via custom FX interpreter + Rust compiled graph executor.
+
+### Performance (MLP Training)
+
+```
+TRAINING (ms/step)       h=256     h=1024     h=4096
+------------------------------------------------------
+                 CPU     0.149     1.285    25.888
+                 MPS     0.255     0.765     8.218
+            applegpu     0.651     1.693    16.328
+```
+
+**1.6x faster than CPU at h=4096.** MPSGraph integration in progress (opt-in) for further fusion gains.
 
 ## GPT-2 Text Generation
 
@@ -267,7 +279,7 @@ No TCP bridge, no port forwarding, no special networking required.
 
 ### Test Coverage
 
-~780 tests across all layers (418 Rust + 18 Swift + ~340 Python + 16 C++ backend)
+~800 tests across all layers (418 Rust + 18 Swift + ~340 Python + 26 C++ backend + compile backend)
 
 ## Examples
 

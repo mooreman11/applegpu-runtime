@@ -37,15 +37,18 @@ PrivateUse1 C++ Path (eager, per-op dispatch):
 FX Interpreter Path (torch.compile, bypasses C++ Dispatcher):
   Python FX walk → ctypes → Rust eager FFI → Metal encode (streaming CB) → GPU
 
+MPSGraph Path (torch.compile, fused execution — WIP):
+  Python FX walk → serialize bytecode → Rust FFI → Swift MPSGraph build/run → GPU
+
 PyO3 Path (lazy, future torch.compile graph optimization):
   Python → PyO3 → Rust graph → eval → Metal → GPU
 ```
 
-Both paths share:
+All paths share:
 ```
-Swift Compat Layer  ←  Metal, AVF, Apple frameworks via @_cdecl C ABI (.dylib)
+Swift Compat Layer  ←  Metal, MetalPerformanceShadersGraph, AVF via @_cdecl C ABI (.dylib)
         ↓
-   Metal GPU
+   Metal GPU (MPSMatrixMultiplication for matmul, custom MSL for elementwise)
 ```
 
 - **Rust ↔ Swift bridge**: Swift exports C ABI functions via `@_cdecl`, Rust calls them via `extern "C"` in `crates/core/src/ffi.rs`. The C header is at `swift/Sources/AppleGPUBridge/include/bridge.h`. The Swift bridge is built as a dynamic library (`libAppleGPUBridge.dylib`) so both PyO3 and C++ backends can link against it without ObjC class conflicts. `build.rs` compiles the Swift library and links it automatically.
@@ -82,24 +85,25 @@ Both bottlenecked by output wrapping (torch.empty + memcpy) and flush_and_wait o
 
 **For further speedup**: need kernel fusion (fuse elementwise chains via `lazy.rs` + `fusion.rs`) which reduces op COUNT, not per-op overhead. This is P4 work.
 
-### P4: Competitive Performance with MPS — RESEARCH NEEDED
-MPS is 2.4-3.1x faster than CPU at h≥1024 via MPSGraph op fusion. Our per-op Metal dispatch is slower than CPU at all sizes.
+### P4: Competitive Performance with MPS — MPSGraph IN PROGRESS
+MPS is 2-3x faster than us at h≥1024 via MPSGraph whole-graph fusion. Our key differentiator: **MPS doesn't work in Docker containers** (no Metal driver inside Linux). Our architecture bridges Metal on the host to containers via IPC — MPSGraph integration brings Apple's fused GPU perf to containers where `device='mps'` can't reach.
 
-**What we tried:**
-- Python FX interpreter (ctypes per-op): 3-5x slower than C++ path (Python overhead)
-- Rust compiled graph executor (single FFI): 2-4x slower (output wrapping overhead)
-- Fusion integration: no fusible chains in MLP graphs (addmm is not elementwise)
+**Done:**
+1. ~~**MPSMatrixMultiplication**~~ — DONE: replaced custom MSL matmul, 2.2x speedup at h=4096 (0.78x → 1.59x CPU)
+2. ~~**MPS transposed matmul**~~ — DONE: skip contiguity copies for backward transpose views
+3. ~~**GPU-native mul_.Scalar**~~ — DONE: scalar_mul + storage swap instead of flush + CPU loop
 
-**Why fusion doesn't help for MLP:**
-- Forward: `t → addmm → relu → t → addmm` — only `add+relu` is fusible (saves 1 kernel, ~2% improvement)
-- The existing fusion engine (`fusion.rs`) only fuses consecutive elementwise ops with ref_count=1
-- MPS advantage comes from MPSGraph which fuses ENTIRE subgraphs including matmul, not just elementwise chains
+**MPSGraph scaffold** (builds and executes, correctness WIP):
+- Swift `mpsgraph.swift`: deserializes bytecode → MPSGraph ops (all MLP ops supported)
+- C ABI: `gpu_bridge_mpsgraph_build/run/destroy` with graph caching
+- Rust integration: `execute_mpsgraph()` with transparent fallback to per-op
+- Opt-in via `APPLEGPU_MPSGRAPH=1` (output copy correctness issue to fix)
+- Design spec: `docs/superpowers/specs/2026-03-22-mpsgraph-integration-design.md`
 
-**What would actually help:**
-1. ~~**Use Metal Performance Shaders**~~ — DONE: MPSMatrixMultiplication integrated, 2.2x speedup at h=4096
-2. **MPS transposed matmul**: pass transpose flags to MPS instead of `scalar_mul(1.0)` contiguity copies (saves ~4 kernel launches per backward)
-3. **Reduce per-op launch overhead**: ~20 Metal compute encoder creations per step; MPS batches into ~5 via MPSGraph
-4. **Full-graph compilation at C++ level**: integrate graph capture into the C++ backend itself (no Python boundary)
+**Remaining:**
+- Fix `MPSNDArray.exportData` → pre-allocated MTLBuffer output copy
+- Enable by default, benchmark for MPS parity at h≥1024
+- Container IPC path: gpu-service on host → MPSGraph → Metal GPU
 
 ## Build & Test Commands
 
@@ -144,6 +148,7 @@ make check
 - `crates/core/src/ffi.rs` — Rust-Swift FFI boundary (extern "C" declarations + safe wrappers)
 - `crates/core/src/backend_ffi.rs` — Rust-C++ FFI bridge (17 extern "C" functions for PrivateUse1)
 - `crates/core/src/eager_ffi.rs` — Eager dispatch FFI bridge (alloc, free, binary/unary/matmul ops, views, find_by_data_ptr reverse lookup)
+- `crates/core/src/compiled_graph.rs` — Compiled graph executor (bytecode → per-op or MPSGraph execution)
 - `crates/core/src/lazy.rs` — LazyRuntime: graph recording, eval, pre-allocated buffers, deferred-free (future: torch.compile backend)
 - `crates/core/src/fusion.rs` — Kernel fusion (matmul+add+gelu → single Metal kernel) (future: torch.compile backend)
 - `crates/core/src/device.rs` — RAII Device wrapper with Drop-based cleanup
@@ -156,6 +161,7 @@ make check
 - `swift/Sources/AppleGPUBridge/buffer.swift` — MTLBuffer C ABI (create, read, write, destroy)
 - `swift/Sources/AppleGPUBridge/compute.swift` — Metal compute pipeline C ABI (binary, unary, matmul dispatch)
 - `swift/Sources/AppleGPUBridge/kernels.swift` — MSL kernel source strings (used by Swift tests)
+- `swift/Sources/AppleGPUBridge/mpsgraph.swift` — MPSGraph integration (build, cache, execute via C ABI)
 - `swift/Sources/AppleGPUBridge/include/bridge.h` — shared C header for the FFI contract
 
 ### C++ Backend (PrivateUse1)
