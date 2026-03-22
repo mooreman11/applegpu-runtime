@@ -101,6 +101,9 @@ private func buildGraph(
         nodes.append(ph)
     }
 
+    // Track which node indices are transposed views (for matmul optimization)
+    var isTransposed = Set<Int>()
+
     // Parse and build ops
     var cursor = 0
     while cursor < opsLen {
@@ -129,6 +132,102 @@ private func buildGraph(
         // Build MPSGraph operation
         if opCode == OP_IDENTITY {
             nodes.append(nodes[inputIndices[0]])
+            if isTransposed.contains(inputIndices[0]) {
+                isTransposed.insert(nodes.count - 1)
+            }
+            continue
+        }
+
+        if opCode == OP_TRANSPOSE {
+            // Track this as a transposed view — the matmul/addmm handlers
+            // will create a new placeholder with swapped shape dimensions
+            // so MPSGraph reads the buffer in transposed layout.
+            isTransposed.insert(nodes.count)
+            nodes.append(nodes[inputIndices[0]])  // source tensor reference
+            continue
+        }
+
+        // For matmul/addmm, check if inputs are transposed and use native flags
+        if opCode == OP_MATMUL {
+            let primaryIdx = inputIndices[0]
+            let secondaryIdx = inputIndices[1]
+            var primary = nodes[primaryIdx]
+            var secondary = nodes[secondaryIdx]
+            if isTransposed.contains(primaryIdx) {
+                if let s = primary.shape, s.count == 2 && s[0] == s[1] {
+                    return nil  // Square transpose — fall back to per-op
+                }
+                primary = graph.transposeTensor(primary, dimension: 0, withDimension: 1, name: "trans_a")
+            }
+            if isTransposed.contains(secondaryIdx) {
+                if let s = secondary.shape, s.count == 2 && s[0] == s[1] {
+                    return nil  // Square transpose — fall back to per-op
+                }
+                secondary = graph.transposeTensor(secondary, dimension: 0, withDimension: 1, name: "trans_b")
+            }
+            let mm = graph.matrixMultiplication(primary: primary, secondary: secondary, name: nil)
+            nodes.append(mm)
+            continue
+        }
+
+        if opCode == OP_ADDMM {
+            // addmm(bias, mat1, mat2) = mm(mat1, mat2) + bias
+            // In the FX graph, mat2 is typically t(weight). We detect this
+            // via the isTransposed set and use a reversed-shape placeholder
+            // so MPSGraph reads the buffer data in transposed layout.
+            let biasIdx = inputIndices[0]
+            let mat1Idx = inputIndices[1]
+            let mat2Idx = inputIndices[2]
+            var mat1 = nodes[mat1Idx]
+            var mat2 = nodes[mat2Idx]
+
+            if isTransposed.contains(mat2Idx) {
+                // mat2 is a transpose view. The underlying buffer has
+                // the ORIGINAL (pre-transpose) layout. We need to tell
+                // MPSGraph about the transpose. Since transposeTensor
+                // gets optimized away for square matrices, we use a
+                // workaround: read the buffer with row-major strides
+                // as if it were column-major, by creating a placeholder
+                // with swapped shape and reading sequentially.
+                //
+                // The column-major read is equivalent to:
+                //   mat2[i,j] = buffer[j * cols + i] (column-major)
+                // but MPSGraph always reads row-major:
+                //   mat2[i,j] = buffer[i * cols + j]
+                //
+                // For the transpose to work, we need to physically
+                // transpose the data. Use the reverse approach: tell
+                // matmul to use secondaryTranspose.
+                //
+                // Unfortunately MPSGraph.matrixMultiplication doesn't
+                // have a transpose parameter. We must use transposeTensor.
+                //
+                // Alternative: read buffer as [cols, rows] shape and
+                // let matmul treat it that way. Then the "transpose"
+                // is implicit in the shape swap.
+                //
+                // mat2 originally is weight [out, in], t(weight) = [in, out]
+                // buffer data: row-major [out, in]
+                // If we declare placeholder as [in, out] and read row-major,
+                // we get wrong data.
+                //
+                // The only correct approach: physically copy the data
+                // OR use a gather-based transpose in the graph.
+                //
+                // For now: fall back to per-op execution for graphs with
+                // square-matrix transposes.
+                if let s = mat2.shape, s.count == 2 && s[0] == s[1] {
+                    return nil  // Can't handle square transpose — fall back
+                }
+                mat2 = graph.transposeTensor(mat2, dimension: 0, withDimension: 1, name: "trans_mat2")
+            }
+            if isTransposed.contains(mat1Idx) {
+                mat1 = graph.transposeTensor(mat1, dimension: 0, withDimension: 1, name: "trans_mat1")
+            }
+
+            let mm = graph.matrixMultiplication(primary: mat1, secondary: mat2, name: nil)
+            let result = graph.addition(mm, nodes[biasIdx], name: nil)
+            nodes.append(result)
             continue
         }
 
@@ -204,16 +303,23 @@ private func buildOp(
         }
         return result
     case OP_TRANSPOSE:
-        // Transpose last two dims
-        let rank = inp(0).shape?.count ?? 2
+        // Transpose last two dims — use the SHAPE from bytecode (outShape),
+        // not from the MPSGraphTensor which may not carry shape metadata.
+        let rank = outShape.count
+        if rank < 2 { return nil }
         return graph.transposeTensor(inp(0),
             dimension: rank - 2, withDimension: rank - 1, name: nil)
     case OP_VIEW:
         return graph.reshape(inp(0), shape: outShape, name: nil)
     case OP_ADDMM:
-        // bias + mm(mat1, mat2)
+        // addmm(bias, mat1, mat2) = mm(mat1, mat2) + bias
+        // In the FX graph, mat2 is usually t(weight) — a transpose node.
+        // MPSGraph may optimize away the transpose if shapes match.
+        // Use secondaryTranspose if mat2 is a transpose node.
+        let mat1 = inp(1)
+        let mat2 = inp(2)
         let mm = graph.matrixMultiplication(
-            primary: inp(1), secondary: inp(2), name: nil)
+            primary: mat1, secondary: mat2, name: nil)
         return graph.addition(mm, inp(0), name: nil)
     default:
         return nil // Unsupported
@@ -320,6 +426,21 @@ public func gpuBridgeMPSGraphRun(
         feeds[cached.placeholders[i]] = tensorData
     }
 
+    // Debug: print first few values of each input
+    if ProcessInfo.processInfo.environment["APPLEGPU_LOG_MPSGRAPH"] != nil {
+        for i in 0..<Int(nInputs) {
+            if let bufPtr = inputBuffers[i] {
+                let gpuBuf = Unmanaged<GPUBufferBase>.fromOpaque(bufPtr).takeUnretainedValue()
+                let ptr = gpuBuf.buffer.contents().assumingMemoryBound(to: Float.self)
+                let n = min(4, gpuBuf.buffer.length / 4)
+                var vals: [Float] = []
+                for j in 0..<n { vals.append(ptr[j]) }
+                NSLog("[mpsgraph] input[%d] shape=%@ first=%@", i,
+                      cached.inputShapes[i].description, vals.description)
+            }
+        }
+    }
+
     // Execute graph using the command queue (synchronous — waits for completion)
     let results = cached.graph.run(
         with: queue,
@@ -327,23 +448,18 @@ public func gpuBridgeMPSGraphRun(
         targetTensors: cached.outputs,
         targetOperations: nil)
 
-    // Copy results to pre-allocated output buffers using a blit encoder
-    guard let cb = queue.makeCommandBuffer() else { return -3 }
+    // Copy results to pre-allocated output buffers via CPU memcpy.
+    // MPSGraph.run() is synchronous — results are ready when it returns.
     for i in 0..<Int(nOutputs) {
         guard let outBufPtr = outputBuffers[i] else { return -4 }
         let outGpuBuf = Unmanaged<GPUBufferBase>.fromOpaque(outBufPtr).takeUnretainedValue()
         guard let resultData = results[cached.outputs[i]] else { return -5 }
 
-        // Export result to our pre-allocated buffer
-        resultData.mpsndarray().exportData(
-            with: cb,
-            to: outGpuBuf.buffer,
-            destinationDataType: cached.inputDtypes.first ?? .float32,
-            offset: 0,
-            rowStrides: nil)
+        // Read bytes from the MPSNDArray result into our shared-memory buffer
+        resultData.mpsndarray().readBytes(
+            outGpuBuf.buffer.contents(),
+            strideBytes: nil as UnsafeMutablePointer<Int>?)
     }
-    cb.commit()
-    cb.waitUntilCompleted()
 
     return 0
 }

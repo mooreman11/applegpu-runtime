@@ -55,9 +55,10 @@ uint64_t resolve_tensor_id(const at::Tensor& t) {
         }
     }
 
-    // Also check storage offset
-    if (matches && t.storage_offset() == 0) {
-        return base_id;  // Shape matches, no offset — use the base ID
+    // Also check storage offset AND contiguity.
+    // For square transposed views, shape matches but strides differ — must create a view.
+    if (matches && t.storage_offset() == 0 && t.is_contiguous()) {
+        return base_id;  // Shape matches, contiguous, no offset — use the base ID
     }
 
     // Create an eager view with the correct shape/strides/offset.
@@ -462,6 +463,8 @@ at::Tensor applegpu_sub(const at::Tensor& self, const at::Tensor& other, const a
 bool is_simple_transpose(const at::Tensor& t) {
     if (t.dim() != 2 || t.is_contiguous()) return false;
     // A transposed [M,N] has strides [1, M] (from base [N,M] with strides [M, 1])
+    // Skip square matrices — MPS transposeRight doesn't work correctly for N==M
+    if (t.size(0) == t.size(1)) return false;
     return t.stride(0) == 1 && t.stride(1) == (int64_t)t.size(0);
 }
 
