@@ -8,13 +8,38 @@
 //!   op_code: u8, n_inputs: u8, inputs: [u16; n], out_ndim: u8,
 //!   out_dims: [u64; ndim], out_dtype: u8, params_len: u8, params: [f32; plen]
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use crate::compute;
 use crate::device::Device;
 use crate::eager::EagerRuntime;
 use crate::error::{GpuError, Result};
 use crate::tensor::{DType, next_tensor_id, Shape};
+
+/// Thread-safe wrapper for MPSGraph handle pointers.
+struct GraphHandle(*mut std::ffi::c_void);
+unsafe impl Send for GraphHandle {}
+unsafe impl Sync for GraphHandle {}
+
+/// Cache for compiled MPSGraph handles. Keyed by (bytecode_hash, input_shapes_hash).
+static MPSGRAPH_CACHE: Mutex<Option<HashMap<u64, GraphHandle>>> = Mutex::new(None);
+
+fn mpsgraph_cache_key(ops_data: &[u8], shapes_flat: &[i64]) -> u64 {
+    // FNV-1a hash
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for &b in ops_data {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    for &s in shapes_flat {
+        for b in s.to_le_bytes() {
+            hash ^= b as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
+    hash
+}
 
 // Op codes — keep in sync with compile_backend.py
 pub const OP_ADD: u8 = 0;
@@ -212,13 +237,7 @@ pub fn execute_mpsgraph(
         .copied()
         .collect();
 
-    if std::env::var("APPLEGPU_LOG_MPSGRAPH").is_ok() {
-        eprintln!("[mpsgraph] building: {} inputs, {} bytes, {} graph outputs (of {} total)",
-                  n_inputs, ops_data.len(), graph_output_indices.len(), n_outputs);
-    }
-
     if graph_output_indices.is_empty() {
-        // All outputs are pass-throughs — no MPSGraph needed
         for (i, &idx) in output_indices.iter().enumerate() {
             let input_tid = input_tids[idx as usize];
             let tensor = rt.get(input_tid)?;
@@ -228,23 +247,39 @@ pub fn execute_mpsgraph(
         return Ok(n_outputs);
     }
 
-    let graph_handle = unsafe {
-        crate::ffi::gpu_bridge_mpsgraph_build(
-            device.raw_handle() as *mut _,
-            ops_data.as_ptr(), ops_data.len() as u32,
-            n_inputs as u32,
-            shapes_flat.as_ptr(),
-            ndims.as_ptr(),
-            dtypes.as_ptr(),
-            graph_output_indices.len() as u32,
-            graph_output_indices.as_ptr(),
-        )
+    // Cache lookup: reuse compiled MPSGraph if we've seen this bytecode + shapes before
+    let cache_key = mpsgraph_cache_key(ops_data, &shapes_flat);
+    let graph_handle = {
+        let mut cache = MPSGRAPH_CACHE.lock().unwrap();
+        let map = cache.get_or_insert_with(HashMap::new);
+        if let Some(cached) = map.get(&cache_key) {
+            cached.0 // Cache hit — reuse compiled graph
+        } else {
+            // Cache miss — build new MPSGraph
+            let handle = unsafe {
+                crate::ffi::gpu_bridge_mpsgraph_build(
+                    device.raw_handle() as *mut _,
+                    ops_data.as_ptr(), ops_data.len() as u32,
+                    n_inputs as u32,
+                    shapes_flat.as_ptr(),
+                    ndims.as_ptr(),
+                    dtypes.as_ptr(),
+                    graph_output_indices.len() as u32,
+                    graph_output_indices.as_ptr(),
+                )
+            };
+            if handle.is_null() {
+                return Err(GpuError::ComputeFailed(
+                    "MPSGraph build failed (unsupported op?) — falling back to per-op".into()));
+            }
+            if std::env::var("APPLEGPU_LOG_MPSGRAPH").is_ok() {
+                eprintln!("[mpsgraph] built and cached: key={:#x}, {} inputs, {} graph outputs",
+                          cache_key, n_inputs, graph_output_indices.len());
+            }
+            map.insert(cache_key, GraphHandle(handle));
+            handle
+        }
     };
-
-    if graph_handle.is_null() {
-        return Err(GpuError::ComputeFailed(
-            "MPSGraph build failed (unsupported op?) — falling back to per-op".into()));
-    }
 
     // Parse output shapes from bytecode to pre-allocate output buffers.
     // Outputs that reference placeholders are pass-throughs (no MPSGraph needed).

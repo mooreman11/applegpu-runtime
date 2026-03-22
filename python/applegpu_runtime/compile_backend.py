@@ -923,6 +923,8 @@ class CompiledGraphRunner:
         self.gm = gm
         self.lib = lib
         self._deferred_free = []  # tensor IDs to free from previous run
+        self._mpsgraph_handle = None  # cached MPSGraph (built on first call)
+        self._mpsgraph_failed = False  # set to True if build fails (don't retry)
         result = _serialize_graph(gm)
         if result is None:
             # Can't serialize — fall back to Python FX interpreter
@@ -932,16 +934,17 @@ class CompiledGraphRunner:
             self._serialized, self._n_placeholders, self._output_indices = result
             self._interp = None
 
-        # Setup FFI signature
+        # Setup FFI signatures
         if not hasattr(lib, '_graph_ffi_setup'):
             lib.applegpu_eager_execute_graph.argtypes = [
-                ctypes.c_void_p, ctypes.c_uint32,  # ops_data, ops_len
-                ctypes.POINTER(ctypes.c_uint64), ctypes.c_uint32,  # input_tids, n_inputs
-                ctypes.POINTER(ctypes.c_uint16), ctypes.c_uint32,  # output_indices, n_outputs
-                ctypes.POINTER(ctypes.c_uint64),  # out_tids
-                ctypes.POINTER(ctypes.c_void_p),  # out_ptrs
+                ctypes.c_void_p, ctypes.c_uint32,
+                ctypes.POINTER(ctypes.c_uint64), ctypes.c_uint32,
+                ctypes.POINTER(ctypes.c_uint16), ctypes.c_uint32,
+                ctypes.POINTER(ctypes.c_uint64),
+                ctypes.POINTER(ctypes.c_void_p),
             ]
             lib.applegpu_eager_execute_graph.restype = ctypes.c_int32
+
             lib._graph_ffi_setup = True
 
     def run(self, *args):
