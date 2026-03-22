@@ -75,6 +75,45 @@ private func readF32LE(_ data: UnsafePointer<UInt8>, _ cursor: inout Int) -> Flo
     cursor += 4; return Float(bitPattern: bits)
 }
 
+/// Force a 2D transpose that MPSGraph can't optimize away.
+/// For non-square matrices, transposeTensor works. For square matrices,
+/// MPSGraph optimizes it to a no-op, so we use flatten → gather → reshape
+/// to physically rearrange the data.
+private func forceTranspose(graph: MPSGraph, tensor: MPSGraphTensor) -> MPSGraphTensor {
+    guard let shape = tensor.shape, shape.count == 2 else {
+        return graph.transposeTensor(tensor, dimension: 0, withDimension: 1, name: nil)
+    }
+    let rows = shape[0].intValue
+    let cols = shape[1].intValue
+
+    // For non-square, transposeTensor works correctly
+    if rows != cols {
+        return graph.transposeTensor(tensor, dimension: 0, withDimension: 1, name: nil)
+    }
+
+    // Square: build transposed indices [0, N, 1, N+1, 2, N+2, ...]
+    // For a [N,N] matrix flattened, element [i,j] is at flat index i*N+j.
+    // Transposed element [j,i] = original [i,j] = flat index i*N+j.
+    // So transposed flat index k maps to: row=k/N, col=k%N → original [col,row] = col*N+row.
+    // transposed_flat[k] = (k % N) * N + (k / N)
+    let n = rows
+    var indices: [Int32] = []
+    for k in 0..<(n * n) {
+        let row = k / n
+        let col = k % n
+        indices.append(Int32(col * n + row))
+    }
+    let indicesData = Data(bytes: indices, count: indices.count * MemoryLayout<Int32>.size)
+    let indicesTensor = graph.constant(indicesData, shape: [NSNumber(value: n * n)], dataType: .int32)
+
+    // Flatten → gather → reshape
+    // Reshape indices to [N*N, 1] for gatherND on a 1D tensor
+    let indicesReshaped = graph.reshape(indicesTensor, shape: [NSNumber(value: n * n), 1 as NSNumber], name: nil)
+    let flat = graph.reshape(tensor, shape: [NSNumber(value: n * n)], name: nil)
+    let gathered = graph.gatherND(withUpdatesTensor: flat, indicesTensor: indicesReshaped, batchDimensions: 0, name: nil)
+    return graph.reshape(gathered, shape: [NSNumber(value: n), NSNumber(value: n)], name: nil)
+}
+
 // MARK: - Graph builder
 
 /// Build an MPSGraph from serialized bytecode.
@@ -154,16 +193,10 @@ private func buildGraph(
             var primary = nodes[primaryIdx]
             var secondary = nodes[secondaryIdx]
             if isTransposed.contains(primaryIdx) {
-                if let s = primary.shape, s.count == 2 && s[0] == s[1] {
-                    return nil  // Square transpose — fall back to per-op
-                }
-                primary = graph.transposeTensor(primary, dimension: 0, withDimension: 1, name: "trans_a")
+                primary = forceTranspose(graph: graph, tensor: primary)
             }
             if isTransposed.contains(secondaryIdx) {
-                if let s = secondary.shape, s.count == 2 && s[0] == s[1] {
-                    return nil  // Square transpose — fall back to per-op
-                }
-                secondary = graph.transposeTensor(secondary, dimension: 0, withDimension: 1, name: "trans_b")
+                secondary = forceTranspose(graph: graph, tensor: secondary)
             }
             let mm = graph.matrixMultiplication(primary: primary, secondary: secondary, name: nil)
             nodes.append(mm)
@@ -171,58 +204,16 @@ private func buildGraph(
         }
 
         if opCode == OP_ADDMM {
-            // addmm(bias, mat1, mat2) = mm(mat1, mat2) + bias
-            // In the FX graph, mat2 is typically t(weight). We detect this
-            // via the isTransposed set and use a reversed-shape placeholder
-            // so MPSGraph reads the buffer data in transposed layout.
             let biasIdx = inputIndices[0]
             let mat1Idx = inputIndices[1]
             let mat2Idx = inputIndices[2]
             var mat1 = nodes[mat1Idx]
             var mat2 = nodes[mat2Idx]
-
             if isTransposed.contains(mat2Idx) {
-                // mat2 is a transpose view. The underlying buffer has
-                // the ORIGINAL (pre-transpose) layout. We need to tell
-                // MPSGraph about the transpose. Since transposeTensor
-                // gets optimized away for square matrices, we use a
-                // workaround: read the buffer with row-major strides
-                // as if it were column-major, by creating a placeholder
-                // with swapped shape and reading sequentially.
-                //
-                // The column-major read is equivalent to:
-                //   mat2[i,j] = buffer[j * cols + i] (column-major)
-                // but MPSGraph always reads row-major:
-                //   mat2[i,j] = buffer[i * cols + j]
-                //
-                // For the transpose to work, we need to physically
-                // transpose the data. Use the reverse approach: tell
-                // matmul to use secondaryTranspose.
-                //
-                // Unfortunately MPSGraph.matrixMultiplication doesn't
-                // have a transpose parameter. We must use transposeTensor.
-                //
-                // Alternative: read buffer as [cols, rows] shape and
-                // let matmul treat it that way. Then the "transpose"
-                // is implicit in the shape swap.
-                //
-                // mat2 originally is weight [out, in], t(weight) = [in, out]
-                // buffer data: row-major [out, in]
-                // If we declare placeholder as [in, out] and read row-major,
-                // we get wrong data.
-                //
-                // The only correct approach: physically copy the data
-                // OR use a gather-based transpose in the graph.
-                //
-                // For now: fall back to per-op execution for graphs with
-                // square-matrix transposes.
-                if let s = mat2.shape, s.count == 2 && s[0] == s[1] {
-                    return nil  // Can't handle square transpose — fall back
-                }
-                mat2 = graph.transposeTensor(mat2, dimension: 0, withDimension: 1, name: "trans_mat2")
+                mat2 = forceTranspose(graph: graph, tensor: mat2)
             }
             if isTransposed.contains(mat1Idx) {
-                mat1 = graph.transposeTensor(mat1, dimension: 0, withDimension: 1, name: "trans_mat1")
+                mat1 = forceTranspose(graph: graph, tensor: mat1)
             }
 
             let mm = graph.matrixMultiplication(primary: mat1, secondary: mat2, name: nil)
