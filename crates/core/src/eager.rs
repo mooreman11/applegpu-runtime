@@ -184,6 +184,16 @@ impl EagerRuntime {
         self.pool.stats()
     }
 
+    /// Acquire a buffer from the pool (for MPSGraph output pre-allocation).
+    pub fn pool_acquire(&mut self, device: &Device, size: usize) -> Result<crate::buffer::Buffer> {
+        self.pool.acquire(device, size)
+    }
+
+    /// Insert a pre-built EagerTensor into the registry (for MPSGraph outputs).
+    pub fn insert_eager_tensor(&mut self, id: u64, tensor: EagerTensor) {
+        self.tensors.insert(id, tensor);
+    }
+
     // ── Streaming command buffer management ──────────────────────────
 
     /// Begin a streaming command buffer session. No-op if already active.

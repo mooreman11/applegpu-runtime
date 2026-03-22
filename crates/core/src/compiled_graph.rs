@@ -8,9 +8,13 @@
 //!   op_code: u8, n_inputs: u8, inputs: [u16; n], out_ndim: u8,
 //!   out_dims: [u64; ndim], out_dtype: u8, params_len: u8, params: [f32; plen]
 
+use std::sync::Arc;
+
+use crate::compute;
 use crate::device::Device;
 use crate::eager::EagerRuntime;
 use crate::error::{GpuError, Result};
+use crate::tensor::{DType, next_tensor_id, Shape};
 
 // Op codes — keep in sync with compile_backend.py
 pub const OP_ADD: u8 = 0;
@@ -167,4 +171,207 @@ pub fn execute(
     }
 
     Ok(n_out)
+}
+
+/// Try to execute the compiled graph via MPSGraph (fused execution).
+/// Returns Ok(n_outputs) on success, or Err if MPSGraph build failed
+/// (unsupported op — caller should fall back to per-op execute()).
+pub fn execute_mpsgraph(
+    rt: &mut EagerRuntime,
+    device: &Device,
+    ops_data: &[u8],
+    input_tids: &[u64],
+    output_indices: &[u16],
+    out_tids: &mut [u64],
+    out_ptrs: &mut [*mut u8],
+) -> Result<usize> {
+    let n_inputs = input_tids.len();
+    let n_outputs = output_indices.len();
+
+    // Collect input shapes, ndims, dtypes, buffer handles for FFI
+    let mut shapes_flat: Vec<i64> = Vec::new();
+    let mut ndims: Vec<u32> = Vec::new();
+    let mut dtypes: Vec<u32> = Vec::new();
+    let mut input_buf_handles: Vec<*const crate::ffi::GPUBufferHandle> = Vec::new();
+
+    for &tid in input_tids {
+        let tensor = rt.get(tid)?;
+        let shape = tensor.shape_vec();
+        ndims.push(shape.len() as u32);
+        for &d in &shape {
+            shapes_flat.push(d as i64);
+        }
+        dtypes.push(tensor.dtype.to_wire());
+        input_buf_handles.push(tensor.buffer.raw_handle() as *const _);
+    }
+
+    // Build (or retrieve cached) MPSGraph
+    // Only pass non-placeholder output indices to MPSGraph
+    let graph_output_indices: Vec<u16> = output_indices.iter()
+        .filter(|&&idx| (idx as usize) >= n_inputs)
+        .copied()
+        .collect();
+
+    if std::env::var("APPLEGPU_LOG_MPSGRAPH").is_ok() {
+        eprintln!("[mpsgraph] building: {} inputs, {} bytes, {} graph outputs (of {} total)",
+                  n_inputs, ops_data.len(), graph_output_indices.len(), n_outputs);
+    }
+
+    if graph_output_indices.is_empty() {
+        // All outputs are pass-throughs — no MPSGraph needed
+        for (i, &idx) in output_indices.iter().enumerate() {
+            let input_tid = input_tids[idx as usize];
+            let tensor = rt.get(input_tid)?;
+            out_tids[i] = input_tid;
+            out_ptrs[i] = tensor.data_ptr();
+        }
+        return Ok(n_outputs);
+    }
+
+    let graph_handle = unsafe {
+        crate::ffi::gpu_bridge_mpsgraph_build(
+            device.raw_handle() as *mut _,
+            ops_data.as_ptr(), ops_data.len() as u32,
+            n_inputs as u32,
+            shapes_flat.as_ptr(),
+            ndims.as_ptr(),
+            dtypes.as_ptr(),
+            graph_output_indices.len() as u32,
+            graph_output_indices.as_ptr(),
+        )
+    };
+
+    if graph_handle.is_null() {
+        return Err(GpuError::ComputeFailed(
+            "MPSGraph build failed (unsupported op?) — falling back to per-op".into()));
+    }
+
+    // Parse output shapes from bytecode to pre-allocate output buffers.
+    // Outputs that reference placeholders are pass-throughs (no MPSGraph needed).
+    let output_metas = parse_output_shapes(ops_data, input_tids.len(), output_indices)?;
+
+    // Separate MPSGraph outputs from placeholder pass-throughs
+    let mut mpsgraph_out_indices: Vec<u16> = Vec::new();
+    let mut mpsgraph_buf_handles: Vec<*mut crate::ffi::GPUBufferHandle> = Vec::new();
+
+    for (i, meta) in output_metas.iter().enumerate() {
+        match meta {
+            Some((shape, dtype)) => {
+                // Computed output — allocate buffer for MPSGraph to write into
+                let nbytes = shape.iter().product::<usize>() * dtype.size_bytes();
+                let alloc_bytes = if nbytes == 0 { 4 } else { nbytes };
+                let buffer = Arc::new(rt.pool_acquire(device, alloc_bytes)?);
+                let ptr = buffer.contents();
+                mpsgraph_buf_handles.push(buffer.raw_handle());
+                mpsgraph_out_indices.push(output_indices[i]);
+
+                let out_id = next_tensor_id();
+                let out_shape = Shape::new(shape.clone())?;
+                let out_layout = crate::tensor::TensorLayout::contiguous(out_shape);
+                rt.insert_eager_tensor(out_id, crate::eager::EagerTensor {
+                    buffer,
+                    layout: out_layout,
+                    dtype: *dtype,
+                    offset: 0,
+                });
+                out_tids[i] = out_id;
+                out_ptrs[i] = ptr;
+            }
+            None => {
+                // Placeholder pass-through — just copy the input tensor reference
+                let ph_idx = output_indices[i] as usize;
+                let input_tid = input_tids[ph_idx];
+                let tensor = rt.get(input_tid)?;
+                out_tids[i] = input_tid;
+                out_ptrs[i] = tensor.data_ptr();
+            }
+        }
+    }
+
+    // Flush any pending streaming work before MPSGraph runs
+    rt.flush_and_wait();
+
+    // If no computed outputs (all pass-throughs), skip MPSGraph execution
+    if mpsgraph_buf_handles.is_empty() {
+        return Ok(n_outputs);
+    }
+
+    // Execute MPSGraph with only the computed outputs
+    let queue = compute::get_shared_queue(device);
+    let rc = unsafe {
+        crate::ffi::gpu_bridge_mpsgraph_run(
+            graph_handle,
+            queue,
+            input_buf_handles.as_ptr(),
+            n_inputs as u32,
+            mpsgraph_buf_handles.as_ptr(),
+            mpsgraph_buf_handles.len() as u32,
+        )
+    };
+
+    if rc != 0 {
+        return Err(GpuError::ComputeFailed(format!("MPSGraph run failed: rc={}", rc)));
+    }
+
+    Ok(n_outputs)
+}
+
+/// Parse output shapes from the bytecode for the given output indices.
+fn parse_output_shapes(
+    ops_data: &[u8],
+    n_placeholders: usize,
+    output_indices: &[u16],
+) -> Result<Vec<Option<(Vec<usize>, DType)>>> {
+    // Walk the bytecode, recording (shape, dtype) for each node
+    let mut node_meta: Vec<(Vec<usize>, DType)> = Vec::new();
+
+    // Placeholder nodes don't appear in bytecode — their metadata comes from inputs
+    // We need to fill these from the caller. For now, skip them and index correctly.
+
+    let mut cursor = 0;
+    while cursor < ops_data.len() {
+        let _op_code = ops_data[cursor]; cursor += 1;
+        let n_inputs = ops_data[cursor] as usize; cursor += 1;
+        cursor += n_inputs * 2; // skip input indices
+
+        let out_ndim = ops_data[cursor] as usize; cursor += 1;
+        let mut shape = Vec::with_capacity(out_ndim);
+        for _ in 0..out_ndim {
+            let dim = u64::from_le_bytes([
+                ops_data[cursor], ops_data[cursor+1], ops_data[cursor+2], ops_data[cursor+3],
+                ops_data[cursor+4], ops_data[cursor+5], ops_data[cursor+6], ops_data[cursor+7],
+            ]) as usize;
+            cursor += 8;
+            shape.push(dim);
+        }
+
+        let dtype_wire = ops_data[cursor]; cursor += 1;
+        let dtype = DType::from_wire(dtype_wire as u32).unwrap_or(DType::Float32);
+
+        let params_len = ops_data[cursor] as usize; cursor += 1;
+        cursor += params_len * 4; // skip params
+
+        node_meta.push((shape, dtype));
+    }
+
+    // Map output indices to shapes.
+    // Outputs that reference placeholders (idx < n_placeholders) get None —
+    // the caller should pass these through from input buffers directly.
+    let mut results = Vec::with_capacity(output_indices.len());
+    for &idx in output_indices {
+        let i = idx as usize;
+        if i < n_placeholders {
+            // Placeholder pass-through — no shape/dtype info needed from bytecode
+            results.push(None);
+        } else {
+            let node_idx = i - n_placeholders;
+            if node_idx >= node_meta.len() {
+                return Err(GpuError::InvalidTensor(format!(
+                    "MPSGraph output index {} out of range", idx)));
+            }
+            results.push(Some(node_meta[node_idx].clone()));
+        }
+    }
+
+    Ok(results)
 }

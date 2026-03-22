@@ -251,6 +251,29 @@ extern "C" {
         transpose_b: bool,
     ) -> *mut std::ffi::c_void;
 
+    // MPSGraph fused execution
+    pub fn gpu_bridge_mpsgraph_build(
+        device: *mut std::ffi::c_void,
+        ops_data: *const u8, ops_len: u32,
+        n_inputs: u32,
+        input_shapes_flat: *const i64,
+        input_ndims: *const u32,
+        input_dtypes: *const u32,
+        n_outputs: u32,
+        output_indices: *const u16,
+    ) -> *mut std::ffi::c_void;
+
+    pub fn gpu_bridge_mpsgraph_run(
+        graph_handle: *mut std::ffi::c_void,
+        queue_handle: *mut std::ffi::c_void,
+        input_buffers: *const *const GPUBufferHandle,
+        n_inputs: u32,
+        output_buffers: *const *mut GPUBufferHandle,
+        n_outputs: u32,
+    ) -> i32;
+
+    pub fn gpu_bridge_mpsgraph_destroy(graph_handle: *mut std::ffi::c_void);
+
     pub fn gpu_bridge_compute_softmax_causal_nb(
         compute: *mut GPUComputeHandle,
         queue: *mut std::ffi::c_void,

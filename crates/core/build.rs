@@ -45,6 +45,7 @@ fn main() {
     println!("cargo:rustc-link-lib=dylib=swiftCore");
     println!("cargo:rustc-link-lib=framework=Metal");
     println!("cargo:rustc-link-lib=framework=MetalPerformanceShaders");
+    println!("cargo:rustc-link-lib=framework=MetalPerformanceShadersGraph");
     println!("cargo:rustc-link-lib=framework=Foundation");
 
     // Find Swift library path for swiftCore

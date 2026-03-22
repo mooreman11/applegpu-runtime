@@ -745,4 +745,23 @@ void gpu_bridge_encode_signal_event(void* command_buffer, void* event, uint64_t 
 void gpu_bridge_encode_wait_event(void* command_buffer, void* event, uint64_t value);
 void gpu_bridge_destroy_event(void* event);
 
+// ── MPSGraph fused execution ─────────────────────────────────────────────────
+void* gpu_bridge_mpsgraph_build(
+    void* device_handle,
+    const uint8_t* ops_data, uint32_t ops_len,
+    uint32_t n_inputs,
+    const int64_t* input_shapes_flat,
+    const uint32_t* input_ndims,
+    const uint32_t* input_dtypes,
+    uint32_t n_outputs,
+    const uint16_t* output_indices
+);
+int32_t gpu_bridge_mpsgraph_run(
+    void* graph_handle,
+    void* queue_handle,
+    const void** input_buffers, uint32_t n_inputs,
+    void** output_buffers, uint32_t n_outputs
+);
+void gpu_bridge_mpsgraph_destroy(void* graph_handle);
+
 #endif

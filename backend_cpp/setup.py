@@ -57,6 +57,7 @@ setup(
                 "-lswiftCore",
                 "-framework", "Metal",
                 "-framework", "MetalPerformanceShaders",
+                "-framework", "MetalPerformanceShadersGraph",
                 "-framework", "Foundation",
             ],
             extra_compile_args=["-std=c++17"],

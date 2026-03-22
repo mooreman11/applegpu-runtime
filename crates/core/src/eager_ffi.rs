@@ -542,6 +542,22 @@ pub extern "C" fn applegpu_eager_execute_graph(
     let ptrs_out = unsafe { std::slice::from_raw_parts_mut(out_ptrs, n_outputs as usize) };
 
     let mut rt = state.runtime.lock().unwrap();
+
+    // Try MPSGraph fused execution (opt-in via APPLEGPU_MPSGRAPH=1).
+    // Falls back to per-op execution if build fails or not enabled.
+    if std::env::var("APPLEGPU_MPSGRAPH").is_ok() {
+        match crate::compiled_graph::execute_mpsgraph(
+            &mut rt, &state.device, ops, inputs, outputs, tids_out, ptrs_out,
+        ) {
+            Ok(n) => return n as i32,
+            Err(e) => {
+                if std::env::var("APPLEGPU_LOG_MPSGRAPH").is_ok() {
+                    eprintln!("[mpsgraph] fallback: {}", e);
+                }
+            }
+        }
+    }
+
     match crate::compiled_graph::execute(
         &mut rt, &state.device, ops, inputs, outputs, tids_out, ptrs_out,
     ) {

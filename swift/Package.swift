@@ -19,6 +19,7 @@ let package = Package(
             linkerSettings: [
                 .linkedFramework("Metal"),
                 .linkedFramework("MetalPerformanceShaders"),
+                .linkedFramework("MetalPerformanceShadersGraph"),
             ]
         ),
         .testTarget(
