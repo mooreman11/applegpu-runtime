@@ -199,41 +199,74 @@ _C++ PrivateUse1 backend, native ops, view system, in-place ops, CPU fallback di
 
 ## Up Next
 
-### PRIORITY 1: Eager Metal Dispatch
-_Bypass the graph engine for the C++ PrivateUse1 path. Encode Metal commands directly into a streaming command buffer (MPS model). GPU executes in parallel with CPU encoding. Single commit+wait at sync points only._
-_Design spec: `docs/superpowers/specs/2026-03-20-eager-metal-dispatch-design.md`_
-- [x] D1: EagerRuntime in Rust — stride-aware tensor registry with Arc<Buffer> views, binary/unary/matmul dispatch, make_contiguous, inplace ops, 14 integration tests
-- [x] D2: Full C++ backend switchover — all ops use eager FFI, 22 Rust + 16 Python tests pass
-- [x] D3: GPU-native threshold_backward + mean_all — no mid-pipeline flush_and_wait, 24 Rust tests
-- [x] D4: Strided N-D sum kernel + eliminated hidden flushes (copy_, mean_all chain, binary_op strides). Zero CPU fallback. Forward/loss/step all sub-0.1ms.
+### PRIORITY 1: MPSGraph Integration for Container GPU Access
+_Our key differentiator: PyTorch `device='mps'` doesn't work in Docker containers (no Metal driver inside Linux). Our architecture bridges Metal on the host to containers via IPC. MPSGraph integration brings Apple's fused GPU performance to containers where MPS can't reach._
+- [ ] MPSGraph subgraph capture — record op sequences between sync points
+- [ ] MPSGraph compilation — convert captured subgraphs to MPSGraph operations
+- [ ] MPSGraph execution — run compiled graphs via the Swift bridge (same IPC path containers already use)
+- [ ] Benchmark: target parity with `device='mps'` at h≥1024
+- [ ] Container verification: Docker + gpu-service → MPSGraph → Metal GPU
 
-### PRIORITY 2: Custom FX Interpreter for torch.compile
-_The remaining bottleneck is PyTorch's C++ dispatcher overhead (7.5µs/op × 60 backward ops = 4.4ms). torch.compile with passthrough gives 8% speedup but ops still dispatch through C++ machinery. The fix: a custom FX graph interpreter that calls our Rust eager FFI directly via ctypes, bypassing PyTorch's Dispatcher entirely._
-_Scaffold: `python/applegpu_runtime/compile_backend.py` (aot_autograd + accelerator registration working)_
-- [x] Register `applegpu` as torch accelerator (torch._C._rename_privateuse1_backend)
-- [x] aot_autograd integration — captures forward (6 ops) + backward (16 ops) as separate FX graphs
-- [x] Passthrough compiler with boxed args — 8% speedup (skips some autograd overhead)
-- [ ] Custom FX interpreter: walk graph nodes, map to eager FFI calls via ctypes
-- [ ] Op mapping: aten.mm → applegpu_eager_matmul, aten.t → applegpu_eager_create_view, etc.
-- [ ] Benchmark: target GPU > CPU at h>=512 (eliminates 4ms dispatcher overhead)
-- [ ] Future: kernel fusion (matmul+add+relu → single Metal kernel)
-
-### PRIORITY 3: Stable Diffusion / `group_norm`
+### PRIORITY 2: Stable Diffusion / `group_norm`
+_One new kernel unlocks a whole model class._
 - [ ] `group_norm` kernel — single new Metal kernel
 - [ ] Stable Diffusion model wrapper + weight loading
 - [ ] End-to-end image generation test
 
-### PRIORITY 4: PyPI publishing
+### PRIORITY 3: Models on PrivateUse1
+_Prove the C++ backend works beyond MLP._
+- [ ] GPT-2 inference on PrivateUse1 — requires view fixes for multi-head attention
+- [ ] Whisper on PrivateUse1 — requires conv1d, layer_norm, embedding in eager path
+- [ ] Audit remaining CPU fallbacks for each model
+
+### PRIORITY 4: Remaining CPU Fallbacks
+_MLP training has zero fallback. These unlock broader model support._
+- [ ] `fill`/`zeros`/`ones` GPU kernels — avoid sync for init ops
+- [ ] `bernoulli_` / dropout — GPU RNG (Philox counter-based PRNG)
+- [ ] `div_.Scalar` — in-place scalar division (easy: scalar_mul with 1/scalar)
+
+### PRIORITY 5: PyPI Publishing
+_TestPyPI link exists. Real PyPI when ready for external users._
+- [x] TestPyPI — wheels uploaded, verified (https://test.pypi.org/project/applegpu-runtime/0.9.0/)
 - [ ] Create PyPI account + API token
 - [ ] Publish wheels to real PyPI
-- [ ] Add `PYPI_TOKEN` GitHub secret for automated releases
 
 ### Vsock Socket Relay (blocked)
 _Blocked by apple/containerization framework socket staging bug (errno 20 ENOTDIR)._
 - [ ] Fix socket staging — try low-level `LinuxContainer(rootfs:vmm:)` API or `dialVsock` manual relay
 - [ ] Remove TCP bridge once vsock path is proven
-- [ ] Delete VsockRelay.swift (kept with deprecation)
-- [ ] Socket helper unit tests
+
+---
+
+## Recently Completed
+
+### Eager Metal Dispatch (D1-D4) — DONE
+- [x] D1: EagerRuntime in Rust — stride-aware tensor registry with Arc<Buffer> views, binary/unary/matmul dispatch, make_contiguous, inplace ops, 14 integration tests
+- [x] D2: Full C++ backend switchover — all ops use eager FFI, 22 Rust + 16 Python tests pass
+- [x] D3: GPU-native threshold_backward + mean_all — no mid-pipeline flush_and_wait, 24 Rust tests
+- [x] D4: Strided N-D sum kernel + eliminated hidden flushes. Zero CPU fallback. Forward/loss/step all sub-0.1ms.
+
+### torch.compile Backend — DONE (two implementations)
+- [x] Custom FX interpreter: walk graph nodes, map to eager FFI calls via ctypes
+- [x] Op mapping: aten.mm → applegpu_eager_matmul, aten.t → applegpu_eager_create_view, etc.
+- [x] Rust compiled graph executor: serialized FX graph → single FFI call
+- [x] Benchmark result: C++ Dispatcher overhead (7.5µs/op × 30 ops = 225µs) is only ~10% of training time — NOT the bottleneck the original 4.4ms backward was from the Python `__torch_dispatch__` path, not PrivateUse1
+- [x] Kernel fusion investigation: no fusible chains in MLP graphs (addmm is not elementwise), fusion engine works but doesn't help this workload
+
+### MPSMatrixMultiplication — DONE
+- [x] Replaced custom MSL matmul with Apple's MPSMatrixMultiplication for Float32
+- [x] MPS transposed matmul — skip contiguity copies for backward transpose views
+- [x] Automatic fallback to custom kernel for tiny buffers (<16 bytes) and non-Float32
+- [x] Result: h=4096 training 0.78x → 1.59x CPU (2.2x improvement)
+
+### Bug Fixes
+- [x] Scalar tensor dtype bug — `empty_strided` allocated 0-dim scalars as UInt8
+- [x] `resize_` dtype — use `applegpu_eager_alloc` with correct dtype
+- [x] `torch.applegpu.synchronize()` — was no-op, now calls `flush_and_wait`
+- [x] GPU-native `mul_.Scalar` — `scalar_mul` + storage swap instead of flush + CPU loop
+- [x] `addmm` null check — prevents tid=0 propagation
+- [x] Compiled-graph deferred tensor ID cleanup
+- [x] Seed warning — added `manual_seed_all`, `_is_in_bad_fork` to device module
 
 ---
 
@@ -254,10 +287,12 @@ _MLP training has zero fallback. These are for broader model support._
 - [ ] `where`/`masked_fill` Bool condition enforcement (migration needed)
 
 ### Performance Optimization
-- [ ] Fine-grained locking — split `Mutex<EagerRuntime>` per-component (tensors vs pool vs registry)
+_Current state: 1.59x CPU at h=4096, MPS is 3.1x. Gap is ~20 per-op kernel launches vs MPS's ~5 fused dispatches._
+- [x] MPSMatrixMultiplication — replaced custom MSL matmul (2.2x improvement at h=4096)
+- [x] MPS transposed matmul — skip contiguity copies for backward transpose views
+- [x] GPU-native mul_.Scalar — scalar_mul + storage swap instead of flush + CPU loop
 - [ ] Encoder caching — keep MTLComputeCommandEncoder open across same-pipeline dispatches
-- [ ] Double-buffered command buffers — overlap GPU execution with CPU encoding
-- [ ] MTLSharedEvent for concurrent queue sync — useful for multi-queue eager dispatch
+- [ ] Fine-grained locking — split `Mutex<EagerRuntime>` per-component
 - [ ] Fused LSTM/GRU kernel — single Metal kernel per timestep for all gates
 
 ### Multi-Dtype
@@ -267,9 +302,9 @@ _MLP training has zero fallback. These are for broader model support._
 - [ ] Float64 compute kernels — deferred until Apple hardware adds MSL double support
 
 ### Models
-- [ ] GPT-2 inference on PrivateUse1 — requires view fixes for multi-head attention
-- [ ] Whisper on PrivateUse1 — requires conv1d, layer_norm, embedding in eager path
-- [ ] Stable Diffusion — group_norm kernel + model wrapper
+- [ ] Stable Diffusion — group_norm kernel + model wrapper (PRIORITY 1 above)
+- [ ] GPT-2 inference on PrivateUse1 — requires view fixes for multi-head attention (PRIORITY 2 above)
+- [ ] Whisper on PrivateUse1 — requires conv1d, layer_norm, embedding in eager path (PRIORITY 2 above)
 - [ ] Fine-tuned model export — save trained weights
 
 ### Training
