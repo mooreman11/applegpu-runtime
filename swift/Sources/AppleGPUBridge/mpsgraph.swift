@@ -432,14 +432,16 @@ public func gpuBridgeMPSGraphRun(
         }
     }
 
-    // Execute graph synchronously (MPSGraph handles command buffer internally)
+    // Execute graph synchronously via graph.run() — MPSGraph optimizes
+    // the internal command buffer management for best throughput.
     let results = cached.graph.run(
         with: queue,
         feeds: feeds,
         targetTensors: cached.outputs,
         targetOperations: nil)
 
-    // Copy results to pre-allocated output buffers
+    // Copy results to our pre-allocated shared-memory output buffers.
+    // readBytes is fast (~10µs per 128KB) since both sides are shared memory.
     for i in 0..<Int(nOutputs) {
         guard let outBufPtr = outputBuffers[i] else { return -4 }
         let outGpuBuf = Unmanaged<GPUBufferBase>.fromOpaque(outBufPtr).takeUnretainedValue()
