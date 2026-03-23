@@ -994,11 +994,21 @@ class CompiledGraphRunner:
 
         n_real = self._n_real
 
-        # Resolve input tensor IDs (reuse pre-allocated array)
+        # Resolve input tensor IDs with caching.
+        # Model parameters have stable storage pointers — cache their tensor IDs.
         input_tids = self._input_tids_arr
+        if not hasattr(self, '_tid_cache'):
+            self._tid_cache = {}
         for i, arg in enumerate(args[:self._n_placeholders]):
             if isinstance(arg, torch.Tensor) and arg.device.type in ('privateuseone', 'applegpu'):
-                input_tids[i] = _resolve_tensor_id(lib, arg)
+                ptr = arg.untyped_storage().data_ptr()
+                cached = self._tid_cache.get(ptr)
+                if cached is not None:
+                    input_tids[i] = cached
+                else:
+                    tid = _resolve_tensor_id(lib, arg)
+                    input_tids[i] = tid
+                    self._tid_cache[ptr] = tid
             else:
                 input_tids[i] = 0
 
@@ -1023,24 +1033,18 @@ class CompiledGraphRunner:
 
         # Flush and wrap outputs as PyTorch tensors
         lib.applegpu_eager_flush_and_wait()
-        # Collect input tensor IDs to avoid freeing pass-throughs
         input_tid_set = set(input_tids[i] for i in range(self._n_placeholders))
 
         real_results = []
-        real_out_idx = 0
         for i in range(n_real):
             tid = out_tids[i]
             ptr = out_ptrs[i]
-            # Use pre-computed shape if available, fall back to FFI query
-            out_pos = self._real_to_output_pos[i] if hasattr(self, '_real_to_output_pos') else i
-            shape = self._output_shapes.get(out_pos) if self._output_shapes else None
+            out_pos = self._real_to_output_pos[i]
+            shape = self._output_shapes.get(out_pos)
             if shape is None:
                 shape = _query_shape(lib, tid)
-            dtype = torch.float32
-            ref = TensorRef(tid, shape, dtype, ptr)
+            ref = TensorRef(tid, shape, torch.float32, ptr)
             real_results.append(_wrap_output(lib, ref))
-            # Only defer-free tensor IDs CREATED by graph execution,
-            # not input pass-throughs (which are still in use by the model)
             if tid not in input_tid_set:
                 self._deferred_free.append(tid)
 
