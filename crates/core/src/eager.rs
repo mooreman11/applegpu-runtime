@@ -723,7 +723,7 @@ impl EagerRuntime {
             };
 
             let out_buffer = Arc::new(self.pool.acquire(device, alloc_bytes)?);
-            let out_ptr = out_buffer.contents();
+            let _out_ptr = out_buffer.contents();
 
             let queue = compute::get_shared_queue(device);
             let _cb = self.registry.dispatch_mean_typed_nb(

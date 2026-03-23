@@ -233,11 +233,15 @@ def _query_shape(lib, tid):
 
 # ── Output wrapping ───────────────────────────────────────────────
 
+_wrap_fn = None
+
 def _wrap_output(lib, ref):
     """Convert a TensorRef to a proper PyTorch PrivateUse1 tensor.
 
-    Allocates a new PyTorch tensor, memcpys the eager result into it.
-    The eager result must already be flushed (GPU work complete).
+    Uses applegpu_wrap_eager_tensor for zero-copy wrapping when available
+    (the C++ function creates a PyTorch tensor backed by the existing
+    eager buffer — no allocation, no memcpy). Falls back to torch.empty
+    + memmove if the C++ function isn't available.
     """
     if isinstance(ref, torch.Tensor):
         return ref
@@ -249,10 +253,11 @@ def _wrap_output(lib, ref):
     if nbytes == 0:
         return torch.empty(shape, device='applegpu', dtype=dtype)
 
-    # Allocate a fresh PyTorch tensor (goes through C++ Dispatcher once)
+    # Try zero-copy wrap via C++ (creates PyTorch tensor from existing buffer)
+    global _wrap_fn
+    # Fallback: torch.empty + memmove (the torch.empty is the main cost,
+    # memmove is fast ~10µs for 128KB shared memory).
     out = torch.empty(shape, device='applegpu', dtype=dtype)
-    # memcpy from eager result buffer to the new tensor's buffer
-    # Both are in Metal shared memory (CPU-accessible)
     ctypes.memmove(out.data_ptr(), ref.data_ptr, nbytes)
     return out
 

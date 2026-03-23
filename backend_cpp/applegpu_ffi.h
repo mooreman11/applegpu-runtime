@@ -85,6 +85,7 @@ void applegpu_eager_synchronize(void);
 /* Reverse lookup: find tensor_id by buffer data pointer. Returns 0 if not found. */
 uint64_t applegpu_eager_find_by_data_ptr(const uint8_t* ptr);
 
+
 #ifdef __cplusplus
 }
 #endif

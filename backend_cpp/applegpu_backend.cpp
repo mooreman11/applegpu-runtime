@@ -208,7 +208,6 @@ at::Tensor applegpu_empty_strided(
 
     // Scalar tensors (size.empty(), numel=1): allocate as [1] with correct dtype
     if (size.empty()) {
-        uint64_t dim0 = 1;
         dims = std::vector<uint64_t>{1};
     }
 
@@ -365,7 +364,7 @@ const at::Tensor& applegpu_resize_(const at::Tensor& self, c10::IntArrayRef size
     auto* impl = self.unsafeGetTensorImpl();
     auto strides = c10::contiguous_strides(size);
     auto nbytes = at::detail::computeStorageNbytes(size, strides, self.dtype().itemsize());
-    if (nbytes > (int64_t)self.storage().nbytes()) {
+    if ((int64_t)nbytes > (int64_t)self.storage().nbytes()) {
         // Allocate via eager runtime with correct dims and dtype (not raw byte allocator).
         // This ensures the eager tensor has the right dtype for subsequent ops.
         std::vector<uint64_t> dims(size.begin(), size.end());
