@@ -113,7 +113,7 @@ TRAINING (ms/step)       h=256     h=1024     h=4096
             applegpu     0.651     1.693    16.328
 ```
 
-**1.6x faster than CPU at h=4096.** MPSGraph integration in progress (opt-in) for further fusion gains.
+**1.6x faster than CPU at h=4096.** Uses Apple's MPSMatrixMultiplication for matmul, custom Metal kernels for elementwise. MPSGraph whole-graph fusion available (opt-in `APPLEGPU_MPSGRAPH=1`) for compiled graphs — 40% faster than per-op compilation.
 
 ## GPT-2 Text Generation
 

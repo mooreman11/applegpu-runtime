@@ -259,18 +259,24 @@ _Blocked by apple/containerization framework socket staging bug (errno 20 ENOTDI
 - [x] Automatic fallback to custom kernel for tiny buffers (<16 bytes) and non-Float32
 - [x] Result: h=4096 training 0.78x → 1.59x CPU (2.2x improvement)
 
-### MPSGraph Integration — SCAFFOLD DONE (correctness WIP)
+### MPSGraph Integration — FUNCTIONAL (opt-in)
 _Design spec: `docs/superpowers/specs/2026-03-22-mpsgraph-integration-design.md`_
 - [x] Swift MPSGraph builder (`mpsgraph.swift`): deserializes bytecode → MPSGraph ops
 - [x] Op support: add, sub, mul, div, matmul, relu, neg, threshold_backward, scalar_mul, mean, sum_dim, transpose, view, addmm
 - [x] C ABI: `gpu_bridge_mpsgraph_build/run/destroy`
-- [x] Graph caching: build once per model shape, execute many
+- [x] Graph caching: FNV-1a hash of (bytecode + shapes), 59x faster than uncached
+- [x] Square transpose fix: gatherND index permutation (MPSGraph transposeTensor no-op for N==M)
 - [x] Placeholder pass-through: saved tensors from forward graph handled correctly
 - [x] MetalPerformanceShadersGraph linked in all three layers (Swift, Rust, C++)
 - [x] Transparent fallback: if MPSGraph build fails, per-op execution continues
-- [ ] Fix output copy: `MPSNDArray.exportData` to pre-allocated MTLBuffer produces wrong values
-- [ ] Enable by default (currently opt-in via `APPLEGPU_MPSGRAPH=1`)
-- [ ] Benchmark: target MPS parity at h≥1024
+- [x] Output copy via `readBytes` (sync `graph.run` faster than async `encode+exportData`)
+- [x] Tensor ID caching for stable parameter pointers
+- [x] Deferred-free fix: don't free input pass-through tensor IDs
+- [ ] Eliminate `_wrap_output` overhead (needs C++-level tensor creation from Rust buffer)
+- [ ] Enable by default when overhead ≤1.5x C++ dispatcher
+- [ ] Container IPC path: gpu-service on host → MPSGraph → Metal GPU
+
+**Current: 40% faster than per-op compiled, 3x slower than C++ dispatcher (Python tensor wrapping overhead).**
 
 ### Bug Fixes
 - [x] Scalar tensor dtype bug — `empty_strided` allocated 0-dim scalars as UInt8
@@ -278,8 +284,10 @@ _Design spec: `docs/superpowers/specs/2026-03-22-mpsgraph-integration-design.md`
 - [x] `torch.applegpu.synchronize()` — was no-op, now calls `flush_and_wait`
 - [x] GPU-native `mul_.Scalar` — `scalar_mul` + storage swap instead of flush + CPU loop
 - [x] `addmm` null check — prevents tid=0 propagation
-- [x] Compiled-graph deferred tensor ID cleanup
+- [x] Compiled-graph deferred tensor ID cleanup — don't free input pass-through IDs
 - [x] Seed warning — added `manual_seed_all`, `_is_in_bad_fork` to device module
+- [x] `resolve_tensor_id` contiguity check — square transposed views returned wrong tensor (shape matched but strides differed)
+- [x] MPS `transposeRight` square guard — skip for N==M (MPS bug)
 
 ---
 

@@ -93,16 +93,19 @@ MPS is 2-3x faster than us at h≥1024 via MPSGraph whole-graph fusion. Our key 
 2. ~~**MPS transposed matmul**~~ — DONE: skip contiguity copies for backward transpose views
 3. ~~**GPU-native mul_.Scalar**~~ — DONE: scalar_mul + storage swap instead of flush + CPU loop
 
-**MPSGraph scaffold** (builds and executes, correctness WIP):
-- Swift `mpsgraph.swift`: deserializes bytecode → MPSGraph ops (all MLP ops supported)
-- C ABI: `gpu_bridge_mpsgraph_build/run/destroy` with graph caching
-- Rust integration: `execute_mpsgraph()` with transparent fallback to per-op
-- Opt-in via `APPLEGPU_MPSGRAPH=1` (output copy correctness issue to fix)
+**MPSGraph integration** (functional, opt-in via `APPLEGPU_MPSGRAPH=1`):
+- Swift `mpsgraph.swift`: deserializes bytecode → MPSGraph ops (all MLP ops)
+- C ABI: `gpu_bridge_mpsgraph_build/run/destroy`
+- Graph caching: FNV-1a hash of (bytecode + shapes), build once / run many (59x speedup over uncached)
+- Square transpose: gatherND index permutation workaround (MPSGraph transposeTensor is no-op for N==M)
+- Tensor ID caching: stable parameter pointers cached across calls
 - Design spec: `docs/superpowers/specs/2026-03-22-mpsgraph-integration-design.md`
 
-**Remaining:**
-- Fix `MPSNDArray.exportData` → pre-allocated MTLBuffer output copy
-- Enable by default, benchmark for MPS parity at h≥1024
+**Status: 40% faster than per-op compiled, but 3x slower than C++ dispatcher.** The overhead is `_wrap_output` (torch.empty + memmove per output) — an irreducible Python↔C++ tensor creation boundary. Async encode was tested but slower than sync `graph.run()`.
+
+**Remaining for production:**
+- Eliminate `_wrap_output` overhead (needs C++-level tensor creation from Rust buffer)
+- Enable by default when overhead is ≤1.5x C++ dispatcher
 - Container IPC path: gpu-service on host → MPSGraph → Metal GPU
 
 ## Build & Test Commands
@@ -192,7 +195,7 @@ This library must be **hyperoptimized**. Every layer is chosen for maximum perfo
 
 Always prefer the fastest path. Profile before and after changes to performance-critical code.
 
-**Current reality** (MLP training benchmark, `python/tests/bench_comparison.py`):
+**Current reality** (MLP benchmark, `python/tests/bench_comparison.py`):
 ```
 TRAINING (ms/step)       h=64      h=256     h=1024     h=4096
 ----------------------------------------------------------------------
@@ -200,16 +203,21 @@ TRAINING (ms/step)       h=64      h=256     h=1024     h=4096
                  MPS     0.242     0.255     0.765     8.218
             applegpu     0.646     0.651     1.693    16.328
 
+FORWARD ONLY (ms, 200-iter avg):
+                         h=256     h=1024
+  C++ dispatcher:        0.17      0.50   ← production fast path
+  MPSGraph compiled:     0.45      1.90   ← graph fusion, 40% faster than per-op compiled
+  per-op compiled:       0.55      3.10   ← Python wrapping overhead
+
 SPEEDUP vs CPU           h=64      h=256     h=1024     h=4096
 ----------------------------------------------------------------------
                  MPS      0.31x     0.59x     1.68x     3.15x
             applegpu     0.12x     0.23x     0.76x     1.59x
 ```
 - **applegpu beats CPU at h=4096** (1.59x) — MPSMatrixMultiplication for matmul + per-op Metal for elementwise
-- **MPS still 2x faster** at h=4096 (3.15x vs 1.59x) — MPSGraph fuses ENTIRE subgraphs; we dispatch ~20 individual Metal kernels per step
-- **Small sizes (h≤256)**: GPU launch overhead dominates — both MPS and applegpu are slower than CPU
-- **Key gap vs MPS**: MPS uses MPSGraph whole-graph fusion (3-5 dispatches); we encode ~20 compute encoders per step
-- **Next step**: Reduce kernel launch count — MPS transposed matmul (skip contiguity copies), fuse add+relu chains
+- **MPS still 2x faster** at h=4096 — MPSGraph whole-graph fusion; our C++ path dispatches ~20 individual Metal kernels
+- **MPSGraph compiled path works** (opt-in `APPLEGPU_MPSGRAPH=1`) — 40% faster than per-op compiled, but 3x slower than C++ dispatcher due to Python `_wrap_output` overhead
+- **C++ dispatcher is the production fast path** — no Python boundary per-op, streaming Metal CB, MPSMatrixMultiplication for matmul
 
 ## Development Workflow
 
