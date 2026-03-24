@@ -929,6 +929,131 @@ impl EagerRuntime {
         Ok((out_id, out_ptr))
     }
 
+    // ── GPT-2 ops ────────────────────────────────────────────────────
+
+    /// Embedding lookup: weight[indices[i]] for each i.
+    /// weight: [vocab_size, embed_dim], indices: [seq_len] (Int32/Int64)
+    /// output: [seq_len, embed_dim]
+    pub fn embedding(
+        &mut self, device: &Device, weight_id: u64, indices_id: u64,
+    ) -> Result<(u64, *mut u8)> {
+        let (w_buf, w_dtype, embed_dim, idx_buf, seq_len) = {
+            let w = self.get(weight_id)?;
+            let idx = self.get(indices_id)?;
+            let w_dims = w.layout.shape.dims();
+            if w_dims.len() != 2 {
+                return Err(GpuError::InvalidTensor("embedding weight must be 2D".into()));
+            }
+            (Arc::clone(&w.buffer), w.dtype, w_dims[1],
+             Arc::clone(&idx.buffer), idx.layout.shape.numel())
+        };
+
+        let out_shape = Shape::new(vec![seq_len, embed_dim])?;
+        let nbytes = seq_len * embed_dim * w_dtype.size_bytes();
+        let out_buffer = Arc::new(self.pool.acquire(device, nbytes.max(4))?);
+        let out_ptr = out_buffer.contents();
+
+        let queue = compute::get_shared_queue(device);
+        self.registry.dispatch_embedding_typed_nb(
+            device, w_dtype, queue, &w_buf, &idx_buf, &out_buffer, seq_len, embed_dim)?;
+        compute::streaming_tick();
+
+        let out_id = next_tensor_id();
+        self.tensors.insert(out_id, EagerTensor {
+            buffer: out_buffer, layout: TensorLayout::contiguous(out_shape),
+            dtype: w_dtype, offset: 0,
+        });
+        Ok((out_id, out_ptr))
+    }
+
+    /// Layer normalization: (input - mean) / sqrt(var + eps) * gamma + beta
+    /// input: [*, normalized_shape], gamma/beta: [normalized_shape]
+    pub fn layer_norm(
+        &mut self, device: &Device, input_id: u64, gamma_id: u64, beta_id: u64, eps: f32,
+    ) -> Result<(u64, *mut u8)> {
+        let (in_buf, in_dtype, in_shape, g_buf, b_buf) = {
+            let inp = self.get(input_id)?;
+            let g = self.get(gamma_id)?;
+            let b = self.get(beta_id)?;
+            (Arc::clone(&inp.buffer), inp.dtype, inp.layout.shape.clone(),
+             Arc::clone(&g.buffer), Arc::clone(&b.buffer))
+        };
+
+        let dims = in_shape.dims();
+        let cols = dims[dims.len() - 1];
+        let rows = in_shape.numel() / cols;
+
+        let nbytes = in_shape.numel() * in_dtype.size_bytes();
+        let out_buffer = Arc::new(self.pool.acquire(device, nbytes.max(4))?);
+        let out_ptr = out_buffer.contents();
+
+        let queue = compute::get_shared_queue(device);
+        self.registry.dispatch_layer_norm_typed_nb(
+            device, in_dtype, queue, &in_buf, &g_buf, &b_buf, &out_buffer,
+            rows, cols, eps)?;
+        compute::streaming_tick();
+
+        let out_id = next_tensor_id();
+        self.tensors.insert(out_id, EagerTensor {
+            buffer: out_buffer, layout: TensorLayout::contiguous(in_shape),
+            dtype: in_dtype, offset: 0,
+        });
+        Ok((out_id, out_ptr))
+    }
+
+    /// GELU activation (approximate).
+    pub fn gelu(&mut self, device: &Device, input_id: u64) -> Result<(u64, *mut u8)> {
+        let (in_buf, in_dtype, in_shape) = {
+            let inp = self.get(input_id)?;
+            (Arc::clone(&inp.buffer), inp.dtype, inp.layout.shape.clone())
+        };
+
+        let numel = in_shape.numel();
+        let nbytes = numel * in_dtype.size_bytes();
+        let out_buffer = Arc::new(self.pool.acquire(device, nbytes.max(4))?);
+        let out_ptr = out_buffer.contents();
+
+        let queue = compute::get_shared_queue(device);
+        self.registry.dispatch_gelu_typed_nb(
+            device, in_dtype, queue, &in_buf, &out_buffer, numel)?;
+        compute::streaming_tick();
+
+        let out_id = next_tensor_id();
+        self.tensors.insert(out_id, EagerTensor {
+            buffer: out_buffer, layout: TensorLayout::contiguous(in_shape),
+            dtype: in_dtype, offset: 0,
+        });
+        Ok((out_id, out_ptr))
+    }
+
+    /// Softmax along last dimension.
+    pub fn softmax(&mut self, device: &Device, input_id: u64) -> Result<(u64, *mut u8)> {
+        let (in_buf, in_dtype, in_shape) = {
+            let inp = self.get(input_id)?;
+            (Arc::clone(&inp.buffer), inp.dtype, inp.layout.shape.clone())
+        };
+
+        let dims = in_shape.dims();
+        let cols = dims[dims.len() - 1];
+        let rows = in_shape.numel() / cols;
+
+        let nbytes = in_shape.numel() * in_dtype.size_bytes();
+        let out_buffer = Arc::new(self.pool.acquire(device, nbytes.max(4))?);
+        let out_ptr = out_buffer.contents();
+
+        let queue = compute::get_shared_queue(device);
+        self.registry.dispatch_softmax_typed_nb(
+            device, in_dtype, queue, &in_buf, &out_buffer, rows, cols)?;
+        compute::streaming_tick();
+
+        let out_id = next_tensor_id();
+        self.tensors.insert(out_id, EagerTensor {
+            buffer: out_buffer, layout: TensorLayout::contiguous(in_shape),
+            dtype: in_dtype, offset: 0,
+        });
+        Ok((out_id, out_ptr))
+    }
+
     // ── Add scaled in-place ──────────────────────────────────────────
 
     /// self += alpha * other. SGD optimizer parameter update.

@@ -460,6 +460,56 @@ pub extern "C" fn applegpu_eager_add_scaled_inplace(
     }
 }
 
+// ── GPT-2 ops ────────────────────────────────────────────────────
+
+#[no_mangle]
+pub extern "C" fn applegpu_eager_embedding(
+    weight_id: u64, indices_id: u64, out_id: *mut u64,
+) -> *mut u8 {
+    ensure_eager_streaming();
+    let state = get_eager_state();
+    let mut rt = state.runtime.lock().unwrap();
+    match rt.embedding(&state.device, weight_id, indices_id) {
+        Ok((id, ptr)) => { unsafe { *out_id = id; } ptr }
+        Err(e) => { set_error(format!("{}", e)); std::ptr::null_mut() }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn applegpu_eager_layer_norm(
+    input_id: u64, gamma_id: u64, beta_id: u64, eps: f32, out_id: *mut u64,
+) -> *mut u8 {
+    ensure_eager_streaming();
+    let state = get_eager_state();
+    let mut rt = state.runtime.lock().unwrap();
+    match rt.layer_norm(&state.device, input_id, gamma_id, beta_id, eps) {
+        Ok((id, ptr)) => { unsafe { *out_id = id; } ptr }
+        Err(e) => { set_error(format!("{}", e)); std::ptr::null_mut() }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn applegpu_eager_gelu(input_id: u64, out_id: *mut u64) -> *mut u8 {
+    ensure_eager_streaming();
+    let state = get_eager_state();
+    let mut rt = state.runtime.lock().unwrap();
+    match rt.gelu(&state.device, input_id) {
+        Ok((id, ptr)) => { unsafe { *out_id = id; } ptr }
+        Err(e) => { set_error(format!("{}", e)); std::ptr::null_mut() }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn applegpu_eager_softmax(input_id: u64, out_id: *mut u64) -> *mut u8 {
+    ensure_eager_streaming();
+    let state = get_eager_state();
+    let mut rt = state.runtime.lock().unwrap();
+    match rt.softmax(&state.device, input_id) {
+        Ok((id, ptr)) => { unsafe { *out_id = id; } ptr }
+        Err(e) => { set_error(format!("{}", e)); std::ptr::null_mut() }
+    }
+}
+
 // ── Lookup ────────────────────────────────────────────────────────
 
 /// Find a tensor_id by its buffer's raw data pointer.

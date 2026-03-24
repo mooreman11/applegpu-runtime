@@ -808,6 +808,146 @@ at::Tensor applegpu_sum_dim(const at::Tensor& self,
     return result.to(self.device());
 }
 
+// ── GPT-2 ops ───────────────────────────────────────────────────
+
+at::Tensor applegpu_embedding(const at::Tensor& weight, const at::Tensor& indices,
+                               int64_t padding_idx, bool scale_grad, bool sparse) {
+    EphemeralViewGuard evg;
+    uint64_t out_id = 0;
+    void* ptr = applegpu_eager_embedding(
+        resolve_tensor_id(weight), resolve_tensor_id(indices), &out_id);
+    TORCH_CHECK(ptr, "applegpu embedding failed");
+    return wrap_eager_output(ptr, out_id, query_output_shape(out_id), weight.scalar_type());
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor> applegpu_native_layer_norm(
+    const at::Tensor& input, c10::IntArrayRef normalized_shape,
+    const std::optional<at::Tensor>& weight_opt,
+    const std::optional<at::Tensor>& bias_opt,
+    double eps) {
+    EphemeralViewGuard evg;
+    auto weight = weight_opt.value_or(at::ones(normalized_shape, input.options()));
+    auto bias = bias_opt.value_or(at::zeros(normalized_shape, input.options()));
+    uint64_t out_id = 0;
+    void* ptr = applegpu_eager_layer_norm(
+        resolve_tensor_id(input), resolve_tensor_id(weight),
+        resolve_tensor_id(bias), static_cast<float>(eps), &out_id);
+    TORCH_CHECK(ptr, "applegpu layer_norm failed");
+    auto result = wrap_eager_output(ptr, out_id, query_output_shape(out_id), input.scalar_type());
+    // Return (output, mean, rstd) — mean/rstd as empty (not needed for inference)
+    auto mean = at::empty({0}, input.options());
+    auto rstd = at::empty({0}, input.options());
+    return std::make_tuple(result, mean, rstd);
+}
+
+at::Tensor applegpu_gelu(const at::Tensor& self, c10::string_view approximate) {
+    EphemeralViewGuard evg;
+    uint64_t out_id = 0;
+    void* ptr = applegpu_eager_gelu(resolve_tensor_id(self), &out_id);
+    TORCH_CHECK(ptr, "applegpu gelu failed");
+    return wrap_eager_output(ptr, out_id, query_output_shape(out_id), self.scalar_type());
+}
+
+at::Tensor applegpu_softmax(const at::Tensor& self, int64_t dim, bool half_to_float) {
+    // Ensure contiguous for softmax kernel (operates on last dim)
+    auto input = self.is_contiguous() ? self : self.contiguous();
+    EphemeralViewGuard evg;
+    uint64_t out_id = 0;
+    void* ptr = applegpu_eager_softmax(resolve_tensor_id(input), &out_id);
+    TORCH_CHECK(ptr, "applegpu softmax failed");
+    return wrap_eager_output(ptr, out_id, query_output_shape(out_id), self.scalar_type());
+}
+
+at::Tensor applegpu_cat(const at::ITensorListRef& tensors, int64_t dim) {
+    // CPU fallback: flush, copy to CPU, cat, copy back
+    applegpu_eager_flush_and_wait();
+    std::vector<at::Tensor> cpu_tensors;
+    for (const auto& t : tensors) {
+        auto cpu_t = at::empty(t.sizes(), t.options().device(at::kCPU));
+        memcpy(cpu_t.data_ptr(), t.data_ptr(), t.nbytes());
+        cpu_tensors.push_back(cpu_t);
+    }
+    auto result_cpu = at::cat(cpu_tensors, dim);
+    auto result = at::empty(result_cpu.sizes(),
+        result_cpu.options().device(c10::Device(c10::DeviceType::PrivateUse1, 0)));
+    memcpy(result.data_ptr(), result_cpu.data_ptr(), result_cpu.nbytes());
+    return result;
+}
+
+at::Tensor applegpu_permute(const at::Tensor& self, at::IntArrayRef dims) {
+    // Permute is a view op — just adjust strides
+    auto sizes = self.sizes().vec();
+    auto strides = self.strides().vec();
+    std::vector<int64_t> new_sizes(dims.size());
+    std::vector<int64_t> new_strides(dims.size());
+    for (size_t i = 0; i < dims.size(); i++) {
+        new_sizes[i] = sizes[dims[i]];
+        new_strides[i] = strides[dims[i]];
+    }
+    return self.as_strided(new_sizes, new_strides, self.storage_offset());
+}
+
+at::Tensor applegpu_slice(const at::Tensor& self, int64_t dim, std::optional<int64_t> start,
+                           std::optional<int64_t> end, int64_t step) {
+    // Slice is a view op — adjust offset and size
+    int64_t ndim = self.dim();
+    if (dim < 0) dim += ndim;
+    int64_t dim_size = self.size(dim);
+    int64_t s = start.value_or(0);
+    int64_t e = end.value_or(dim_size);
+    if (s < 0) s += dim_size;
+    if (e < 0) e += dim_size;
+    s = std::max(int64_t(0), std::min(s, dim_size));
+    e = std::max(int64_t(0), std::min(e, dim_size));
+
+    auto sizes = self.sizes().vec();
+    auto strides = self.strides().vec();
+    int64_t new_offset = self.storage_offset() + s * strides[dim];
+    sizes[dim] = (e - s + step - 1) / step;
+    if (step != 1) strides[dim] *= step;
+
+    return self.as_strided(sizes, strides, new_offset);
+}
+
+at::Tensor applegpu_transpose_int(const at::Tensor& self, int64_t dim0, int64_t dim1) {
+    int64_t ndim = self.dim();
+    if (dim0 < 0) dim0 += ndim;
+    if (dim1 < 0) dim1 += ndim;
+    auto sizes = self.sizes().vec();
+    auto strides = self.strides().vec();
+    std::swap(sizes[dim0], sizes[dim1]);
+    std::swap(strides[dim0], strides[dim1]);
+    return self.as_strided(sizes, strides, self.storage_offset());
+}
+
+at::Tensor applegpu_mul_scalar(const at::Tensor& self, const at::Scalar& other) {
+    EphemeralViewGuard evg;
+    uint64_t out_id = 0;
+    float scale = other.toFloat();
+    void* ptr = applegpu_eager_scalar_mul(resolve_tensor_id(self), scale, &out_id);
+    TORCH_CHECK(ptr, "applegpu mul.Scalar failed");
+    return wrap_eager_output(ptr, out_id, query_output_shape(out_id), self.scalar_type());
+}
+
+at::Tensor applegpu_reshape_alias(const at::Tensor& self, c10::IntArrayRef size,
+                                   c10::IntArrayRef stride) {
+    return self.view(size);
+}
+
+at::Tensor applegpu_bmm(const at::Tensor& self, const at::Tensor& mat2) {
+    // Batched matmul [B, M, K] @ [B, K, N] → [B, M, N]
+    // Make contiguous for our matmul kernel
+    auto self_c = self.is_contiguous() ? self : self.contiguous();
+    auto mat2_c = mat2.is_contiguous() ? mat2 : mat2.contiguous();
+    EphemeralViewGuard evg;
+    uint64_t a_id = resolve_tensor_id(self_c);
+    uint64_t b_id = resolve_tensor_id(mat2_c);
+    uint64_t out_id = 0;
+    void* ptr = applegpu_eager_matmul(a_id, b_id, &out_id);
+    TORCH_CHECK(ptr != nullptr, "applegpu bmm failed");
+    return wrap_eager_output(ptr, out_id, query_output_shape(out_id), self.scalar_type());
+}
+
 // ── Registration ─────────────────────────────────────────────────
 
 TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
@@ -837,6 +977,19 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("mse_loss", applegpu_mse_loss);
     m.impl("mse_loss_backward", applegpu_mse_loss_backward);
     m.impl("sum.dim_IntList", applegpu_sum_dim);
+    // GPT-2 ops
+    m.impl("embedding", applegpu_embedding);
+    m.impl("native_layer_norm", applegpu_native_layer_norm);
+    m.impl("gelu", applegpu_gelu);
+    m.impl("_softmax", applegpu_softmax);
+    m.impl("permute", applegpu_permute);
+    m.impl("slice.Tensor", applegpu_slice);
+    m.impl("transpose.int", applegpu_transpose_int);
+    m.impl("_cat", applegpu_cat);
+    m.impl("_reshape_alias", applegpu_reshape_alias);
+    m.impl("bmm", applegpu_bmm);
+    m.impl("mul.Scalar", applegpu_mul_scalar);
+    m.impl("matmul", applegpu_bmm);
 }
 
 TORCH_LIBRARY_IMPL(_, PrivateUse1, m) {

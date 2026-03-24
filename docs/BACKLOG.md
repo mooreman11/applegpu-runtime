@@ -272,7 +272,7 @@ _Design spec: `docs/superpowers/specs/2026-03-22-mpsgraph-integration-design.md`
 - [x] Output copy via `readBytes` (sync `graph.run` faster than async `encode+exportData`)
 - [x] Tensor ID caching for stable parameter pointers
 - [x] Deferred-free fix: don't free input pass-through tensor IDs
-- [ ] Eliminate `_wrap_output` overhead (needs C++-level tensor creation from Rust buffer)
+- [ ] Eliminate `_wrap_output` overhead — build pybind11 extension module with `THPVariable_Wrap` (ctypes segfaults due to GIL context; needs proper Python extension)
 - [ ] Enable by default when overhead ≤1.5x C++ dispatcher
 - [ ] Container IPC path: gpu-service on host → MPSGraph → Metal GPU
 
