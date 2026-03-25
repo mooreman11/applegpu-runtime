@@ -1597,26 +1597,28 @@ public func gpuBridgeComputeMatmulBatchedNB(
             alpha: 1.0, beta: 0.0)
         mm.encode(commandBuffer: commandBuffer, leftMatrix: matA, rightMatrix: matB, resultMatrix: matC)
     } else {
-        // Batched matmul — encode each batch as separate MPS operation
-        let aStride = Int(aBatchStride) * elementSize
-        let bStride = Int(bBatchStride) * elementSize
-        let cStride = m * n * elementSize
-
-        let mm = MPSMatrixMultiplication(
-            device: compute.pipelineState.device,
-            transposeLeft: false, transposeRight: false,
-            resultRows: m, resultColumns: n, interiorColumns: k,
-            alpha: 1.0, beta: 0.0)
-
-        for batch in 0..<bs {
-            let matA = MPSMatrix(buffer: bufA.buffer, offset: batch * aStride, descriptor: MPSMatrixDescriptor(
-                rows: m, columns: k, rowBytes: k * elementSize, dataType: .float32))
-            let matB = MPSMatrix(buffer: bufB.buffer, offset: batch * bStride, descriptor: MPSMatrixDescriptor(
-                rows: k, columns: n, rowBytes: n * elementSize, dataType: .float32))
-            let matC = MPSMatrix(buffer: bufC.buffer, offset: batch * cStride, descriptor: MPSMatrixDescriptor(
-                rows: m, columns: n, rowBytes: n * elementSize, dataType: .float32))
-            mm.encode(commandBuffer: commandBuffer, leftMatrix: matA, rightMatrix: matB, resultMatrix: matC)
-        }
+        // Batched matmul — use custom MSL kernel with 3D grid dispatch (one encoder).
+        // This is faster than N separate MPSMatrixMultiplication encodes because
+        // each MPS encode creates its own internal encoder (~15µs overhead each).
+        // The custom kernel handles batch via gid.z with a_batch_stride/b_batch_stride.
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
+        encoder.setComputePipelineState(compute.pipelineState)
+        encoder.setBuffer(bufA.buffer, offset: 0, index: 0)
+        encoder.setBuffer(bufB.buffer, offset: 0, index: 1)
+        encoder.setBuffer(bufC.buffer, offset: 0, index: 2)
+        var mV = M, nV = N, kV = K, bsV = batchSize, absV = aBatchStride, bbsV = bBatchStride
+        encoder.setBytes(&mV, length: MemoryLayout<UInt32>.size, index: 3)
+        encoder.setBytes(&nV, length: MemoryLayout<UInt32>.size, index: 4)
+        encoder.setBytes(&kV, length: MemoryLayout<UInt32>.size, index: 5)
+        encoder.setBytes(&bsV, length: MemoryLayout<UInt32>.size, index: 6)
+        encoder.setBytes(&absV, length: MemoryLayout<UInt32>.size, index: 7)
+        encoder.setBytes(&bbsV, length: MemoryLayout<UInt32>.size, index: 8)
+        let w = compute.pipelineState.threadExecutionWidth
+        let h = max(compute.pipelineState.maxTotalThreadsPerThreadgroup / w, 1)
+        encoder.dispatchThreads(
+            MTLSize(width: n, height: m, depth: bs),
+            threadsPerThreadgroup: MTLSize(width: w, height: h, depth: 1))
+        encoder.endEncoding()
     }
 
     if isBatch {
