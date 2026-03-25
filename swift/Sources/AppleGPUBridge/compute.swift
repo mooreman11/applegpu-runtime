@@ -3217,8 +3217,105 @@ public func gpuBridgeComputeBinaryNDNB(
     guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
 
     encoder.setComputePipelineState(compute.pipelineState)
+    guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
+
+    encoder.setComputePipelineState(compute.pipelineState)
     encoder.setBuffer(bufA.buffer, offset: 0, index: 0)
     encoder.setBuffer(bufB.buffer, offset: 0, index: 1)
+    encoder.setBuffer(bufOut.buffer, offset: 0, index: 2)
+
+    let arrayBytes = MemoryLayout<UInt32>.size * 8
+    encoder.setBytes(aStrides, length: arrayBytes, index: 3)
+    encoder.setBytes(bStrides, length: arrayBytes, index: 4)
+    encoder.setBytes(outShape, length: arrayBytes, index: 5)
+    var nd = ndim
+    encoder.setBytes(&nd, length: MemoryLayout<UInt32>.size, index: 6)
+    var n = numel
+    encoder.setBytes(&n, length: MemoryLayout<UInt32>.size, index: 7)
+
+    let threadGroupSize = min(compute.pipelineState.maxTotalThreadsPerThreadgroup, count)
+    let threadGroups = (count + threadGroupSize - 1) / threadGroupSize
+
+    encoder.dispatchThreadgroups(
+        MTLSize(width: threadGroups, height: 1, depth: 1),
+        threadsPerThreadgroup: MTLSize(width: threadGroupSize, height: 1, depth: 1)
+    )
+    encoder.endEncoding()
+
+    if isBatch {
+        return Unmanaged.passUnretained(commandBuffer as AnyObject).toOpaque()
+    } else {
+        commandBuffer.commit()
+        return Unmanaged.passRetained(commandBuffer as AnyObject).toOpaque()
+    }
+}
+
+@_cdecl("gpu_bridge_compute_binary_nd_offset_nb")
+public func gpuBridgeComputeBinaryNDOffsetNB(
+    _ computePtr: UnsafeMutableRawPointer?,
+    _ queuePtr: UnsafeMutableRawPointer?,
+    _ bufAPtr: UnsafeRawPointer?,
+    _ aByteOffset: UInt32,
+    _ bufBPtr: UnsafeRawPointer?,
+    _ bByteOffset: UInt32,
+    _ bufOutPtr: UnsafeMutableRawPointer?,
+    _ aStrides: UnsafePointer<UInt32>?,
+    _ bStrides: UnsafePointer<UInt32>?,
+    _ outShape: UnsafePointer<UInt32>?,
+    _ ndim: UInt32,
+    _ numel: UInt32
+) -> UnsafeMutableRawPointer? {
+    guard let computePtr = computePtr,
+          let queuePtr = queuePtr,
+          let bufAPtr = bufAPtr,
+          let bufBPtr = bufBPtr,
+          let bufOutPtr = bufOutPtr,
+          let aStrides = aStrides,
+          let bStrides = bStrides,
+          let outShape = outShape else { return nil }
+
+    let compute = Unmanaged<GPUCompute>.fromOpaque(computePtr).takeUnretainedValue()
+    let queue = Unmanaged<MTLCommandQueue>.fromOpaque(queuePtr).takeUnretainedValue()
+    let bufA = Unmanaged<GPUBuffer>.fromOpaque(bufAPtr).takeUnretainedValue()
+    let bufB = Unmanaged<GPUBuffer>.fromOpaque(bufBPtr).takeUnretainedValue()
+    let bufOut = Unmanaged<GPUBuffer>.fromOpaque(bufOutPtr).takeUnretainedValue()
+
+    let count = Int(numel)
+    if count == 0 {
+        batchLock.lock()
+        let ptr = activeBatchCommandBuffer.map { Unmanaged.passUnretained($0 as AnyObject).toOpaque() }
+        batchLock.unlock()
+        return ptr
+    }
+
+    let commandBuffer: MTLCommandBuffer
+    let isBatch: Bool
+    let ctxId = currentContextId
+    contextLock.lock()
+    if ctxId > 0, let batchCB = batchContexts[ctxId] {
+        commandBuffer = batchCB
+        isBatch = true
+        contextLock.unlock()
+    } else {
+        contextLock.unlock()
+        batchLock.lock()
+        if let batchCB = activeBatchCommandBuffer {
+            commandBuffer = batchCB
+            isBatch = true
+            batchLock.unlock()
+        } else {
+            batchLock.unlock()
+            guard let cb = queue.makeCommandBuffer() else { return nil }
+            commandBuffer = cb
+            isBatch = false
+        }
+    }
+
+    guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
+
+    encoder.setComputePipelineState(compute.pipelineState)
+    encoder.setBuffer(bufA.buffer, offset: Int(aByteOffset), index: 0)
+    encoder.setBuffer(bufB.buffer, offset: Int(bByteOffset), index: 1)
     encoder.setBuffer(bufOut.buffer, offset: 0, index: 2)
 
     let arrayBytes = MemoryLayout<UInt32>.size * 8

@@ -745,6 +745,16 @@ void gpu_bridge_encode_signal_event(void* command_buffer, void* event, uint64_t 
 void gpu_bridge_encode_wait_event(void* command_buffer, void* event, uint64_t value);
 void gpu_bridge_destroy_event(void* event);
 
+// ── Binary N-D with byte offsets (for view/slice tensors)
+void* gpu_bridge_compute_binary_nd_offset_nb(
+    GPUComputeHandle* compute, void* queue,
+    const GPUBufferHandle* buf_a, uint32_t a_byte_offset,
+    const GPUBufferHandle* buf_b, uint32_t b_byte_offset,
+    GPUBufferHandle* buf_out,
+    const uint32_t* a_strides, const uint32_t* b_strides,
+    const uint32_t* out_shape, uint32_t ndim, uint32_t numel
+);
+
 // ── MPSGraph fused execution ─────────────────────────────────────────────────
 void* gpu_bridge_mpsgraph_build(
     void* device_handle,

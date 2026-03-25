@@ -236,8 +236,8 @@ impl EagerRuntime {
         b_id: u64,
     ) -> Result<(u64, *mut u8)> {
         // 1. Extract data from immutable borrows (releases borrow before mutable ops)
-        let (a_shape, a_dtype, a_buf, a_actual_strides,
-             b_shape, b_buf, b_actual_strides) = {
+        let (a_shape, a_dtype, a_buf, a_actual_strides, a_offset,
+             b_shape, b_buf, b_actual_strides, b_offset) = {
             let a = self.get(a_id)?;
             let b = self.get(b_id)?;
             if a.dtype != b.dtype {
@@ -245,10 +245,13 @@ impl EagerRuntime {
                     "dtype mismatch: {:?} vs {:?}", a.dtype, b.dtype
                 )));
             }
+            // Track byte offsets for views (e.g., slices with storage_offset)
+            let a_elem_offset = a.offset / a.dtype.size_bytes().max(1);
+            let b_elem_offset = b.offset / b.dtype.size_bytes().max(1);
             (a.layout.shape, a.dtype, Arc::clone(&a.buffer),
-             a.layout.strides().to_vec(),
+             a.layout.strides().to_vec(), a_elem_offset,
              b.layout.shape, Arc::clone(&b.buffer),
-             b.layout.strides().to_vec())
+             b.layout.strides().to_vec(), b_elem_offset)
         };
 
         // 2. Compute output shape (supports broadcasting)
@@ -302,10 +305,13 @@ impl EagerRuntime {
         // 5. Get pipeline and dispatch into streaming CB
         let pipeline = self.get_pipeline(device, base_kernel, a_dtype)?;
         let queue = compute::get_shared_queue(device);
-        let _cb = pipeline.dispatch_binary_nd_nb(
+        // Pass byte offsets to Metal dispatch — views (slices) have non-zero offset
+        // into the base buffer. The Swift kernel uses encoder.setBuffer(offset:) to
+        // start reading at the right position.
+        let _cb = pipeline.dispatch_binary_nd_nb_with_offsets(
             queue,
-            &*a_buf, &a_strides,
-            &*b_buf, &b_strides,
+            &*a_buf, (a_offset * a_dtype.size_bytes()) as u32, &a_strides,
+            &*b_buf, (b_offset * a_dtype.size_bytes()) as u32, &b_strides,
             &*out_buffer, &shape_u32,
             ndim as u32, numel as u32,
         )?;

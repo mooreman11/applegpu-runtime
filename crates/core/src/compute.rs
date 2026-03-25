@@ -1045,12 +1045,30 @@ impl ComputePipeline {
         buf_out: &Buffer, out_shape: &[u32; MAX_DIMS],
         ndim: u32, numel: u32,
     ) -> Result<*mut std::ffi::c_void> {
+        self.dispatch_binary_nd_nb_with_offsets(
+            queue, buf_a, 0, a_strides, buf_b, 0, b_strides,
+            buf_out, out_shape, ndim, numel)
+    }
+
+    /// Binary N-D dispatch with byte offsets for view tensors.
+    /// a_byte_offset/b_byte_offset are applied to the Metal buffer binding
+    /// via encoder.setBuffer(offset:), supporting sliced views.
+    pub fn dispatch_binary_nd_nb_with_offsets(
+        &self,
+        queue: *mut std::ffi::c_void,
+        buf_a: &Buffer, a_byte_offset: u32, a_strides: &[u32; MAX_DIMS],
+        buf_b: &Buffer, b_byte_offset: u32, b_strides: &[u32; MAX_DIMS],
+        buf_out: &Buffer, out_shape: &[u32; MAX_DIMS],
+        ndim: u32, numel: u32,
+    ) -> Result<*mut std::ffi::c_void> {
         let cb = unsafe {
-            ffi::gpu_bridge_compute_binary_nd_nb(
+            ffi::gpu_bridge_compute_binary_nd_offset_nb(
                 self.handle,
                 queue,
                 buf_a.raw_handle() as *const _,
+                a_byte_offset,
                 buf_b.raw_handle() as *const _,
+                b_byte_offset,
                 buf_out.raw_handle(),
                 a_strides.as_ptr(),
                 b_strides.as_ptr(),
@@ -1059,7 +1077,7 @@ impl ComputePipeline {
                 numel,
             )
         };
-        if cb.is_null() { Err(GpuError::ComputeFailed("Non-blocking binary N-D dispatch failed".to_string())) } else { Ok(cb) }
+        if cb.is_null() { Err(GpuError::ComputeFailed("Binary N-D offset dispatch failed".to_string())) } else { Ok(cb) }
     }
 
     /// Dispatch N-D unary element-wise op with stride arrays.

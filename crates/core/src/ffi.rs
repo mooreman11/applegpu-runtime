@@ -235,6 +235,21 @@ extern "C" {
         b_batch_stride: u32,
     ) -> *mut std::ffi::c_void;
 
+    pub fn gpu_bridge_compute_binary_nd_offset_nb(
+        compute: *mut GPUComputeHandle,
+        queue: *mut std::ffi::c_void,
+        buf_a: *const GPUBufferHandle,
+        a_byte_offset: u32,
+        buf_b: *const GPUBufferHandle,
+        b_byte_offset: u32,
+        buf_out: *mut GPUBufferHandle,
+        a_strides: *const u32,
+        b_strides: *const u32,
+        out_shape: *const u32,
+        ndim: u32,
+        numel: u32,
+    ) -> *mut std::ffi::c_void;
+
     pub fn gpu_bridge_compute_matmul_ex_nb(
         compute: *mut GPUComputeHandle,
         queue: *mut std::ffi::c_void,

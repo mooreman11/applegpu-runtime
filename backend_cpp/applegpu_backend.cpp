@@ -440,6 +440,23 @@ at::Tensor applegpu_add(const at::Tensor& self, const at::Tensor& other, const a
 }
 
 at::Tensor applegpu_mul_tensor(const at::Tensor& self, const at::Tensor& other) {
+    // Handle scalar tensor (e.g., x * 0.25 wraps 0.25 as a CPU scalar tensor)
+    if (other.dim() == 0) {
+        EphemeralViewGuard evg;
+        uint64_t out_id = 0;
+        float scale = other.item<float>();
+        void* ptr = applegpu_eager_scalar_mul(resolve_tensor_id(self), scale, &out_id);
+        TORCH_CHECK(ptr, "applegpu mul scalar failed");
+        return wrap_eager_output(ptr, out_id, query_output_shape(out_id), self.scalar_type());
+    }
+    if (self.dim() == 0) {
+        EphemeralViewGuard evg;
+        uint64_t out_id = 0;
+        float scale = self.item<float>();
+        void* ptr = applegpu_eager_scalar_mul(resolve_tensor_id(other), scale, &out_id);
+        TORCH_CHECK(ptr, "applegpu mul scalar failed");
+        return wrap_eager_output(ptr, out_id, query_output_shape(out_id), other.scalar_type());
+    }
     EphemeralViewGuard evg;
     uint64_t out_id = 0;
     void* ptr = applegpu_eager_mul(resolve_tensor_id(self), resolve_tensor_id(other), &out_id);
@@ -581,6 +598,15 @@ at::Tensor applegpu_t(const at::Tensor& self) {
 
 // div.Tensor
 at::Tensor applegpu_div(const at::Tensor& self, const at::Tensor& other) {
+    // Handle scalar tensor (e.g., x / 4.0)
+    if (other.dim() == 0) {
+        EphemeralViewGuard evg;
+        uint64_t out_id = 0;
+        float scale = 1.0f / other.item<float>();
+        void* ptr = applegpu_eager_scalar_mul(resolve_tensor_id(self), scale, &out_id);
+        TORCH_CHECK(ptr, "applegpu div scalar failed");
+        return wrap_eager_output(ptr, out_id, query_output_shape(out_id), self.scalar_type());
+    }
     EphemeralViewGuard evg;
     uint64_t out_id = 0;
     void* ptr = applegpu_eager_div(
@@ -922,10 +948,15 @@ at::Tensor applegpu_transpose_int(const at::Tensor& self, int64_t dim0, int64_t 
 
 at::Tensor applegpu_mul_scalar(const at::Tensor& self, const at::Scalar& other) {
     EphemeralViewGuard evg;
-    uint64_t out_id = 0;
+    uint64_t self_id = resolve_tensor_id(self);
     float scale = other.toFloat();
-    void* ptr = applegpu_eager_scalar_mul(resolve_tensor_id(self), scale, &out_id);
-    TORCH_CHECK(ptr, "applegpu mul.Scalar failed");
+    uint64_t out_id = 0;
+    void* ptr = applegpu_eager_scalar_mul(self_id, scale, &out_id);
+    if (!ptr) {
+        const char* err = applegpu_eager_last_error();
+        TORCH_CHECK(false, "applegpu mul.Scalar failed: self_id=", self_id,
+                     " scale=", scale, " err=", err ? err : "none");
+    }
     return wrap_eager_output(ptr, out_id, query_output_shape(out_id), self.scalar_type());
 }
 
@@ -935,8 +966,8 @@ at::Tensor applegpu_reshape_alias(const at::Tensor& self, c10::IntArrayRef size,
 }
 
 at::Tensor applegpu_bmm(const at::Tensor& self, const at::Tensor& mat2) {
-    // Batched matmul [B, M, K] @ [B, K, N] → [B, M, N]
-    // Make contiguous for our matmul kernel
+    // Batched matmul — make contiguous for our matmul kernel.
+    // Handle scalar tensor broadcast (e.g., from masked_fill)
     auto self_c = self.is_contiguous() ? self : self.contiguous();
     auto mat2_c = mat2.is_contiguous() ? mat2 : mat2.contiguous();
     EphemeralViewGuard evg;
@@ -944,7 +975,12 @@ at::Tensor applegpu_bmm(const at::Tensor& self, const at::Tensor& mat2) {
     uint64_t b_id = resolve_tensor_id(mat2_c);
     uint64_t out_id = 0;
     void* ptr = applegpu_eager_matmul(a_id, b_id, &out_id);
-    TORCH_CHECK(ptr != nullptr, "applegpu bmm failed");
+    if (!ptr) {
+        const char* err = applegpu_eager_last_error();
+        TORCH_CHECK(false, "applegpu bmm/matmul failed: a_id=", a_id, " b_id=", b_id,
+                     " a_shape=", self_c.sizes(), " b_shape=", mat2_c.sizes(),
+                     " err=", err ? err : "none");
+    }
     return wrap_eager_output(ptr, out_id, query_output_shape(out_id), self.scalar_type());
 }
 
