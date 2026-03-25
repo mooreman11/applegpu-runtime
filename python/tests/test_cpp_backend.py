@@ -308,6 +308,69 @@ def test_transformer_block():
         f"transformer: diff={(out.cpu()-ref).abs().max()}"
 
 
+def test_gpt2_forward():
+    """GPT-2 forward pass matches CPU on PrivateUse1."""
+    _load()
+    torch.manual_seed(42)
+
+    class GPT2Block(torch.nn.Module):
+        def __init__(self, d=64, h=4):
+            super().__init__()
+            self.ln1 = torch.nn.LayerNorm(d)
+            self.qkv = torch.nn.Linear(d, 3 * d)
+            self.proj = torch.nn.Linear(d, d)
+            self.ln2 = torch.nn.LayerNorm(d)
+            self.fc = torch.nn.Linear(d, 4 * d)
+            self.fcp = torch.nn.Linear(4 * d, d)
+            self.h = h
+
+        def forward(self, x):
+            B, T, C = x.shape
+            hd = C // self.h
+            r = self.ln1(x)
+            qkv = self.qkv(r)
+            q, k, v = qkv.split(C, -1)
+            q = q.view(B, T, self.h, hd).transpose(1, 2)
+            k = k.view(B, T, self.h, hd).transpose(1, 2)
+            v = v.view(B, T, self.h, hd).transpose(1, 2)
+            att = torch.softmax(
+                (q @ k.transpose(-2, -1)) * (hd ** -0.5), -1)
+            y = (att @ v).transpose(1, 2).contiguous().view(B, T, C)
+            x = x + self.proj(y)
+            return x + self.fcp(torch.nn.functional.gelu(
+                self.fc(self.ln2(x)), approximate='tanh'))
+
+    class GPT2(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.wte = torch.nn.Embedding(100, 64)
+            self.wpe = torch.nn.Embedding(32, 64)
+            self.blocks = torch.nn.ModuleList(
+                [GPT2Block() for _ in range(2)])
+            self.ln_f = torch.nn.LayerNorm(64)
+            self.lm_head = torch.nn.Linear(64, 100, bias=False)
+
+        def forward(self, ids):
+            B, T = ids.shape
+            x = self.wte(ids) + self.wpe(
+                torch.arange(T, device=ids.device))
+            for b in self.blocks:
+                x = b(x)
+            return self.lm_head(self.ln_f(x))
+
+    model = GPT2().to('applegpu')
+    mc = GPT2()
+    mc.load_state_dict(
+        {k: v.cpu() for k, v in model.state_dict().items()})
+    ids = torch.tensor([[1, 5, 10, 20, 50]], device='applegpu')
+    logits = model(ids)
+    ref = mc(ids.cpu())
+    assert logits.shape == (1, 5, 100)
+    assert torch.allclose(logits.cpu(), ref, atol=1e-3), \
+        f"GPT-2 diff: {(logits.cpu()-ref).abs().max()}"
+    assert logits.cpu().argmax(-1).tolist() == ref.argmax(-1).tolist()
+
+
 def test_eager_add_via_ffi():
     """Proof that eager Metal dispatch works end-to-end.
 
