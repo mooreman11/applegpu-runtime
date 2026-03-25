@@ -70,6 +70,10 @@ pub struct EagerRuntime {
     tensors: HashMap<u64, EagerTensor>,
     pool: BufferPool,
     pub(crate) registry: KernelRegistry,
+    /// Tensor IDs to free after the streaming CB is flushed.
+    /// These are intermediates (scalar buffers, scaled copies) whose GPU
+    /// kernels haven't executed yet. Freed on flush_and_wait.
+    pending_frees: Vec<u64>,
 }
 
 impl EagerRuntime {
@@ -78,6 +82,7 @@ impl EagerRuntime {
             tensors: HashMap::new(),
             pool: BufferPool::new(256 * 1024 * 1024),
             registry: KernelRegistry::new(),
+            pending_frees: Vec::new(),
         }
     }
 
@@ -208,6 +213,16 @@ impl EagerRuntime {
     pub fn flush_and_wait(&self) {
         if compute::streaming_is_active() {
             compute::flush_streaming_batch();
+        }
+    }
+
+    /// Flush AND free deferred tensors. Call this at natural sync points
+    /// (e.g., before CPU readback, after training step).
+    pub fn flush_and_release_pending(&mut self) {
+        self.flush_and_wait();
+        let to_free: Vec<u64> = self.pending_frees.drain(..).collect();
+        for id in to_free {
+            self.free(id);
         }
     }
 
@@ -685,11 +700,9 @@ impl EagerRuntime {
         let (scalar_id, scalar_ptr) = self.alloc(device, &[1], dtype)?;
         unsafe { *(scalar_ptr as *mut f32) = scale; }
         let result = self.binary_op(device, "elementwise_mul", input_id, scalar_id);
-        // NOTE: do NOT free scalar_id here. The GPU kernel that reads this
-        // scalar buffer hasn't executed yet (streaming CB). If freed, the pool
-        // may reuse the 4-byte buffer for the next scalar_mul, overwriting the
-        // value before the kernel reads it. The scalar tensor is tiny (4 bytes)
-        // and will be cleaned up when the eager runtime is dropped or reset.
+        // Defer free: the GPU kernel reading this scalar hasn't executed yet
+        // (streaming CB). Queue it for release on the next flush_and_wait.
+        self.pending_frees.push(scalar_id);
         result
     }
 
@@ -1076,7 +1089,8 @@ impl EagerRuntime {
     ) -> Result<()> {
         let (scaled_id, _) = self.scalar_mul(device, other_id, alpha)?;
         self.inplace_binary_op(device, "elementwise_add", self_id, scaled_id)?;
-        // Don't free scaled_id — the inplace kernel hasn't executed yet (streaming CB).
+        // Defer free: the inplace kernel reading scaled_id hasn't executed yet.
+        self.pending_frees.push(scaled_id);
         Ok(())
     }
 

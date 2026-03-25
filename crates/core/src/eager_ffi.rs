@@ -542,8 +542,8 @@ pub extern "C" fn applegpu_eager_find_by_data_ptr(ptr: *const u8) -> u64 {
 #[no_mangle]
 pub extern "C" fn applegpu_eager_flush_and_wait() {
     if let Some(state) = EAGER_STATE.get() {
-        let rt = state.runtime.lock().unwrap();
-        rt.flush_and_wait();
+        let mut rt = state.runtime.lock().unwrap();
+        rt.flush_and_release_pending();
     }
 }
 
