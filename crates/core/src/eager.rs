@@ -320,9 +320,6 @@ impl EagerRuntime {
         // 5. Get pipeline and dispatch into streaming CB
         let pipeline = self.get_pipeline(device, base_kernel, a_dtype)?;
         let queue = compute::get_shared_queue(device);
-        // Pass byte offsets to Metal dispatch — views (slices) have non-zero offset
-        // into the base buffer. The Swift kernel uses encoder.setBuffer(offset:) to
-        // start reading at the right position.
         let _cb = pipeline.dispatch_binary_nd_nb_with_offsets(
             queue,
             &*a_buf, (a_offset * a_dtype.size_bytes()) as u32, &a_strides,
@@ -960,7 +957,7 @@ impl EagerRuntime {
     pub fn embedding(
         &mut self, device: &Device, weight_id: u64, indices_id: u64,
     ) -> Result<(u64, *mut u8)> {
-        let (w_buf, w_dtype, embed_dim, idx_buf, seq_len) = {
+        let (w_buf, w_dtype, embed_dim, idx_buf, seq_len, idx_shape) = {
             let w = self.get(weight_id)?;
             let idx = self.get(indices_id)?;
             let w_dims = w.layout.shape.dims();
@@ -968,10 +965,14 @@ impl EagerRuntime {
                 return Err(GpuError::InvalidTensor("embedding weight must be 2D".into()));
             }
             (Arc::clone(&w.buffer), w.dtype, w_dims[1],
-             Arc::clone(&idx.buffer), idx.layout.shape.numel())
+             Arc::clone(&idx.buffer), idx.layout.shape.numel(),
+             idx.layout.shape.dims().to_vec())
         };
 
-        let out_shape = Shape::new(vec![seq_len, embed_dim])?;
+        // Output shape = indices_shape + [embed_dim]
+        let mut out_dims = idx_shape;
+        out_dims.push(embed_dim);
+        let out_shape = Shape::new(out_dims)?;
         let nbytes = seq_len * embed_dim * w_dtype.size_bytes();
         let out_buffer = Arc::new(self.pool.acquire(device, nbytes.max(4))?);
         let out_ptr = out_buffer.contents();

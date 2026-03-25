@@ -840,12 +840,18 @@ at::Tensor applegpu_sum_dim(const at::Tensor& self,
 
 at::Tensor applegpu_embedding(const at::Tensor& weight, const at::Tensor& indices,
                                int64_t padding_idx, bool scale_grad, bool sparse) {
+    // Metal embedding kernel uses int32 indices. Cast int64→int32 if needed.
+    auto idx = (indices.scalar_type() == at::ScalarType::Long)
+        ? indices.to(at::ScalarType::Int) : indices;
     EphemeralViewGuard evg;
     uint64_t out_id = 0;
     void* ptr = applegpu_eager_embedding(
-        resolve_tensor_id(weight), resolve_tensor_id(indices), &out_id);
+        resolve_tensor_id(weight), resolve_tensor_id(idx), &out_id);
     TORCH_CHECK(ptr, "applegpu embedding failed");
-    return wrap_eager_output(ptr, out_id, query_output_shape(out_id), weight.scalar_type());
+    auto idx_sizes = indices.sizes().vec();
+    int64_t embed_dim = weight.size(1);
+    idx_sizes.push_back(embed_dim);
+    return wrap_eager_output(ptr, out_id, idx_sizes, weight.scalar_type());
 }
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> applegpu_native_layer_norm(
