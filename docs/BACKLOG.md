@@ -213,10 +213,14 @@ _One new kernel unlocks a whole model class._
 - [ ] Stable Diffusion model wrapper + weight loading
 - [ ] End-to-end image generation test
 
-### PRIORITY 3: Models on PrivateUse1
+### PRIORITY 3: Models on PrivateUse1 — IN PROGRESS
 _Prove the C++ backend works beyond MLP._
-- [ ] GPT-2 inference on PrivateUse1 — requires view fixes for multi-head attention
-- [ ] Whisper on PrivateUse1 — requires conv1d, layer_norm, embedding in eager path
+- [x] Transformer block on PrivateUse1 — multi-head attention + MLP, matches CPU to 5e-7
+- [x] GPT-2 core ops: embedding, layer_norm, gelu, softmax, bmm/matmul, permute, slice, transpose, addmm, mul.Scalar
+- [x] View offset fix: binary_op passes byte offsets for sliced tensors
+- [x] Deferred free: scalar_mul buffer lifecycle managed via pending_frees + flush_and_release_pending
+- [ ] GPT-2 full model: weight loading + generation loop + end-to-end test
+- [ ] Whisper on PrivateUse1 — requires conv1d in eager path
 - [ ] Audit remaining CPU fallbacks for each model
 
 ### PRIORITY 4: Remaining CPU Fallbacks
@@ -288,6 +292,8 @@ _Design spec: `docs/superpowers/specs/2026-03-22-mpsgraph-integration-design.md`
 - [x] Seed warning — added `manual_seed_all`, `_is_in_bad_fork` to device module
 - [x] `resolve_tensor_id` contiguity check — square transposed views returned wrong tensor (shape matched but strides differed)
 - [x] MPS `transposeRight` square guard — skip for N==M (MPS bug)
+- [x] `binary_op` view byte offset — sliced tensors read from correct buffer position via `encoder.setBuffer(offset:)`
+- [x] `scalar_mul` buffer use-after-free — deferred free via `pending_frees` + `flush_and_release_pending`
 
 ---
 
@@ -308,7 +314,7 @@ _MLP training has zero fallback. These are for broader model support._
 - [ ] `where`/`masked_fill` Bool condition enforcement (migration needed)
 
 ### Performance Optimization
-_Current state: 1.59x CPU at h=4096, MPS is 3.1x. Gap is ~20 per-op kernel launches vs MPS's ~5 fused dispatches._
+_Current state: 1.45x CPU at h≥1024, MPS is 3.2x. Gap is ~20 per-op kernel launches vs MPS's ~5 fused dispatches._
 - [x] MPSMatrixMultiplication — replaced custom MSL matmul (2.2x improvement at h=4096)
 - [x] MPS transposed matmul — skip contiguity copies for backward transpose views
 - [x] GPU-native mul_.Scalar — scalar_mul + storage swap instead of flush + CPU loop

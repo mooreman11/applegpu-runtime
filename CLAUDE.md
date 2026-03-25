@@ -17,7 +17,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Eager Metal Dispatch**: ops encode directly into streaming Metal command buffer via `EagerRuntime` (Rust). No graph engine in hot path.
 - MLP training end-to-end, **zero CPU fallback**. Forward/loss/step all sub-0.1ms.
 - `torch.compile` supported via custom FX interpreter (`python/applegpu_runtime/compile_backend.py`) — walks FX graph nodes, calls Rust eager FFI directly via ctypes, bypasses PyTorch's C++ Dispatcher
-- 26 Python + 418 Rust tests passing
+- 35 Python + 418 Rust tests passing
 - **Bottleneck**: PyTorch C++ Dispatcher overhead (7.5µs/op) dominates backward pass. Custom FX interpreter bypasses dispatcher for forward + backward (P3 in progress).
 
 ### 2. PyO3 Path (original, `__torch_dispatch__`)
@@ -199,25 +199,19 @@ Always prefer the fastest path. Profile before and after changes to performance-
 ```
 TRAINING (ms/step)       h=64      h=256     h=1024     h=4096
 ----------------------------------------------------------------------
-                 CPU     0.075     0.149     1.285    25.888
-                 MPS     0.242     0.255     0.765     8.218
-            applegpu     0.646     0.651     1.693    16.328
-
-FORWARD ONLY (ms, 200-iter avg):
-                         h=256     h=1024
-  C++ dispatcher:        0.17      0.50   ← production fast path
-  MPSGraph compiled:     0.45      1.90   ← graph fusion, 40% faster than per-op compiled
-  per-op compiled:       0.55      3.10   ← Python wrapping overhead
+                 CPU     0.084     0.138     2.593    36.430
+                 MPS     0.273     0.276     0.805    11.213
+            applegpu     2.115     0.705     1.770    25.110
 
 SPEEDUP vs CPU           h=64      h=256     h=1024     h=4096
 ----------------------------------------------------------------------
-                 MPS      0.31x     0.59x     1.68x     3.15x
-            applegpu     0.12x     0.23x     0.76x     1.59x
+                 MPS      0.31x     0.50x     3.22x     3.25x
+            applegpu     0.04x     0.19x     1.47x     1.45x
 ```
-- **applegpu beats CPU at h=4096** (1.59x) — MPSMatrixMultiplication for matmul + per-op Metal for elementwise
-- **MPS still 2x faster** at h=4096 — MPSGraph whole-graph fusion; our C++ path dispatches ~20 individual Metal kernels
-- **MPSGraph compiled path works** (opt-in `APPLEGPU_MPSGRAPH=1`) — 40% faster than per-op compiled, but 3x slower than C++ dispatcher due to Python `_wrap_output` overhead
-- **C++ dispatcher is the production fast path** — no Python boundary per-op, streaming Metal CB, MPSMatrixMultiplication for matmul
+- **applegpu beats CPU at h≥1024** (1.45-1.47x) — MPSMatrixMultiplication for matmul + per-op Metal for elementwise
+- **MPS still ~2x faster** at large sizes — MPSGraph whole-graph fusion vs our ~20 individual Metal kernel launches
+- **Transformer block works** on PrivateUse1 — multi-head attention + MLP, matches CPU to 5e-7
+- **35 Python + 418 Rust tests** passing
 
 ## Development Workflow
 

@@ -108,12 +108,12 @@ Eager Metal dispatch — ops encode directly into streaming Metal command buffer
 ```
 TRAINING (ms/step)       h=256     h=1024     h=4096
 ------------------------------------------------------
-                 CPU     0.149     1.285    25.888
-                 MPS     0.255     0.765     8.218
-            applegpu     0.651     1.693    16.328
+                 CPU     0.138     2.593    36.430
+                 MPS     0.276     0.805    11.213
+            applegpu     0.705     1.770    25.110
 ```
 
-**1.6x faster than CPU at h=4096.** Uses Apple's MPSMatrixMultiplication for matmul, custom Metal kernels for elementwise. MPSGraph whole-graph fusion available (opt-in `APPLEGPU_MPSGRAPH=1`) for compiled graphs — 40% faster than per-op compilation.
+**1.45x faster than CPU at h≥1024.** Uses Apple's MPSMatrixMultiplication for matmul, custom Metal kernels for elementwise. Transformer blocks (multi-head attention + MLP) run correctly on `device='applegpu'`.
 
 ## GPT-2 Text Generation
 
@@ -279,7 +279,7 @@ No TCP bridge, no port forwarding, no special networking required.
 
 ### Test Coverage
 
-~800 tests across all layers (418 Rust + 18 Swift + ~340 Python + 26 C++ backend + compile backend)
+~810 tests across all layers (418 Rust + 18 Swift + ~340 Python + 35 C++ backend + compile backend)
 
 ## Examples
 
