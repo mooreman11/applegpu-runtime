@@ -440,21 +440,24 @@ at::Tensor applegpu_add(const at::Tensor& self, const at::Tensor& other, const a
 }
 
 at::Tensor applegpu_mul_tensor(const at::Tensor& self, const at::Tensor& other) {
-    // Handle scalar tensor (e.g., x * 0.25 wraps 0.25 as a CPU scalar tensor)
+    // Handle scalar tensor: use eager scalar_mul which creates the scalar
+    // directly in GPU shared memory (no flush needed, stays in streaming CB).
+    // The scalar value is written via CPU to shared memory BEFORE encoding
+    // the GPU kernel — Metal coherence guarantees the kernel sees it.
     if (other.dim() == 0) {
         EphemeralViewGuard evg;
-        uint64_t out_id = 0;
         float scale = other.item<float>();
+        uint64_t out_id = 0;
         void* ptr = applegpu_eager_scalar_mul(resolve_tensor_id(self), scale, &out_id);
-        TORCH_CHECK(ptr, "applegpu mul scalar failed");
+        TORCH_CHECK(ptr, "applegpu mul.Scalar failed");
         return wrap_eager_output(ptr, out_id, query_output_shape(out_id), self.scalar_type());
     }
     if (self.dim() == 0) {
         EphemeralViewGuard evg;
-        uint64_t out_id = 0;
         float scale = self.item<float>();
+        uint64_t out_id = 0;
         void* ptr = applegpu_eager_scalar_mul(resolve_tensor_id(other), scale, &out_id);
-        TORCH_CHECK(ptr, "applegpu mul scalar failed");
+        TORCH_CHECK(ptr, "applegpu mul.Scalar failed");
         return wrap_eager_output(ptr, out_id, query_output_shape(out_id), other.scalar_type());
     }
     EphemeralViewGuard evg;
@@ -598,13 +601,12 @@ at::Tensor applegpu_t(const at::Tensor& self) {
 
 // div.Tensor
 at::Tensor applegpu_div(const at::Tensor& self, const at::Tensor& other) {
-    // Handle scalar tensor (e.g., x / 4.0)
-    if (other.dim() == 0) {
+    // Handle scalar tensor: move to GPU and use binary div (no CPU read that disrupts streaming)
+    if (other.dim() == 0 && !other.device().is_privateuseone()) {
+        auto other_gpu = other.to(self.device());
         EphemeralViewGuard evg;
         uint64_t out_id = 0;
-        float scale = 1.0f / other.item<float>();
-        void* ptr = applegpu_eager_scalar_mul(resolve_tensor_id(self), scale, &out_id);
-        TORCH_CHECK(ptr, "applegpu div scalar failed");
+        void* ptr = applegpu_eager_div(resolve_tensor_id(self), resolve_tensor_id(other_gpu), &out_id);
         return wrap_eager_output(ptr, out_id, query_output_shape(out_id), self.scalar_type());
     }
     EphemeralViewGuard evg;

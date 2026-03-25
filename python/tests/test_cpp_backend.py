@@ -177,6 +177,137 @@ def test_mlp_training_step():
     assert loss2.cpu().item() < loss.cpu().item() + 0.1  # allow small tolerance
 
 
+def test_embedding():
+    """Embedding lookup works on GPU."""
+    _load()
+    weight = torch.randn(100, 32, device='applegpu')
+    indices = torch.tensor([0, 5, 10, 50, 99], device='applegpu', dtype=torch.int32)
+    out = torch.ops.aten.embedding(weight, indices, -1, False, False)
+    ref = torch.ops.aten.embedding(weight.cpu(), indices.cpu(), -1, False, False)
+    assert out.shape == (5, 32)
+    assert torch.allclose(out.cpu(), ref, atol=1e-5)
+
+
+def test_layer_norm():
+    """LayerNorm matches CPU."""
+    _load()
+    ln = torch.nn.LayerNorm(64).to('applegpu')
+    lnc = torch.nn.LayerNorm(64)
+    lnc.load_state_dict({k: v.cpu() for k, v in ln.state_dict().items()})
+    x = torch.randn(2, 8, 64, device='applegpu')
+    assert torch.allclose(ln(x).cpu(), lnc(x.cpu()), atol=1e-4)
+
+
+def test_gelu():
+    """GELU activation matches CPU."""
+    _load()
+    x = torch.randn(4, 64, device='applegpu')
+    out = torch.nn.functional.gelu(x, approximate='tanh')
+    ref = torch.nn.functional.gelu(x.cpu(), approximate='tanh')
+    assert torch.allclose(out.cpu(), ref, atol=1e-4)
+
+
+def test_softmax():
+    """Softmax matches CPU."""
+    _load()
+    x = torch.randn(4, 64, device='applegpu')
+    out = torch.softmax(x, dim=-1)
+    ref = torch.softmax(x.cpu(), dim=-1)
+    assert torch.allclose(out.cpu(), ref, atol=1e-5)
+
+
+def test_permute_transpose():
+    """Permute and multi-dim transpose work."""
+    _load()
+    x = torch.randn(2, 3, 4, device='applegpu')
+    assert torch.allclose(x.permute(0, 2, 1).cpu(), x.cpu().permute(0, 2, 1))
+    assert torch.allclose(x.transpose(1, 2).cpu(), x.cpu().transpose(1, 2))
+
+
+def test_slice():
+    """Tensor slicing works."""
+    _load()
+    x = torch.randn(10, 64, device='applegpu')
+    assert torch.allclose(x[2:5].cpu(), x.cpu()[2:5])
+    assert torch.allclose(x[:, 10:20].cpu(), x.cpu()[:, 10:20])
+
+
+def test_scalar_mul_chain():
+    """scalar_mul doesn't corrupt data in streaming CB (regression test).
+
+    Previously, scalar_mul freed the 4-byte scalar buffer before the GPU
+    kernel executed. The pool reused it for the next scalar, corrupting data.
+    """
+    _load()
+    # Chain: matmul → scalar_mul (must not free scalar buffer prematurely)
+    q = torch.randn(1, 4, 8, 16, device='applegpu', requires_grad=True)
+    k = torch.randn(1, 4, 8, 16, device='applegpu', requires_grad=True)
+    att = q @ k.transpose(-2, -1)
+    scaled = att * 0.25
+    torch.applegpu.synchronize()
+    ref = (q.detach().cpu() @ k.detach().cpu().transpose(-2, -1)) * 0.25
+    assert torch.allclose(scaled.detach().cpu(), ref, atol=1e-4), \
+        f"scalar_mul chain: diff={(scaled.detach().cpu()-ref).abs().max()}"
+
+
+def test_slice_contiguous():
+    """Contiguous copy of sliced view reads from correct offset (regression test).
+
+    Previously, binary_op ignored view byte offsets, so .contiguous() on a
+    slice read from buffer position 0 instead of the slice offset.
+    """
+    _load()
+    x = torch.randn(4, 6, device='applegpu')
+    sliced = x[:, 2:4].contiguous()
+    ref = x.cpu()[:, 2:4].contiguous()
+    assert torch.allclose(sliced.cpu(), ref, atol=1e-6), \
+        f"slice contiguous: diff={(sliced.cpu()-ref).abs().max()}"
+
+
+def test_transformer_block():
+    """Full transformer block matches CPU (regression test for all GPT-2 ops)."""
+    _load()
+    torch.manual_seed(42)
+
+    class TransformerBlock(torch.nn.Module):
+        def __init__(self, d=64, h=4):
+            super().__init__()
+            self.ln1 = torch.nn.LayerNorm(d)
+            self.qkv = torch.nn.Linear(d, 3 * d)
+            self.proj = torch.nn.Linear(d, d)
+            self.ln2 = torch.nn.LayerNorm(d)
+            self.mlp = torch.nn.Sequential(
+                torch.nn.Linear(d, 4 * d),
+                torch.nn.GELU(approximate='tanh'),
+                torch.nn.Linear(4 * d, d),
+            )
+            self.h = h
+
+        def forward(self, x):
+            B, T, C = x.shape
+            hd = C // self.h
+            r = self.ln1(x)
+            qkv = self.qkv(r)
+            q, k, v = qkv.split(C, dim=-1)
+            q = q.view(B, T, self.h, hd).transpose(1, 2)
+            k = k.view(B, T, self.h, hd).transpose(1, 2)
+            v = v.view(B, T, self.h, hd).transpose(1, 2)
+            att = torch.softmax(
+                (q @ k.transpose(-2, -1)) * (hd ** -0.5), dim=-1)
+            y = (att @ v).transpose(1, 2).contiguous().view(B, T, C)
+            x = x + self.proj(y)
+            return x + self.mlp(self.ln2(x))
+
+    m = TransformerBlock().to('applegpu')
+    mc = TransformerBlock()
+    mc.load_state_dict({k: v.cpu() for k, v in m.state_dict().items()})
+    x = torch.randn(1, 8, 64, device='applegpu')
+    out = m(x)
+    ref = mc(x.cpu())
+    assert torch.allclose(out.cpu(), ref, atol=1e-3), \
+        f"transformer: diff={(out.cpu()-ref).abs().max()}"
+
+
 def test_eager_add_via_ffi():
     """Proof that eager Metal dispatch works end-to-end.
 

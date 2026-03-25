@@ -685,7 +685,11 @@ impl EagerRuntime {
         let (scalar_id, scalar_ptr) = self.alloc(device, &[1], dtype)?;
         unsafe { *(scalar_ptr as *mut f32) = scale; }
         let result = self.binary_op(device, "elementwise_mul", input_id, scalar_id);
-        self.free(scalar_id);
+        // NOTE: do NOT free scalar_id here. The GPU kernel that reads this
+        // scalar buffer hasn't executed yet (streaming CB). If freed, the pool
+        // may reuse the 4-byte buffer for the next scalar_mul, overwriting the
+        // value before the kernel reads it. The scalar tensor is tiny (4 bytes)
+        // and will be cleaned up when the eager runtime is dropped or reset.
         result
     }
 
@@ -1072,7 +1076,7 @@ impl EagerRuntime {
     ) -> Result<()> {
         let (scaled_id, _) = self.scalar_mul(device, other_id, alpha)?;
         self.inplace_binary_op(device, "elementwise_add", self_id, scaled_id)?;
-        self.free(scaled_id);
+        // Don't free scaled_id — the inplace kernel hasn't executed yet (streaming CB).
         Ok(())
     }
 
