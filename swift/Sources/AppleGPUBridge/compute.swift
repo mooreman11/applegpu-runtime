@@ -154,11 +154,11 @@ final class GPUCompute {
             encoder.setBytes(&bs, length: MemoryLayout<UInt32>.size, index: 6)
             encoder.setBytes(&abs_val, length: MemoryLayout<UInt32>.size, index: 7)
             encoder.setBytes(&bbs, length: MemoryLayout<UInt32>.size, index: 8)
-            let w = pipelineState.threadExecutionWidth
-            let h = max(pipelineState.maxTotalThreadsPerThreadgroup / w, 1)
-            encoder.dispatchThreads(
-                MTLSize(width: N, height: M, depth: batchSize),
-                threadsPerThreadgroup: MTLSize(width: w, height: h, depth: 1))
+            // Tiled kernel: 32×32 threadgroups
+            let ts = 32
+            encoder.dispatchThreadgroups(
+                MTLSize(width: (N + ts - 1) / ts, height: (M + ts - 1) / ts, depth: batchSize),
+                threadsPerThreadgroup: MTLSize(width: ts, height: ts, depth: 1))
             encoder.endEncoding()
         } else if batchSize == 1 {
             let matA = MPSMatrix(buffer: bufA, descriptor: MPSMatrixDescriptor(
@@ -1562,7 +1562,7 @@ public func gpuBridgeComputeMatmulBatchedNB(
         && aNeeded >= 16 && bNeeded >= 16 && cNeeded >= 16
 
     if !useMPS {
-        // Tiny matrix — use custom MSL kernel (MPS requires ≥ 16 byte buffers)
+        // Tiny or non-Float32 matrix — use tiled custom MSL kernel
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
         encoder.setComputePipelineState(compute.pipelineState)
         encoder.setBuffer(bufA.buffer, offset: 0, index: 0)
@@ -1575,11 +1575,11 @@ public func gpuBridgeComputeMatmulBatchedNB(
         encoder.setBytes(&bsV, length: MemoryLayout<UInt32>.size, index: 6)
         encoder.setBytes(&absV, length: MemoryLayout<UInt32>.size, index: 7)
         encoder.setBytes(&bbsV, length: MemoryLayout<UInt32>.size, index: 8)
-        let w = compute.pipelineState.threadExecutionWidth
-        let h = max(compute.pipelineState.maxTotalThreadsPerThreadgroup / w, 1)
-        encoder.dispatchThreads(
-            MTLSize(width: n, height: m, depth: bs),
-            threadsPerThreadgroup: MTLSize(width: w, height: h, depth: 1))
+        // Tiled kernel requires 32×32 threadgroups (uses threadgroup shared memory)
+        let ts = 32
+        encoder.dispatchThreadgroups(
+            MTLSize(width: (n + ts - 1) / ts, height: (m + ts - 1) / ts, depth: bs),
+            threadsPerThreadgroup: MTLSize(width: ts, height: ts, depth: 1))
         encoder.endEncoding()
     } else if bs == 1 {
         // Single matrix multiply via MPS
@@ -1597,10 +1597,8 @@ public func gpuBridgeComputeMatmulBatchedNB(
             alpha: 1.0, beta: 0.0)
         mm.encode(commandBuffer: commandBuffer, leftMatrix: matA, rightMatrix: matB, resultMatrix: matC)
     } else {
-        // Batched matmul — use custom MSL kernel with 3D grid dispatch (one encoder).
-        // This is faster than N separate MPSMatrixMultiplication encodes because
-        // each MPS encode creates its own internal encoder (~15µs overhead each).
-        // The custom kernel handles batch via gid.z with a_batch_stride/b_batch_stride.
+        // Batched matmul — tiled custom MSL kernel with 32×32 threadgroups.
+        // Single encoder for all batches (gid.z = batch), vs N separate MPS encodes.
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
         encoder.setComputePipelineState(compute.pipelineState)
         encoder.setBuffer(bufA.buffer, offset: 0, index: 0)
@@ -1613,11 +1611,13 @@ public func gpuBridgeComputeMatmulBatchedNB(
         encoder.setBytes(&bsV, length: MemoryLayout<UInt32>.size, index: 6)
         encoder.setBytes(&absV, length: MemoryLayout<UInt32>.size, index: 7)
         encoder.setBytes(&bbsV, length: MemoryLayout<UInt32>.size, index: 8)
-        let w = compute.pipelineState.threadExecutionWidth
-        let h = max(compute.pipelineState.maxTotalThreadsPerThreadgroup / w, 1)
-        encoder.dispatchThreads(
-            MTLSize(width: n, height: m, depth: bs),
-            threadsPerThreadgroup: MTLSize(width: w, height: h, depth: 1))
+        // Tiled kernel uses 32×32 threadgroups — dispatch in threadgroups (rounded up)
+        let ts = 32
+        let tgX = (n + ts - 1) / ts
+        let tgY = (m + ts - 1) / ts
+        encoder.dispatchThreadgroups(
+            MTLSize(width: tgX, height: tgY, depth: bs),
+            threadsPerThreadgroup: MTLSize(width: ts, height: ts, depth: 1))
         encoder.endEncoding()
     }
 
