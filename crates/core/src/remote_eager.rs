@@ -248,6 +248,14 @@ impl RemoteEagerRuntime {
     pub fn scalar_mul(
         &mut self, input_id: u64, scale: f32,
     ) -> Result<(u64, *mut u8), String> {
+        // If the input (or its base tensor for views) is an output of a pending op,
+        // we must flush first — otherwise the server won't have the data.
+        // This happens when contiguous() is called on a view of a pending result.
+        let needs_flush = self.input_depends_on_pending(input_id);
+        if needs_flush {
+            self.flush_and_wait()?;
+        }
+
         let t = self.tensors.get(&input_id)
             .ok_or_else(|| format!("tensor {} not found", input_id))?;
         let out_shape = t.shape.clone();
@@ -258,6 +266,64 @@ impl RemoteEagerRuntime {
             op: wire::WireOpKind::ScalarMul(scale),
             inputs: vec![input_id],
             output_shape: out_shape,
+            output_dtype: out_dtype.to_wire(),
+        });
+        Ok((id, ptr))
+    }
+
+    /// Check if a tensor (or its base for views) is produced by a pending op.
+    fn input_depends_on_pending(&self, id: u64) -> bool {
+        if self.pending_ops.is_empty() { return false; }
+        let output_ids: std::collections::HashSet<u64> = self.pending_ops.iter()
+            .map(|op| op.output_id).collect();
+        if output_ids.contains(&id) { return true; }
+        // Check base tensor for views
+        if let Some(t) = self.tensors.get(&id) {
+            if let Some(base_id) = t.base_id {
+                if output_ids.contains(&base_id) { return true; }
+            }
+        }
+        false
+    }
+
+    // ── Layer norm ─────────────────────────────────────────────────
+
+    pub fn layer_norm(
+        &mut self, input_id: u64, gamma_id: u64, beta_id: u64, eps: f32,
+    ) -> Result<(u64, *mut u8), String> {
+        let t = self.tensors.get(&input_id)
+            .ok_or_else(|| format!("tensor {} not found", input_id))?;
+        let out_shape = t.shape.clone();
+        let out_dtype = t.dtype;
+        let (id, ptr) = self.alloc(&out_shape, out_dtype)?;
+        self.pending_ops.push(PendingOp {
+            output_id: id,
+            op: wire::WireOpKind::LayerNorm { eps },
+            inputs: vec![input_id, gamma_id, beta_id],
+            output_shape: out_shape,
+            output_dtype: out_dtype.to_wire(),
+        });
+        Ok((id, ptr))
+    }
+
+    // ── Sum dim ───────────────────────────────────────────────────
+    // Wire protocol doesn't have SumDim yet — used for training (mse_loss_backward)
+    // GPT-2 forward doesn't need this.
+
+    // ── Mean all ──────────────────────────────────────────────────
+
+    pub fn mean_all(
+        &mut self, input_id: u64,
+    ) -> Result<(u64, *mut u8), String> {
+        let t = self.tensors.get(&input_id)
+            .ok_or_else(|| format!("tensor {} not found", input_id))?;
+        let out_dtype = t.dtype;
+        let (id, ptr) = self.alloc(&[1], out_dtype)?;
+        self.pending_ops.push(PendingOp {
+            output_id: id,
+            op: wire::WireOpKind::Mean,
+            inputs: vec![input_id],
+            output_shape: vec![1],
             output_dtype: out_dtype.to_wire(),
         });
         Ok((id, ptr))
@@ -579,22 +645,25 @@ fn broadcast_shapes(a: &[usize], b: &[usize]) -> Result<Vec<usize>, String> {
 }
 
 fn matmul_shape(a: &[usize], b: &[usize]) -> Result<Vec<usize>, String> {
-    match (a.len(), b.len()) {
-        (2, 2) => {
-            if a[1] != b[0] {
-                return Err(format!("matmul shape mismatch: {:?} @ {:?}", a, b));
-            }
-            Ok(vec![a[0], b[1]])
-        }
-        (3, 3) => {
-            // Batched matmul
-            if a[0] != b[0] || a[2] != b[1] {
-                return Err(format!("batched matmul shape mismatch: {:?} @ {:?}", a, b));
-            }
-            Ok(vec![a[0], a[1], b[2]])
-        }
-        _ => Err(format!("unsupported matmul shapes: {:?} @ {:?}", a, b)),
+    if a.len() < 2 || b.len() < 2 {
+        return Err(format!("matmul needs at least 2D: {:?} @ {:?}", a, b));
     }
+    let m = a[a.len() - 2];
+    let k1 = a[a.len() - 1];
+    let k2 = b[b.len() - 2];
+    let n = b[b.len() - 1];
+    if k1 != k2 {
+        return Err(format!("matmul K mismatch: {:?} @ {:?}", a, b));
+    }
+    // Broadcast batch dimensions
+    let a_batch = &a[..a.len() - 2];
+    let b_batch = &b[..b.len() - 2];
+    let batch = broadcast_shapes(a_batch, b_batch)
+        .map_err(|_| format!("matmul batch broadcast failed: {:?} @ {:?}", a, b))?;
+    let mut result = batch;
+    result.push(m);
+    result.push(n);
+    Ok(result)
 }
 
 #[cfg(test)]

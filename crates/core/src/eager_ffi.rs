@@ -404,9 +404,7 @@ pub extern "C" fn applegpu_eager_mean_all(
             }
         }
         EagerBackend::Remote(remote) => {
-            // mean_all maps to ScalarMul with shape [1] — use a special op
-            // For now, record as unary with Mean wire op
-            match remote.unary_op(wire::WireOpKind::Mean, input_id) {
+            match remote.mean_all(input_id) {
                 Ok((id, ptr)) => { unsafe { *out_id = id; } ptr }
                 Err(e) => { set_error(format!("{}", e)); std::ptr::null_mut() }
             }
@@ -431,8 +429,7 @@ pub extern "C" fn applegpu_eager_sum_dim(
             }
         }
         EagerBackend::Remote(_remote) => {
-            // TODO: implement sum_dim in remote mode
-            set_error("sum_dim not yet supported in remote mode".to_string());
+            set_error("sum_dim not yet supported in remote mode (needs SumDim wire op)".to_string());
             std::ptr::null_mut()
         }
     }
@@ -558,10 +555,11 @@ pub extern "C" fn applegpu_eager_layer_norm(
                 Err(e) => { set_error(format!("{}", e)); std::ptr::null_mut() }
             }
         }
-        EagerBackend::Remote(_remote) => {
-            // TODO: layer_norm needs 3-input wire op
-            set_error("layer_norm not yet supported in remote mode".to_string());
-            std::ptr::null_mut()
+        EagerBackend::Remote(remote) => {
+            match remote.layer_norm(input_id, gamma_id, beta_id, eps) {
+                Ok((id, ptr)) => { unsafe { *out_id = id; } ptr }
+                Err(e) => { set_error(format!("{}", e)); std::ptr::null_mut() }
+            }
         }
     }
 }
