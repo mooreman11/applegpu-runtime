@@ -248,12 +248,18 @@ impl RemoteEagerRuntime {
     pub fn scalar_mul(
         &mut self, input_id: u64, scale: f32,
     ) -> Result<(u64, *mut u8), String> {
-        // If the input (or its base tensor for views) is an output of a pending op,
-        // we must flush first — otherwise the server won't have the data.
+        // If the input depends on a pending op, we need that op's result first.
         // This happens when contiguous() is called on a view of a pending result.
+        // Flush deps, then do the scalar_mul locally if scale == 1.0 (copy case).
         let needs_flush = self.input_depends_on_pending(input_id);
         if needs_flush {
             self.flush_and_wait()?;
+        }
+
+        // For scale == 1.0 (contiguous copy), do it locally on the proxy buffer.
+        // This avoids a GPU round-trip and mid-graph flush issues.
+        if scale == 1.0 {
+            return self.local_contiguous_copy(input_id);
         }
 
         let t = self.tensors.get(&input_id)
@@ -268,6 +274,48 @@ impl RemoteEagerRuntime {
             output_shape: out_shape,
             output_dtype: out_dtype.to_wire(),
         });
+        Ok((id, ptr))
+    }
+
+    /// Local CPU-side contiguous copy of a tensor (handles views with strides).
+    /// Used for GPU→GPU copy_ in remote mode instead of sending to the server.
+    fn local_contiguous_copy(&mut self, input_id: u64) -> Result<(u64, *mut u8), String> {
+        let (out_shape, out_dtype, data) = {
+            let t = self.tensors.get(&input_id)
+                .ok_or_else(|| format!("tensor {} not found", input_id))?;
+            let shape = t.shape.clone();
+            let dtype = t.dtype;
+            if let Some(base_id) = t.base_id {
+                // View: stride-aware copy from base buffer
+                let strides = t.strides.clone();
+                let offset = t.offset;
+                let base = self.tensors.get(&base_id)
+                    .ok_or_else(|| format!("base tensor {} not found", base_id))?;
+                let data = stride_aware_copy(
+                    &base.buf, offset, &shape, &strides, dtype.size_bytes(),
+                );
+                (shape, dtype, data)
+            } else {
+                // Non-view: just copy the buffer
+                let data = t.buf[..t.byte_size()].to_vec();
+                (shape, dtype, data)
+            }
+        };
+
+        let (id, ptr) = self.alloc(&out_shape, out_dtype)?;
+        // Copy data into the new proxy buffer
+        if let Some(t) = self.tensors.get(&id) {
+            let copy_len = data.len().min(t.buf.len());
+            if copy_len > 0 {
+                unsafe {
+                    let dst = t.buf.as_ptr() as *mut u8;
+                    std::ptr::copy_nonoverlapping(data.as_ptr(), dst, copy_len);
+                }
+            }
+        }
+        if let Some(t) = self.tensors.get_mut(&id) {
+            t.materialized = true;
+        }
         Ok((id, ptr))
     }
 
