@@ -180,6 +180,15 @@ impl RemoteEagerRuntime {
         }
     }
 
+    // ── Eager flush mode ───────────────────────────────────────────
+    // Flush after every op for correctness. Each op is sent individually
+    // to the server, avoiding batched graph eval issues.
+    // Can be disabled with APPLEGPU_REMOTE_BATCH=1 for experimental batching.
+
+    fn should_eager_flush(&self) -> bool {
+        !std::env::var("APPLEGPU_REMOTE_BATCH").is_ok()
+    }
+
     // ── Binary ops ────────────────────────────────────────────────
 
     pub fn binary_op(
@@ -196,6 +205,9 @@ impl RemoteEagerRuntime {
             output_shape: out_shape,
             output_dtype: out_dtype.to_wire(),
         });
+        if self.should_eager_flush() {
+            self.flush_and_wait()?;
+        }
         Ok((id, ptr))
     }
 
@@ -222,6 +234,9 @@ impl RemoteEagerRuntime {
             output_shape: out_shape,
             output_dtype: out_dtype.to_wire(),
         });
+        if self.should_eager_flush() {
+            self.flush_and_wait()?;
+        }
         Ok((id, ptr))
     }
 
@@ -240,6 +255,9 @@ impl RemoteEagerRuntime {
             output_shape: out_shape,
             output_dtype: out_dtype.to_wire(),
         });
+        if self.should_eager_flush() {
+            self.flush_and_wait()?;
+        }
         Ok((id, ptr))
     }
 
@@ -274,6 +292,9 @@ impl RemoteEagerRuntime {
             output_shape: out_shape,
             output_dtype: out_dtype.to_wire(),
         });
+        if self.should_eager_flush() {
+            self.flush_and_wait()?;
+        }
         Ok((id, ptr))
     }
 
@@ -351,6 +372,9 @@ impl RemoteEagerRuntime {
             output_shape: out_shape,
             output_dtype: out_dtype.to_wire(),
         });
+        if self.should_eager_flush() {
+            self.flush_and_wait()?;
+        }
         Ok((id, ptr))
     }
 
@@ -374,6 +398,9 @@ impl RemoteEagerRuntime {
             output_shape: vec![1],
             output_dtype: out_dtype.to_wire(),
         });
+        if self.should_eager_flush() {
+            self.flush_and_wait()?;
+        }
         Ok((id, ptr))
     }
 

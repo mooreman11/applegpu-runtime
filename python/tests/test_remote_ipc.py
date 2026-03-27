@@ -158,3 +158,52 @@ assert diff < 1e-3, f"mlp diff: {diff}"
 print("PASS")
 """)
     assert "PASS" in out
+
+
+def test_remote_transformer_block():
+    out = _run_remote_test("""
+import torch, sys
+sys.path.insert(0, 'python')
+from applegpu_runtime.cpp_backend import load_cpp_backend
+load_cpp_backend()
+torch.manual_seed(42)
+
+class Block(torch.nn.Module):
+    def __init__(self, d=64, h=4):
+        super().__init__()
+        self.ln1 = torch.nn.LayerNorm(d)
+        self.qkv = torch.nn.Linear(d, 3*d)
+        self.proj = torch.nn.Linear(d, d)
+        self.ln2 = torch.nn.LayerNorm(d)
+        self.fc = torch.nn.Linear(d, 4*d)
+        self.fcp = torch.nn.Linear(4*d, d)
+        self.h = h
+
+    def forward(self, x):
+        B, T, C = x.shape
+        hd = C // self.h
+        r = self.ln1(x)
+        qkv = self.qkv(r)
+        q, k, v = qkv.split(C, -1)
+        q = q.view(B, T, self.h, hd).transpose(1, 2)
+        k = k.view(B, T, self.h, hd).transpose(1, 2)
+        v = v.view(B, T, self.h, hd).transpose(1, 2)
+        att = torch.softmax((q @ k.transpose(-2, -1)) * (hd**-0.5), -1)
+        y = (att @ v).transpose(1, 2).contiguous().view(B, T, C)
+        x = x + self.proj(y)
+        return x + self.fcp(torch.nn.functional.gelu(
+            self.fc(self.ln2(x)), approximate='tanh'))
+
+block_cpu = Block()
+block_gpu = Block()
+block_gpu.load_state_dict(block_cpu.state_dict())
+block_gpu = block_gpu.to('applegpu')
+x = torch.randn(1, 4, 64)
+out = block_gpu(x.to('applegpu'))
+torch.applegpu.synchronize()
+ref = block_cpu(x)
+diff = (out.cpu() - ref).abs().max().item()
+assert diff < 1e-3, f"transformer diff: {diff}"
+print("PASS")
+""")
+    assert "PASS" in out
