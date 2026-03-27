@@ -433,6 +433,25 @@ at::Tensor applegpu_add(const at::Tensor& self, const at::Tensor& other, const a
         applegpu_eager_synchronize();
         return at::add(self.cpu(), other.cpu(), alpha).to(self.device());
     }
+    // Handle scalar tensor (e.g., x + 1.0 wraps 1.0 as Float64 scalar)
+    if (other.dim() == 0) {
+        float val = other.item<float>();
+        // add_scaled_inplace on a copy: result = copy(self), result += val*ones
+        // Simpler: use scalar_mul to copy, then add_scaled_inplace with a scalar buffer
+        EphemeralViewGuard evg;
+        uint64_t copy_id = 0;
+        void* copy_ptr = applegpu_eager_scalar_mul(resolve_tensor_id(self), 1.0f, &copy_id);
+        TORCH_CHECK(copy_ptr, "applegpu add scalar copy failed");
+        // Create a scalar tensor on GPU and use add_scaled_inplace
+        auto ones = torch::ones({1}, self.options());
+        int32_t rc = applegpu_eager_add_scaled_inplace(copy_id, resolve_tensor_id(ones), val);
+        TORCH_CHECK(rc == 0, "applegpu add scalar failed");
+        return wrap_eager_output(copy_ptr, copy_id, query_output_shape(copy_id), self.scalar_type());
+    }
+    if (self.dim() == 0) {
+        // scalar + tensor: same as tensor + scalar
+        return applegpu_add(other, self, alpha);
+    }
     EphemeralViewGuard evg;
     uint64_t out_id = 0;
     void* ptr = applegpu_eager_add(resolve_tensor_id(self), resolve_tensor_id(other), &out_id);
@@ -470,6 +489,30 @@ at::Tensor applegpu_sub(const at::Tensor& self, const at::Tensor& other, const a
     if (alpha.toDouble() != 1.0) {
         applegpu_eager_synchronize();
         return at::sub(self.cpu(), other.cpu(), alpha).to(self.device());
+    }
+    // Handle scalar tensor (Float64 can't go to Metal)
+    if (other.dim() == 0) {
+        float val = other.item<float>();
+        EphemeralViewGuard evg;
+        uint64_t copy_id = 0;
+        void* copy_ptr = applegpu_eager_scalar_mul(resolve_tensor_id(self), 1.0f, &copy_id);
+        TORCH_CHECK(copy_ptr, "applegpu sub scalar copy failed");
+        auto ones = torch::ones({1}, self.options());
+        int32_t rc = applegpu_eager_add_scaled_inplace(copy_id, resolve_tensor_id(ones), -val);
+        TORCH_CHECK(rc == 0, "applegpu sub scalar failed");
+        return wrap_eager_output(copy_ptr, copy_id, query_output_shape(copy_id), self.scalar_type());
+    }
+    if (self.dim() == 0) {
+        // scalar - tensor: negate tensor then add scalar
+        EphemeralViewGuard evg;
+        uint64_t neg_id = 0;
+        void* neg_ptr = applegpu_eager_scalar_mul(resolve_tensor_id(other), -1.0f, &neg_id);
+        TORCH_CHECK(neg_ptr, "applegpu sub scalar neg failed");
+        float val = self.item<float>();
+        auto ones = torch::ones({1}, other.options());
+        int32_t rc = applegpu_eager_add_scaled_inplace(neg_id, resolve_tensor_id(ones), val);
+        TORCH_CHECK(rc == 0, "applegpu sub scalar failed");
+        return wrap_eager_output(neg_ptr, neg_id, query_output_shape(neg_id), other.scalar_type());
     }
     EphemeralViewGuard evg;
     uint64_t out_id = 0;
@@ -599,14 +642,29 @@ at::Tensor applegpu_t(const at::Tensor& self) {
     return result;
 }
 
+// div.Scalar — x / scalar implemented as x * (1/scalar)
+at::Tensor applegpu_div_scalar(const at::Tensor& self, const at::Scalar& other) {
+    float val = other.toFloat();
+    TORCH_CHECK(val != 0.0f, "applegpu: division by zero");
+    EphemeralViewGuard evg;
+    uint64_t out_id = 0;
+    void* ptr = applegpu_eager_scalar_mul(resolve_tensor_id(self), 1.0f / val, &out_id);
+    TORCH_CHECK(ptr, "applegpu div.Scalar failed: ",
+                applegpu_eager_last_error() ? applegpu_eager_last_error() : "unknown");
+    return wrap_eager_output(ptr, out_id, query_output_shape(out_id), self.scalar_type());
+}
+
 // div.Tensor
 at::Tensor applegpu_div(const at::Tensor& self, const at::Tensor& other) {
-    // Handle scalar tensor: move to GPU and use binary div (no CPU read that disrupts streaming)
-    if (other.dim() == 0 && !other.device().is_privateuseone()) {
-        auto other_gpu = other.to(self.device());
+    // Handle scalar tensor: use scalar_mul(1/val) — avoids moving Float64 to GPU
+    if (other.dim() == 0) {
+        float val = other.item<float>();
+        TORCH_CHECK(val != 0.0f, "applegpu: division by zero");
         EphemeralViewGuard evg;
         uint64_t out_id = 0;
-        void* ptr = applegpu_eager_div(resolve_tensor_id(self), resolve_tensor_id(other_gpu), &out_id);
+        void* ptr = applegpu_eager_scalar_mul(resolve_tensor_id(self), 1.0f / val, &out_id);
+        TORCH_CHECK(ptr, "applegpu div failed: ",
+                    applegpu_eager_last_error() ? applegpu_eager_last_error() : "unknown");
         return wrap_eager_output(ptr, out_id, query_output_shape(out_id), self.scalar_type());
     }
     EphemeralViewGuard evg;
@@ -1011,6 +1069,7 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("threshold_backward", applegpu_threshold_backward);
     m.impl("t", applegpu_t);
     m.impl("div.Tensor", applegpu_div);
+    m.impl("div.Scalar", applegpu_div_scalar);
     m.impl("add_.Tensor", applegpu_add_);
     m.impl("mul_.Tensor", applegpu_mul_);
     m.impl("mul_.Scalar", applegpu_mul_scalar_);

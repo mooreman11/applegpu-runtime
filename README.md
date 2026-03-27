@@ -101,19 +101,28 @@ loss.backward()
 optimizer.step()
 ```
 
-Eager Metal dispatch — ops encode directly into streaming Metal command buffer. Zero CPU fallback for MLP training. Uses Apple's MPSMatrixMultiplication for optimized matmul with automatic transpose support. Supports `torch.compile` via custom FX interpreter + Rust compiled graph executor.
+Eager Metal dispatch — ops encode directly into streaming Metal command buffer. Zero CPU fallback for MLP training. Tiled 32×32 matmul kernel with threadgroup shared memory for batched matmul, MPSMatrixMultiplication for unbatched. Supports `torch.compile` via custom FX interpreter + Rust compiled graph executor.
 
-### Performance (MLP Training)
+### Performance
 
+**MLP Training:**
 ```
 TRAINING (ms/step)       h=256     h=1024     h=4096
 ------------------------------------------------------
-                 CPU     0.138     2.593    36.430
-                 MPS     0.276     0.805    11.213
-            applegpu     0.705     1.770    25.110
+                 CPU     0.129     1.657    34.166
+                 MPS     0.248     0.705     9.435
+            applegpu     0.811     1.772    28.121
 ```
 
-**1.45x faster than CPU at h≥1024.** Uses Apple's MPSMatrixMultiplication for matmul, custom Metal kernels for elementwise. Transformer blocks (multi-head attention + MLP) run correctly on `device='applegpu'`.
+**GPT-2 Forward (124M params, 12 layers):**
+```
+   Seq   CPU (ms)  applegpu (ms)  Speedup
+     8       31.9           29.8    1.07x
+    32       20.4           33.8    0.60x
+   128       39.8           39.2    1.02x
+```
+
+**1.21x faster than CPU at h=4096.** GPT-2 (12-layer transformer) runs end-to-end on `device='applegpu'`. HuggingFace GPT-2 loads and generates text matching CPU output exactly, with KV cache support. Container IPC path working — ops dispatch over Unix socket to gpu-service on host. 34 Python + 333 Rust tests passing.
 
 ## GPT-2 Text Generation
 

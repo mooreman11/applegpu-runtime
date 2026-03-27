@@ -199,13 +199,17 @@ _C++ PrivateUse1 backend, native ops, view system, in-place ops, CPU fallback di
 
 ## Up Next
 
-### PRIORITY 1: MPSGraph Integration for Container GPU Access
-_Our key differentiator: PyTorch `device='mps'` doesn't work in Docker containers (no Metal driver inside Linux). Our architecture bridges Metal on the host to containers via IPC. MPSGraph integration brings Apple's fused GPU performance to containers where MPS can't reach._
-- [ ] MPSGraph subgraph capture — record op sequences between sync points
-- [ ] MPSGraph compilation — convert captured subgraphs to MPSGraph operations
-- [ ] MPSGraph execution — run compiled graphs via the Swift bridge (same IPC path containers already use)
-- [ ] Benchmark: target parity with `device='mps'` at h≥1024
-- [ ] Container verification: Docker + gpu-service → MPSGraph → Metal GPU
+### PRIORITY 1: Container IPC Path — CORE OPS WORKING
+_Our key differentiator: PyTorch `device='mps'` doesn't work in Docker containers (no Metal driver inside Linux). Our architecture bridges Metal on the host to containers via IPC._
+- [x] `RemoteEagerRuntime` — proxy buffers with stable pointers, op recording, stride-aware view upload, deferred free
+- [x] `eager_ffi.rs` dual dispatch — `EagerBackend::Local` (Metal) vs `EagerBackend::Remote` (socket) based on `APPLEGPU_SOCKET` env var
+- [x] Zero changes to `applegpu_backend.cpp` — same C FFI contract
+- [x] gpu-service processes remote ops via LazyRuntime → Metal GPU, returns results over socket
+- [x] Integration tests: add, matmul, Linear, MLP all pass via socket IPC (4 tests in `test_remote_ipc.py`)
+- [ ] Docker container image with bind-mounted Unix socket
+- [ ] Remaining remote ops (layer_norm, embedding, softmax, gelu) for GPT-2 forward via socket
+- [ ] Performance benchmarking (remote vs local overhead)
+- [ ] MPSGraph subgraph capture for fused execution via IPC
 
 ### PRIORITY 2: Stable Diffusion / `group_norm`
 _One new kernel unlocks a whole model class._
@@ -213,13 +217,17 @@ _One new kernel unlocks a whole model class._
 - [ ] Stable Diffusion model wrapper + weight loading
 - [ ] End-to-end image generation test
 
-### PRIORITY 3: Models on PrivateUse1 — IN PROGRESS
+### PRIORITY 3: Models on PrivateUse1 — GPT-2 FORWARD DONE
 _Prove the C++ backend works beyond MLP._
 - [x] Transformer block on PrivateUse1 — multi-head attention + MLP, matches CPU to 5e-7
-- [x] GPT-2 core ops: embedding, layer_norm, gelu, softmax, bmm/matmul, permute, slice, transpose, addmm, mul.Scalar
+- [x] GPT-2 core ops: embedding, layer_norm, gelu, softmax, bmm/matmul, permute, slice, transpose, addmm, mul.Scalar, div.Scalar
 - [x] View offset fix: binary_op passes byte offsets for sliced tensors
 - [x] Deferred free: scalar_mul buffer lifecycle managed via pending_frees + flush_and_release_pending
-- [ ] GPT-2 full model: weight loading + generation loop + end-to-end test
+- [x] Tiled 32×32 matmul kernel with threadgroup shared memory — 2.5x GPT-2 speedup
+- [x] div.Scalar + Float64 div fix — `x / 2.0` no longer crashes (was sending Float64 to Metal)
+- [x] add/sub scalar Float64 fix — `x + 1.0` crashed (Float64 scalar tensor → Metal). Fixed via copy + add_scaled_inplace
+- [x] GPT-2 12-layer (124M params) forward pass end-to-end on `device='applegpu'`
+- [x] HuggingFace GPT-2 text generation — `GPT2LMHeadModel.from_pretrained('gpt2').to('applegpu')` generates text matching CPU exactly (6.8 tok/s)
 - [ ] Whisper on PrivateUse1 — requires conv1d in eager path
 - [ ] Audit remaining CPU fallbacks for each model
 
@@ -282,6 +290,13 @@ _Design spec: `docs/superpowers/specs/2026-03-22-mpsgraph-integration-design.md`
 
 **Current: 40% faster than per-op compiled, 3x slower than C++ dispatcher (Python tensor wrapping overhead).**
 
+### Tiled Matmul Kernel — DONE
+- [x] 32×32 threadgroup shared memory tiles with cooperative loading and boundary checks
+- [x] `threadgroup_barrier(mem_flags::mem_threadgroup)` between load and compute phases
+- [x] All three matmul dispatch paths use `dispatchThreadgroups` with 32×32 threadgroup size
+- [x] Used for batched matmul (bs>1), MPS for unbatched (bs==1)
+- [x] Result: GPT-2 forward 2.5x faster (seq=32: 84ms → 33ms)
+
 ### Bug Fixes
 - [x] Scalar tensor dtype bug — `empty_strided` allocated 0-dim scalars as UInt8
 - [x] `resize_` dtype — use `applegpu_eager_alloc` with correct dtype
@@ -294,6 +309,9 @@ _Design spec: `docs/superpowers/specs/2026-03-22-mpsgraph-integration-design.md`
 - [x] MPS `transposeRight` square guard — skip for N==M (MPS bug)
 - [x] `binary_op` view byte offset — sliced tensors read from correct buffer position via `encoder.setBuffer(offset:)`
 - [x] `scalar_mul` buffer use-after-free — deferred free via `pending_frees` + `flush_and_release_pending`
+- [x] `div.Tensor` Float64 crash — `x / 2.0` sent Float64 scalar to Metal (unsupported). Fixed: uses `scalar_mul(1/val)` for scalar divisors
+- [x] `div.Scalar` registration — added for explicit scalar division dispatch
+- [x] `add.Tensor` / `sub.Tensor` Float64 scalar crash — `x + 1.0`, `1.0 + x` etc. sent Float64 to Metal. Fixed: scalar add/sub via copy + `add_scaled_inplace`
 
 ---
 
@@ -314,10 +332,11 @@ _MLP training has zero fallback. These are for broader model support._
 - [ ] `where`/`masked_fill` Bool condition enforcement (migration needed)
 
 ### Performance Optimization
-_Current state: 1.45x CPU at h≥1024, MPS is 3.2x. Gap is ~20 per-op kernel launches vs MPS's ~5 fused dispatches._
-- [x] MPSMatrixMultiplication — replaced custom MSL matmul (2.2x improvement at h=4096)
+_Current state: 1.21x CPU at h=4096, MPS is 3.6x. Gap is per-op kernel launches vs MPS's fused graph dispatches._
+- [x] MPSMatrixMultiplication — replaced custom MSL matmul for unbatched (bs==1)
 - [x] MPS transposed matmul — skip contiguity copies for backward transpose views
 - [x] GPU-native mul_.Scalar — scalar_mul + storage swap instead of flush + CPU loop
+- [x] Tiled 32×32 matmul kernel — threadgroup shared memory for batched matmul (2.5x GPT-2 speedup)
 - [ ] Encoder caching — keep MTLComputeCommandEncoder open across same-pipeline dispatches
 - [ ] Fine-grained locking — split `Mutex<EagerRuntime>` per-component
 - [ ] Fused LSTM/GRU kernel — single Metal kernel per timestep for all gates
@@ -330,8 +349,10 @@ _Current state: 1.45x CPU at h≥1024, MPS is 3.2x. Gap is ~20 per-op kernel lau
 
 ### Models
 - [ ] Stable Diffusion — group_norm kernel + model wrapper (PRIORITY 1 above)
-- [ ] GPT-2 inference on PrivateUse1 — requires view fixes for multi-head attention (PRIORITY 2 above)
-- [ ] Whisper on PrivateUse1 — requires conv1d, layer_norm, embedding in eager path (PRIORITY 2 above)
+- [x] GPT-2 forward on PrivateUse1 — 12-layer (124M params) end-to-end, matches CPU to 1e-3
+- [x] GPT-2 HuggingFace weight loading + text generation on PrivateUse1 (6.8 tok/s, matches CPU)
+- [x] GPT-2 KV cache generation — works, but only 1.1x faster (per-op dispatch overhead dominates, not recomputation)
+- [ ] Whisper on PrivateUse1 — requires conv1d in eager path
 - [ ] Fine-tuned model export — save trained weights
 
 ### Training

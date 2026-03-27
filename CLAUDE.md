@@ -85,28 +85,44 @@ Both bottlenecked by output wrapping (torch.empty + memcpy) and flush_and_wait o
 
 **For further speedup**: need kernel fusion (fuse elementwise chains via `lazy.rs` + `fusion.rs`) which reduces op COUNT, not per-op overhead. This is P4 work.
 
-### P4: Competitive Performance with MPS — MPSGraph IN PROGRESS
-MPS is 2-3x faster than us at h≥1024 via MPSGraph whole-graph fusion. Our key differentiator: **MPS doesn't work in Docker containers** (no Metal driver inside Linux). Our architecture bridges Metal on the host to containers via IPC — MPSGraph integration brings Apple's fused GPU perf to containers where `device='mps'` can't reach.
+### P4: Competitive Performance with MPS — TILED MATMUL DONE
+MPS is 2-3x faster than us at h≥1024 via MPSGraph whole-graph fusion. Our key differentiator: **MPS doesn't work in Docker containers** (no Metal driver inside Linux). Our architecture bridges Metal on the host to containers via IPC.
 
 **Done:**
-1. ~~**MPSMatrixMultiplication**~~ — DONE: replaced custom MSL matmul, 2.2x speedup at h=4096 (0.78x → 1.59x CPU)
+1. ~~**MPSMatrixMultiplication**~~ — DONE: replaced custom MSL matmul for unbatched (bs==1)
 2. ~~**MPS transposed matmul**~~ — DONE: skip contiguity copies for backward transpose views
 3. ~~**GPU-native mul_.Scalar**~~ — DONE: scalar_mul + storage swap instead of flush + CPU loop
+4. ~~**Tiled matmul kernel**~~ — DONE: 32×32 threadgroup shared memory tiles with cooperative loading, boundary checks, `threadgroup_barrier`. 2.5x GPT-2 speedup at seq=32. Used for batched matmul (bs>1), MPS for unbatched.
+5. ~~**div.Scalar / Float64 div fix**~~ — DONE: `x / 2.0` crashed (Float64 not supported in MSL). Fixed: scalar div uses `scalar_mul(1/val)` instead of moving Float64 tensor to GPU.
+6. ~~**add/sub scalar Float64 fix**~~ — DONE: `x + 1.0`, `1.0 + x`, `x - 0.5` all crashed (Float64 scalar tensor). Fixed: scalar add/sub via copy + `add_scaled_inplace`.
+7. ~~**GPT-2 full forward pass**~~ — DONE: 12-layer GPT-2 (124M params) runs end-to-end on `device='applegpu'`. 29 Python tests passing.
+8. ~~**HuggingFace GPT-2 text generation**~~ — DONE: `GPT2LMHeadModel.from_pretrained('gpt2').to('applegpu')` loads and generates text matching CPU output exactly. 6.8 tok/s (vs CPU 16.6 tok/s, no KV cache yet).
 
 **MPSGraph integration** (functional, opt-in via `APPLEGPU_MPSGRAPH=1`):
 - Swift `mpsgraph.swift`: deserializes bytecode → MPSGraph ops (all MLP ops)
 - C ABI: `gpu_bridge_mpsgraph_build/run/destroy`
 - Graph caching: FNV-1a hash of (bytecode + shapes), build once / run many (59x speedup over uncached)
 - Square transpose: gatherND index permutation workaround (MPSGraph transposeTensor is no-op for N==M)
-- Tensor ID caching: stable parameter pointers cached across calls
 - Design spec: `docs/superpowers/specs/2026-03-22-mpsgraph-integration-design.md`
-
-**Status: 40% faster than per-op compiled, but 3x slower than C++ dispatcher.** The overhead is `_wrap_output` (torch.empty + memmove per output) — an irreducible Python↔C++ tensor creation boundary. Async encode was tested but slower than sync `graph.run()`.
+- Status: 40% faster than per-op compiled, but 3x slower than C++ dispatcher (output wrapping overhead)
 
 **Remaining for production:**
 - Eliminate `_wrap_output` overhead (needs C++-level tensor creation from Rust buffer)
-- Enable by default when overhead is ≤1.5x C++ dispatcher
-- Container IPC path: gpu-service on host → MPSGraph → Metal GPU
+- Container IPC path: gpu-service on host → Metal GPU
+- KV cache generation: works but only 1.1x faster (per-op dispatch overhead dominates, not recomputation)
+
+**Container IPC path** (P1, functional):
+- `RemoteEagerRuntime` in `crates/core/src/remote_eager.rs`: proxy buffers with stable pointers, op recording, stride-aware view upload, deferred free
+- `eager_ffi.rs` refactored: `EagerBackend::Local` (Metal) vs `EagerBackend::Remote` (socket) dispatched based on `APPLEGPU_SOCKET` env var
+- **Zero changes to `applegpu_backend.cpp`** — same C FFI contract
+- gpu-service on host processes ops via LazyRuntime → Metal GPU, returns results over socket
+- Integration tests: add, matmul, Linear, MLP all pass via socket IPC
+- `python/tests/test_remote_ipc.py` — 4 integration tests
+
+**Remaining for container IPC:**
+- Docker container image with bind-mounted Unix socket
+- Remaining remote ops (layer_norm, sum_dim, embedding, softmax) for GPT-2 via socket
+- Performance benchmarking (remote vs local overhead)
 
 ## Build & Test Commands
 
@@ -177,7 +193,8 @@ make check
 - `crates/python/src/lib.rs` — PyO3 module definition (Python-facing API surface)
 - `python/applegpu_runtime/__init__.py` — Python package entry point (loads PyO3 native extension)
 - `python/applegpu_runtime/compile_backend.py` — Custom FX interpreter for torch.compile (bypasses C++ Dispatcher via ctypes)
-- `python/tests/test_cpp_backend.py` — PrivateUse1 integration tests (16 tests)
+- `python/tests/test_cpp_backend.py` — PrivateUse1 integration tests (30 tests)
+- `python/tests/test_remote_ipc.py` — Container IPC integration tests (4 tests: add, matmul, linear, MLP)
 - `python/tests/test_compile_backend.py` — torch.compile FX interpreter tests (10 tests, backward/training run in subprocesses)
 
 ### Design Specs
@@ -195,23 +212,32 @@ This library must be **hyperoptimized**. Every layer is chosen for maximum perfo
 
 Always prefer the fastest path. Profile before and after changes to performance-critical code.
 
-**Current reality** (MLP benchmark, `python/tests/bench_comparison.py`):
+**Current reality** (MLP training benchmark, `python/tests/bench_comparison.py`):
 ```
 TRAINING (ms/step)       h=64      h=256     h=1024     h=4096
 ----------------------------------------------------------------------
-                 CPU     0.084     0.138     2.593    36.430
-                 MPS     0.273     0.276     0.805    11.213
-            applegpu     2.115     0.705     1.770    25.110
+                 CPU     0.076     0.129     1.657    34.166
+                 MPS     0.271     0.248     0.705     9.435
+            applegpu     0.772     0.811     1.772    28.121
 
 SPEEDUP vs CPU           h=64      h=256     h=1024     h=4096
 ----------------------------------------------------------------------
-                 MPS      0.31x     0.50x     3.22x     3.25x
-            applegpu     0.04x     0.19x     1.47x     1.45x
+                 MPS      0.28x     0.52x     2.35x     3.62x
+            applegpu     0.10x     0.16x     0.94x     1.21x
 ```
-- **applegpu beats CPU at h≥1024** (1.45-1.47x) — MPSMatrixMultiplication for matmul + per-op Metal for elementwise
-- **MPS still ~2x faster** at large sizes — MPSGraph whole-graph fusion vs our ~20 individual Metal kernel launches
-- **Transformer block works** on PrivateUse1 — multi-head attention + MLP, matches CPU to 5e-7
-- **35 Python + 418 Rust tests** passing
+
+**GPT-2 forward** (124M params, 12 layers):
+```
+   Seq   CPU (ms)  applegpu (ms)  Speedup
+     8       31.9           29.8    1.07x
+    32       20.4           33.8    0.60x
+   128       39.8           39.2    1.02x
+```
+- **applegpu beats CPU at h=4096** (1.21x) — tiled matmul + MPS for unbatched matmul
+- **GPT-2 runs end-to-end** on `device='applegpu'` — 12-layer transformer, matches CPU to 1e-3
+- **HuggingFace GPT-2 text generation** — `GPT2LMHeadModel.from_pretrained('gpt2').to('applegpu')` generates text matching CPU exactly (6.8 tok/s, no KV cache)
+- **MPS still ~3x faster** at large sizes — MPSGraph whole-graph fusion
+- **34 Python + 333 Rust tests** passing
 
 ## Development Workflow
 

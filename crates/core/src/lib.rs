@@ -16,6 +16,7 @@ pub mod limits;
 pub mod lazy;
 pub mod ops;
 pub mod pool;
+pub mod remote_eager;
 pub mod scheduler;
 pub mod serial;
 pub mod tensor;

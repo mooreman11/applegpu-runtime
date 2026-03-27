@@ -371,6 +371,129 @@ def test_gpt2_forward():
     assert logits.cpu().argmax(-1).tolist() == ref.argmax(-1).tolist()
 
 
+def test_add_sub_scalar():
+    """add/sub by Python float (Float64 scalar tensor must not go to Metal)."""
+    _load()
+    x = torch.randn(4, 4, device='applegpu')
+    ref = x.cpu()
+    # x + float
+    y = x + 1.5
+    assert torch.allclose(y.cpu(), ref + 1.5, atol=1e-5)
+    # float + x
+    y2 = 2.0 + x
+    assert torch.allclose(y2.cpu(), 2.0 + ref, atol=1e-5)
+    # x - float
+    y3 = x - 0.5
+    assert torch.allclose(y3.cpu(), ref - 0.5, atol=1e-5)
+    # NewGELU formula (the HF activation that triggers this)
+    import math
+    y4 = 0.5 * x * (1.0 + torch.tanh(math.sqrt(2.0 / math.pi) * (x + 0.044715 * torch.pow(x, 3.0))))
+    ref4 = 0.5 * ref * (1.0 + torch.tanh(math.sqrt(2.0 / math.pi) * (ref + 0.044715 * torch.pow(ref, 3.0))))
+    assert torch.allclose(y4.cpu(), ref4, atol=1e-4), \
+        f"NewGELU diff: {(y4.cpu()-ref4).abs().max()}"
+
+
+def test_hf_gpt2_generation():
+    """HuggingFace GPT-2 loads and generates text matching CPU on PrivateUse1."""
+    _load()
+    try:
+        from transformers import GPT2LMHeadModel, GPT2Tokenizer
+    except ImportError:
+        pytest.skip("transformers not installed")
+
+    tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
+    prompt = 'Hello world'
+    input_ids_list = tokenizer.encode(prompt)
+
+    # CPU reference (greedy 5 tokens, no cache)
+    model_cpu = GPT2LMHeadModel.from_pretrained('gpt2').eval()
+    ids_cpu = list(input_ids_list)
+    gen = torch.tensor([ids_cpu])
+    with torch.no_grad():
+        for _ in range(5):
+            out = model_cpu(gen)
+            nt = out.logits[:, -1:].argmax(-1)
+            ids_cpu.append(nt[0, 0].item())
+            gen = torch.tensor([ids_cpu])
+
+    # applegpu (greedy 5 tokens, no cache)
+    model_gpu = GPT2LMHeadModel.from_pretrained('gpt2').to('applegpu').eval()
+    ids_gpu = list(input_ids_list)
+    gen = torch.tensor([ids_gpu], device='applegpu')
+    with torch.no_grad():
+        for _ in range(5):
+            out = model_gpu(gen)
+            nt = out.logits[:, -1:].argmax(-1)
+            ids_gpu.append(nt[0, 0].cpu().item())
+            gen = torch.tensor([ids_gpu], device='applegpu')
+
+    cpu_text = tokenizer.decode(ids_cpu)
+    gpu_text = tokenizer.decode(ids_gpu)
+    assert cpu_text == gpu_text, f"CPU: {cpu_text!r} != GPU: {gpu_text!r}"
+
+
+def test_hf_gpt2_kv_cache():
+    """HuggingFace GPT-2 with KV cache generates text matching CPU."""
+    _load()
+    try:
+        from transformers import GPT2LMHeadModel, GPT2Tokenizer
+    except ImportError:
+        pytest.skip("transformers not installed")
+
+    tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
+    prompt = 'The capital of'
+    input_ids_list = tokenizer.encode(prompt)
+
+    # CPU with KV cache
+    model_cpu = GPT2LMHeadModel.from_pretrained('gpt2').eval()
+    ids_cpu = list(input_ids_list)
+    past = None
+    with torch.no_grad():
+        out = model_cpu(torch.tensor([ids_cpu]), use_cache=True)
+        past = out.past_key_values
+        nt = out.logits[:, -1:].argmax(-1)
+        ids_cpu.append(nt[0, 0].item())
+        for _ in range(4):
+            out = model_cpu(nt, past_key_values=past, use_cache=True)
+            past = out.past_key_values
+            nt = out.logits[:, -1:].argmax(-1)
+            ids_cpu.append(nt[0, 0].item())
+
+    # applegpu with KV cache
+    model_gpu = GPT2LMHeadModel.from_pretrained('gpt2').to('applegpu').eval()
+    ids_gpu = list(input_ids_list)
+    past = None
+    with torch.no_grad():
+        out = model_gpu(
+            torch.tensor([ids_gpu], device='applegpu'), use_cache=True)
+        past = out.past_key_values
+        nt = out.logits[:, -1:].argmax(-1)
+        ids_gpu.append(nt[0, 0].cpu().item())
+        for _ in range(4):
+            out = model_gpu(nt, past_key_values=past, use_cache=True)
+            past = out.past_key_values
+            nt = out.logits[:, -1:].argmax(-1)
+            ids_gpu.append(nt[0, 0].cpu().item())
+
+    cpu_text = tokenizer.decode(ids_cpu)
+    gpu_text = tokenizer.decode(ids_gpu)
+    assert cpu_text == gpu_text, f"CPU: {cpu_text!r} != GPU: {gpu_text!r}"
+
+
+def test_div_scalar():
+    """div by Python float (dispatches through div.Tensor with Float64 scalar)."""
+    _load()
+    x = torch.randn(4, 4, device='applegpu')
+    ref = x.cpu() / 8.0
+    y = x / 8.0
+    assert torch.allclose(y.cpu(), ref, atol=1e-5), \
+        f"div scalar diff: {(y.cpu()-ref).abs().max()}"
+    # Also test div.Scalar explicitly
+    y2 = torch.ops.aten.div.Scalar(x, 3.0)
+    ref2 = x.cpu() / 3.0
+    assert torch.allclose(y2.cpu(), ref2, atol=1e-5)
+
+
 def test_eager_add_via_ffi():
     """Proof that eager Metal dispatch works end-to-end.
 
